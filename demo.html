@@ -1,0 +1,1582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>真实空间数据多车协同派发中心</title>
+    <!-- 拉取本地 Python 解析好的脱水地图模型 -->
+    <script src="map_data.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b1120;
+            --panel-bg: rgba(15, 23, 42, 0.9);
+            --text-color: #f8fafc;
+            --accent: #0ea5e9;
+            --btn-bg: #2563eb;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Inter', system-ui, sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            background-image:
+                radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.3) 0%, transparent 80%),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 100%, 40px 40px, 40px 40px;
+        }
+
+        .container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+        }
+
+        .canvas-area {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+
+        canvas:active {
+            cursor: grabbing;
+        }
+
+        .panel {
+            width: 440px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(20px);
+            border-left: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0 0 4px 0;
+            color: #fff;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.2s;
+            box-shadow: 0 4px 15px rgba(37, 99, 235, 0.4);
+            width: 100%;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.6);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .logs-container {
+            height: 160px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .log-item {
+            font-size: 12px;
+            padding: 10px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.03);
+            border-left: 3px solid #64748b;
+            line-height: 1.5;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+        }
+
+        .vehicle-card {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            text-align: center;
+        }
+
+        .vehicle-title {
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .vehicle-load {
+            font-size: 18px;
+            font-weight: bold;
+            color: #cbd5e1;
+        }
+
+        .eta-panel {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .status-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .vehicle-eta-section {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .vehicle-eta-title {
+            font-size: 13px;
+            font-weight: bold;
+            margin-bottom: 2px;
+        }
+
+        .tips {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        .speed-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .speed-btn {
+            background: rgba(255, 255, 255, 0.06);
+            color: #94a3b8;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.15s;
+        }
+
+        .speed-btn:hover {
+            background: rgba(255, 255, 255, 0.12);
+            color: #f8fafc;
+        }
+
+        .speed-btn.active {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            color: #fff;
+            border-color: #3b82f6;
+            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+        }
+
+        /* 新增：统计数据中心模态框样式 */
+        #statsModal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 85%;
+            height: 80%;
+            background: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            z-index: 1000;
+            display: none;
+            flex-direction: column;
+            padding: 20px;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
+        }
+
+        #statsModal .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        #statsModal .content {
+            flex: 1;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #10b981;
+            border-radius: 8px;
+            white-space: pre-wrap;
+        }
+
+        .cancel-btn {
+            background: #ef4444;
+            color: #fff;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .cancel-btn:hover {
+            background: #dc2626;
+            transform: scale(1.05);
+        }
+
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .stats-table th {
+            background: rgba(255, 255, 255, 0.1);
+            color: #94a3b8;
+            padding: 10px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .stats-table td {
+            padding: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            color: #e2e8f0;
+        }
+
+        .stats-table tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .manual-active {
+            outline: 3px solid #10b981 !important;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="canvas-area" id="canvasWrapper">
+            <canvas id="simCanvas"></canvas>
+            <div class="tips">🖱️ 支持鼠标滚轮缩放与拖拽平移路网</div>
+        </div>
+
+        <div class="panel">
+            <div class="header">
+                <h1>🌐 SHP高精路网三车指派中心</h1>
+                <div style="font-size:12px; color:#94a3b8">✅ 坐标吸附系统 | ✅ 全局分配</div>
+            </div>
+
+            <div class="status-grid" id="vPanel"></div>
+
+            <div class="speed-controls" id="speedControls">
+                <span style="font-size:12px; color:#94a3b8; margin-right:4px;">⏱ 倍速:</span>
+                <button class="speed-btn active" onclick="setSpeed(1, this)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(2, this)">2x</button>
+                <button class="speed-btn" onclick="setSpeed(5, this)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10, this)">10x</button>
+                <button class="speed-btn" onclick="setSpeed(50, this)">50x</button>
+                <button class="speed-btn" onclick="setSpeed(100, this)">100x</button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px;">
+                <button onclick="generateWildOrder()" class="btn">🚀 模拟野外发起</button>
+                <button onclick="batchGenerateOrders(10)" class="btn"
+                    style="background: linear-gradient(135deg, #6366f1, #8b5cf6);">批量+10</button>
+                <button onclick="batchGenerateOrders(20)" class="btn"
+                    style="background: linear-gradient(135deg, #4f46e5, #7c3aed);">批量+20</button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <button onclick="toggleManualMode(this)" class="btn" style="background: #10b981;">🖱️ 手动选点下单</button>
+                <button onclick="openStatsModal()" class="btn" style="background: #8b5cf6;">📊 运营数据中心</button>
+            </div>
+
+            <h3 style="font-size:13px; margin: 0; color:#cbd5e1; display:flex; justify-content:space-between;">
+                <span>🎯 在线订单详细跟踪(ETA)</span>
+            </h3>
+            <div class="eta-panel" id="orderStatusPanel"></div>
+
+            <h3 style="font-size:13px; margin: 0; color:#cbd5e1;">⚡ 调度审计系统日志</h3>
+            <div class="logs-container" id="logPanel"></div>
+        </div>
+    </div>
+
+    <!-- 统计模态框 -->
+    <div id="statsModal">
+        <div class="header">
+            <h2 style="margin:0; font-size:18px;">📊 运营中心实时流水审计</h2>
+            <div style="display:flex; gap:10px;">
+                <button onclick="downloadCSV()" class="btn"
+                    style="background:#10b981; padding:6px 15px; font-size:13px;">📥 导出 CSV</button>
+                <button onclick="closeStatsModal()" class="speed-btn">关闭窗口</button>
+            </div>
+        </div>
+        <div class="content" id="statsContent" style="padding:0; overflow:hidden;">
+            <div style="width:100%; height:100%; overflow:auto;" id="statsTableWrapper">
+                <!-- 表格将在此渲染 -->
+                <div style="padding:20px; color:#94a3b8;">暂无流水数据...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        if (typeof window.MAP_DATA === 'undefined') {
+            alert("严重错误: 找不到 map_data.js!\n请您务必先在 Python 终端里执行一次 `python main.py` 来从 SHP 源文件中提取图论数据。");
+            throw new Error("Missing Map Data");
+        }
+
+        const logPanel = document.getElementById('logPanel');
+        const orderStatusPanel = document.getElementById('orderStatusPanel');
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const wrapper = document.getElementById('canvasWrapper');
+
+        // ========== 新增：运营数据中心与手动模式状态管理 ========== //
+        let orderDataStore = {}; // 存储所有订单的实时业务流水数据
+        let manualOrderState = { active: false, step: 0, pNode: null };
+
+        function generateRandomID(length) {
+            let res = '';
+            for (let i = 0; i < length; i++) res += Math.floor(Math.random() * 10);
+            return res;
+        }
+
+        // 辅助：获取实时时间格式
+        function getRealDateTime() {
+            const now = new Date();
+            const Y = now.getFullYear();
+            const M = String(now.getMonth() + 1).padStart(2, '0');
+            const D = String(now.getDate()).padStart(2, '0');
+            const h = String(now.getHours()).padStart(2, '0');
+            const m = String(now.getMinutes()).padStart(2, '0');
+            const s = String(now.getSeconds()).padStart(2, '0');
+            return {
+                date: `${Y}-${M}-${D}`,
+                time: `${Y}-${M}-${D} ${h}:${m}:${s}`
+            };
+        }
+
+        window.openStatsModal = function () {
+            const modal = document.getElementById('statsModal');
+            const wrapper = document.getElementById('statsTableWrapper');
+            modal.style.display = 'flex';
+
+            let records = Object.values(orderDataStore).sort((a, b) => b.呼单时间.localeCompare(a.呼单时间));
+
+            if (records.length === 0) {
+                wrapper.innerHTML = `<div style="padding:20px; color:#94a3b8;">暂无流水数据...</div>`;
+                return;
+            }
+
+            const headers = Object.keys(records[0]);
+            let tableHtml = `<table class="stats-table"><thead><tr>`;
+            headers.forEach(h => tableHtml += `<th>${h}</th>`);
+            tableHtml += `</tr></thead><tbody>`;
+
+            records.forEach(r => {
+                tableHtml += `<tr>`;
+                headers.forEach(h => tableHtml += `<td>${r[h] || ''}</td>`);
+                tableHtml += `</tr>`;
+            });
+            tableHtml += `</tbody></table>`;
+            wrapper.innerHTML = tableHtml;
+        };
+
+        window.downloadCSV = function () {
+            let records = Object.values(orderDataStore).sort((a, b) => b.呼单时间.localeCompare(a.呼单时间));
+            if (records.length === 0) return;
+
+            const headers = Object.keys(records[0]);
+            let csvContent = headers.join(',') + '\n';
+
+            records.forEach(r => {
+                let row = headers.map(h => {
+                    let val = (r[h] || '').toString().replace(/"/g, '""');
+                    return `"${val}"`;
+                });
+                csvContent += row.join(',') + '\n';
+            });
+
+            // 增加 UTF-8 BOM 确保 Excel 正确识别中文
+            const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", `运营审计流水_${getRealDateTime().date}.csv`);
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        };
+        window.closeStatsModal = function () {
+            document.getElementById('statsModal').style.display = 'none';
+        };
+        window.toggleManualMode = function (btn) {
+            manualOrderState.active = !manualOrderState.active;
+            manualOrderState.step = 0;
+            manualOrderState.pNode = null;
+            if (manualOrderState.active) {
+                btn.classList.add('manual-active');
+                addLog('🖱️ 手动模式已开启：请点击地图上的【白色站点】选择上车点。', '#10b981');
+                canvas.style.cursor = 'crosshair';
+            } else {
+                btn.classList.remove('manual-active');
+                addLog('🖱️ 手动模式已关闭。');
+                canvas.style.cursor = 'grab';
+            }
+        };
+
+        // 核心：升级为事件委托机制，显著提升取消按钮的响应灵敏度
+        orderStatusPanel.addEventListener('click', e => {
+            if (e.target.classList.contains('cancel-btn')) {
+                const orderId = parseInt(e.target.dataset.orderId);
+                if (!isNaN(orderId)) {
+                    cancelOrder(orderId);
+                }
+                e.stopPropagation();
+            }
+        });
+        let scale = 1.0;
+        let panX = 0;
+        let panY = 0;
+
+        function resizeCanvas() {
+            // 利用 window.devicePixelRatio 使 Canvas 清晰度适配 Retina 屏
+            let dpr = window.devicePixelRatio || 1;
+            canvas.width = wrapper.clientWidth * dpr;
+            canvas.height = wrapper.clientHeight * dpr;
+
+            // 我们为了初次居中，强行定义虚拟空间 1000 x 800，并计算初始盘移位
+            let vw = 1000, vh = 800;
+            scale = Math.min((wrapper.clientWidth * dpr) / vw, (wrapper.clientHeight * dpr) / vh) * 0.9;
+            panX = (canvas.width - vw * scale) / 2;
+            panY = (canvas.height - vh * scale) / 2;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        let isDragging = false;
+        let startDrag = { x: 0, y: 0 };
+        canvas.addEventListener('mousedown', e => {
+            if (manualOrderState.active) {
+                // 将屏幕坐标转换为画布坐标，并撤并 pan/scale 偏移
+                const rect = canvas.getBoundingClientRect();
+                const dpr = window.devicePixelRatio;
+                const mx = (e.clientX - rect.left) * dpr;
+                const my = (e.clientY - rect.top) * dpr;
+                const worldX = (mx - panX) / scale;
+                const worldY = (my - panY) / scale;
+
+                // 寻找最近的 POI
+                let bestNode = null;
+                let minDist = Infinity;
+                MAP_DATA.pois.forEach(id => {
+                    let n = nodes[id];
+                    let d = Math.hypot(n.x - worldX, n.y - worldY);
+                    if (d < minDist) { minDist = d; bestNode = n; }
+                });
+
+                if (bestNode && minDist < 50.0 / scale) {
+                    if (manualOrderState.step === 0) {
+                        manualOrderState.pNode = bestNode;
+                        manualOrderState.step = 1;
+                        addLog(`📍 已选择起点：【${bestNode.name}】，请点击选择终点。`, '#10b981');
+                    } else {
+                        let dNode = bestNode;
+                        if (dNode === manualOrderState.pNode) {
+                            addLog('❌ 终点不能与起点相同，请重新选择。', '#ef4444');
+                        } else {
+                            addLog(`🏁 已选择终点：【${dNode.name}】。正在发起订单...`, '#10b981');
+                            submitOrder(manualOrderState.pNode, dNode);
+                            manualOrderState.step = 0;
+                            manualOrderState.pNode = null;
+                        }
+                    }
+                }
+                return;
+            }
+            isDragging = true;
+            startDrag = { x: e.clientX * window.devicePixelRatio - panX, y: e.clientY * window.devicePixelRatio - panY };
+        });
+        canvas.addEventListener('mousemove', e => {
+            if (isDragging) {
+                panX = e.clientX * window.devicePixelRatio - startDrag.x;
+                panY = e.clientY * window.devicePixelRatio - startDrag.y;
+            }
+        });
+        canvas.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('mouseleave', () => isDragging = false);
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            let mouseX = (e.clientX - canvas.getBoundingClientRect().left) * window.devicePixelRatio;
+            let mouseY = (e.clientY - canvas.getBoundingClientRect().top) * window.devicePixelRatio;
+            let zoomIntensity = 0.1;
+            let wheel = e.deltaY < 0 ? 1 : -1;
+            let zoomFactor = Math.exp(wheel * zoomIntensity);
+
+            panX = mouseX - (mouseX - panX) * zoomFactor;
+            panY = mouseY - (mouseY - panY) * zoomFactor;
+            scale *= zoomFactor;
+        }, { passive: false });
+
+
+        function addLog(msg, color = '#64748b') {
+            const el = document.createElement('div');
+            el.className = 'log-item';
+            el.style.borderLeftColor = color;
+            el.innerHTML = `<span style="font-size:10px; color:#94a3b8">系统时间 ${sysTime.toFixed(1)}s</span><br/>${msg}`;
+            logPanel.prepend(el);
+        }
+
+        // ========== 地理框架计算区 ========== //
+        let minLon = Infinity, maxLon = -Infinity;
+        let minLat = Infinity, maxLat = -Infinity;
+
+        const nodes = {};
+        for (let id in MAP_DATA.nodes) {
+            let n = MAP_DATA.nodes[id];
+            // 修复：补齐 name 属性，解决 undefined 报错
+            nodes[id] = { id: id, lon: n.lon, lat: n.lat, zone: n.zone, is_poi: n.is_poi, name: n.name, neighbors: [] };
+            if (n.lon < minLon) minLon = n.lon;
+            if (n.lon > maxLon) maxLon = n.lon;
+            if (n.lat < minLat) minLat = n.lat;
+            if (n.lat > maxLat) maxLat = n.lat;
+        }
+
+        // 构建强制依据真路况法则约束的【图论有向连通图】
+        const edges = MAP_DATA.edges;
+        for (let e of edges) {
+            // 所有压入这里的领居节点均由后端根据 Oneway(FT/B) 进行合法性过筛
+            // 我们不能再暴力写入节点的逆向通道了，以此彻底约束寻路 A* 切勿发生逆向违规。
+            nodes[e.u].neighbors.push({ id: e.v, dist: e.dist });
+        }
+
+        // 将经纬度向初始化的 1000x800 世界级沙盘映射绑定固化
+        for (let id in nodes) {
+            let x = (nodes[id].lon - minLon) / (maxLon - minLon) * 1000;
+            let y = 800 - ((nodes[id].lat - minLat) / (maxLat - minLat) * 800); // 纬度坐标系屏幕翻转
+            nodes[id].x = x;
+            nodes[id].y = y;
+        }
+
+        function haversineDist(lon1, lat1, lon2, lat2) {
+            const R = 6371000;
+            const r = Math.PI / 180;
+            let dLat = (lat2 - lat1) * r;
+            let dLon = (lon2 - lon1) * r;
+            let a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.sin(dLon / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        // A* 高效寻路 (基于经纬物理图距离)
+        function getPath(startId, endId) {
+            if (startId === endId) return { dist: 0, path: [nodes[startId]] };
+            let openSet = [{ f: 0, g: 0, id: startId }];
+            let cameFrom = {};
+            let gScore = {}; gScore[startId] = 0;
+            let endN = nodes[endId];
+
+            while (openSet.length > 0) {
+                // 用 O(N) 线性查找加尾部替换法代替每一次都全数组的 O(N logN) 对象排序
+                // 因为 JS 的 V8 引擎对于大量对象的密集 sort 开销极高，会导致明显的 GC 卡顿
+                let minIdx = 0;
+                for (let i = 1; i < openSet.length; i++) {
+                    if (openSet[i].f < openSet[minIdx].f) minIdx = i;
+                }
+                let curr = openSet[minIdx];
+                openSet[minIdx] = openSet[openSet.length - 1]; // 交换极速删除
+                openSet.pop();
+
+                if (curr.id === endId) {
+                    let path = [];
+                    let step = curr.id;
+                    while (step) { path.push(nodes[step]); step = cameFrom[step]; }
+                    path.reverse();
+                    return { dist: gScore[curr.id], path: path };
+                }
+
+                for (let ne of nodes[curr.id].neighbors) {
+                    let tg = gScore[curr.id] + ne.dist;
+                    if (gScore[ne.id] === undefined || tg < gScore[ne.id]) {
+                        cameFrom[ne.id] = curr.id;
+                        gScore[ne.id] = tg;
+                        let nn = nodes[ne.id];
+                        let f = tg + haversineDist(nn.lon, nn.lat, endN.lon, endN.lat);
+                        openSet.push({ f: f, g: tg, id: ne.id });
+                    }
+                }
+            }
+            return { dist: Infinity, path: [] };
+        }
+
+        // 全局物理路径测算极速缓存拦截！
+        // 这是由于每塞入一个单，模拟算子起码要预测几十条不同的排列组合走法，A*若不加缓存势必卡死主线程
+        const pathCache = {};
+        function getCachedPath(startId, endId) {
+            if (startId === endId) return { dist: 0, path: [nodes[startId]] };
+            let key = startId + "|" + endId;
+            if (pathCache[key]) return pathCache[key];
+
+            let res = getPath(startId, endId);
+            pathCache[key] = res;
+            return res;
+        }
+
+        // ========== 调度引擎逻辑 ========== //
+        const SPEED = MAP_DATA.speed_mps; // 8.33 m/s = 30km/h
+        const CAPACITY = 10;
+        let sysTime = 0.0;
+        let orderCounter = 1;
+
+        // 开启多车指派协同模式：从 MAP_DATA 数据源中动态加载全部出勤车组
+        let fleet = MAP_DATA.fleet.map(vData => {
+            let n = nodes[vData.start_node];
+            return {
+                id: vData.id, color: vData.color, zone: vData.zone, capacity: CAPACITY,
+                time: 0.0, onBoardOrders: [], plannedRoute: [],
+                lastNode: n, nextNode: n, x: n.x, y: n.y, pathQueue: [],
+                waitingSince: null,
+                // 新增状态机：疲劳监控与休眠状态
+                drivingTime: 0.0,
+                isRestRequested: false,
+                isResting: false,
+                restTimer: 0.0
+            };
+        });
+
+        // 用以支持界面明细挂载的订单大表和缓存池
+        let activeOrders = [];
+        let orderPool = []; // 【匹配中】缓存池：无法登上的未分配订单
+        let poolUpdateTimer = 0.0;
+
+        function formatTime(sec) {
+            let m = Math.floor(sec / 60);
+            let s = Math.floor(sec % 60);
+            return `${m}分${s}秒`;
+        }
+
+        // 接管来自 UI 的主动休息指令
+        window.requestRest = function (vid) {
+            let v = fleet.find(f => f.id === vid);
+            if (v && !v.isResting && !v.isRestRequested) {
+                v.isRestRequested = true;
+                addLog(`☕ 司机 ${vid} 点击主动休息开关，将于清空当前车厢后挂起接单静默五分钟...`, '#f59e0b');
+                renderFleetCards();
+            }
+        };
+
+        function renderFleetCards() {
+            let html = '';
+            fleet.forEach(v => {
+                let statusText = '';
+                let btnHtml = '';
+                let borderColor = v.color;
+
+                if (v.isResting) {
+                    statusText = `<span style="color:#f59e0b">休整中 (剩 ${formatTime(300 - v.restTimer)})</span>`;
+                    borderColor = '#475569'; // 灰暗色调表示下工
+                    btnHtml = `<button disabled class="speed-btn" style="opacity:0.5; padding:2px 8px; cursor:not-allowed;">休整中</button>`;
+                } else if (v.isRestRequested) {
+                    statusText = `<span style="color:#ef4444">收车中...等下客</span>`;
+                    btnHtml = `<button disabled class="speed-btn" style="opacity:0.5; padding:2px 8px; cursor:not-allowed;">预备休息</button>`;
+                } else {
+                    statusText = `已行驶: ${formatTime(v.drivingTime)}`;
+                    btnHtml = `<button class="speed-btn" style="padding:2px 8px;" onclick="requestRest('${v.id}')">主动休息</button>`;
+                    if (v.drivingTime >= 600) {
+                        statusText += ` <span style="color:#ef4444; font-weight:bold">(超时警告)</span>`;
+                    }
+                }
+
+                html += `<div class="vehicle-card" style="border-bottom: 3px solid ${borderColor};">
+                <div style="display:flex; justify-content:space-between; align-items:center; width:100%">
+                    <div class="vehicle-title" style="color:${borderColor}">${v.id}</div>
+                    ${btnHtml}
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-top:5px; color:#94a3b8">
+                    <div>${statusText}</div>
+                    <div class="vehicle-load">${v.onBoardOrders.length}<span style="font-size:10px;color:#64748b"> / 10</span></div>
+                </div>
+            </div>`;
+            });
+            document.getElementById('vPanel').innerHTML = html;
+        }
+
+        function evaluateRoute(route, vehicle) {
+            let sl = vehicle.lastNode;
+            let sn = vehicle.nextNode;
+
+            let firstDist = 0;
+            if (sl.id !== sn.id) {
+                firstDist = haversineDist(sl.lon, sl.lat, sn.lon, sn.lat) - haversineDist(nodes[sl.id].x, nodes[sl.id].y, vehicle.x, vehicle.y) * MAP_DATA.speed_mps;
+                let ln = Math.hypot(sn.x - sl.x, sn.y - sl.y), vn = Math.hypot(sn.x - vehicle.x, sn.y - vehicle.y);
+                let streetLen = 1.0;
+                for (let ne of sl.neighbors) { if (ne.id === sn.id) streetLen = ne.dist; }
+                firstDist = streetLen * (vn / (ln || 1));
+            }
+
+            let simT = vehicle.time + firstDist / SPEED;
+            let pickT = {}, arrT = {};
+            let cl = vehicle.onBoardOrders.length;
+            let zonePenalty = 0.0;
+
+            // 将无差别距离拆分为空驶与载客两大运营指标
+            let emptyDist = 0.0;
+            let loadedDist = 0.0;
+            if (cl === 0) emptyDist += firstDist;
+            else loadedDist += firstDist;
+
+            for (let step of route) {
+                let o = step.order;
+                let tg = step.type === 'P' ? o.pNode : o.dNode;
+                let res = getCachedPath(sn.id, tg.id);
+                if (res.dist === Infinity) return { feasible: false, cost: Infinity };
+
+                if (cl === 0) emptyDist += res.dist;
+                else loadedDist += res.dist;
+
+                simT += res.dist / SPEED;
+                sn = tg;
+
+                if (tg.zone !== vehicle.zone) zonePenalty += 300.0;
+
+                if (step.type === 'P') {
+                    cl++; if (cl > vehicle.capacity) return { feasible: false, cost: Infinity };
+                    pickT[o.id] = simT;
+                } else {
+                    cl--; if (cl < 0) return { feasible: false, cost: Infinity };
+                    arrT[o.id] = simT;
+                }
+            }
+
+            // ===== 终极综合多目标成本函数架构 (Comprehensive Cost Function) =====
+            const ALPHA_1 = 2.0;    // 空驶里程参数
+            const ALPHA_2 = 0.5;    // 载客有效里程参数
+            const BETA = 3.0;       // 站牌下乘客枯等耗时参数
+            const GAMMA = 4.0;      // 车内乘客被拉着绕路耗时参数
+            const OMEGA = Infinity;        // SLA 红线超额一票否决
+            const THETA = 1500.0;   // 防止老客户被新订单频繁插队参数
+
+            let cost = ALPHA_1 * emptyDist + ALPHA_2 * loadedDist + zonePenalty;
+
+            for (let step of route) {
+                let o = step.order;
+                if (step.type === 'P') {
+                    let waitTime = pickT[o.id] - o.reqTime;
+                    cost += BETA * waitTime;
+
+                    if (pickT[o.id] > o.maxPickupTime) return { feasible: false, cost: OMEGA };
+                } else {
+                    // 核心修复：如果是已在车上的订单，其 pickT[o.id] 在当前推演中是 undefined
+                    // 我们使用其下单时记录的真实接人时间 (actualPickTime) 进行耗时计算
+                    let startTime = pickT[o.id] || o.actualPickTime || vehicle.time;
+                    let inCarTime = arrT[o.id] - startTime;
+                    cost += GAMMA * inCarTime;
+
+                    if (arrT[o.id] > o.maxArrivalTime) return { feasible: false, cost: OMEGA };
+                }
+            }
+
+            for (let onboardUser of vehicle.onBoardOrders) {
+                let extraInCarTime = arrT[onboardUser.id] - vehicle.time;
+                cost += GAMMA * extraInCarTime;
+
+                // 强制护盾：防止车上的老客户频繁的被新订单插到前面
+                if (extraInCarTime > 180.0) {
+                    cost += THETA;
+                }
+            }
+
+            return { feasible: true, cost: cost, pickT: pickT, arrT: arrT };
+        }
+
+        function insertOrderForVehicle(v, order) {
+            let bestR = null, bestC = Infinity, bestP = null, bestA = null;
+            let r = v.plannedRoute, n = r.length;
+            let pStep = { type: 'P', order: order }, dStep = { type: 'D', order: order };
+            // 贪心插入 (Greedy Insertion)
+            for (let i = 0; i <= n; i++) {
+                let tr1 = [...r.slice(0, i), pStep, ...r.slice(i)];
+                for (let j = i + 1; j <= n + 1; j++) {
+                    let tr2 = [...tr1.slice(0, j), dStep, ...tr1.slice(j)];
+                    let res = evaluateRoute(tr2, v);
+                    if (res.feasible && res.cost < bestC) {
+                        bestC = res.cost; bestR = tr2;
+                        bestP = res.pickT; bestA = res.arrT;
+                    }
+                }
+            }
+
+            // 2-Opt 突变反转寻优阶段：尝试打破已锁定的旧客排序跨空间重构 TSP 路线
+            if (bestR) {
+                let improved = true;
+                let safety = 50;
+                while (improved && safety-- > 0) {
+                    improved = false;
+                    let trLen = bestR.length;
+                    for (let i = 0; i < trLen - 1; i++) {
+                        for (let j = i + 1; j < trLen; j++) {
+                            let mutR = bestR.slice();
+                            let sub = mutR.slice(i, j + 1).reverse();
+                            mutR.splice(i, j - i + 1, ...sub);
+
+                            // 检查由于翻转造成的前后置时间悖论（不能没接到人就去送人）
+                            let valid = true;
+                            let seenP = new Set();
+                            let onboardSet = new Set(v.onBoardOrders.map(x => x.id));
+                            for (let step of mutR) {
+                                if (step.type === 'P') seenP.add(step.order.id);
+                                else {
+                                    if (!seenP.has(step.order.id) && !onboardSet.has(step.order.id)) {
+                                        valid = false; break;
+                                    }
+                                }
+                            }
+                            if (!valid) continue;
+
+                            let res = evaluateRoute(mutR, v);
+                            // 若成本存在哪怕微乎其微的优化，立刻吸纳新的基因重组序列
+                            if (res.feasible && res.cost < bestC - 0.001) {
+                                bestC = res.cost; bestR = mutR;
+                                bestP = res.pickT; bestA = res.arrT;
+                                improved = true; break;
+                            }
+                        }
+                        if (improved) break; // 重新触发大循环大范围扫描翻转
+                    }
+                }
+            }
+
+            return { route: bestR, cost: bestC, pickT: bestP, arrT: bestA };
+        }
+
+        function rebuildPhysics(v) {
+            let seq = [];
+            let curr = v.nextNode;
+
+            for (let step of v.plannedRoute) {
+                let tg = step.type === 'P' ? step.order.pNode : step.order.dNode;
+                let res = getCachedPath(curr.id, tg.id);
+                if (res.path.length === 1) {
+                    seq.push({ node: tg, action: step });
+                } else {
+                    for (let i = 1; i < res.path.length; i++) {
+                        let n = res.path[i];
+                        let isL = (i === res.path.length - 1);
+                        seq.push({ node: n, action: isL ? step : null });
+                    }
+                }
+                curr = tg;
+            }
+            if (v.lastNode.id !== v.nextNode.id) {
+                if (seq.length === 0 || seq[0].node.id !== v.nextNode.id) {
+                    seq.unshift({ node: v.nextNode, action: null });
+                }
+            }
+            v.pathQueue = seq;
+        }
+
+        function submitOrder(pNode, dNode) {
+            if (pNode === dNode) {
+                addLog(`❌ 用户请求由于过近或者偏远被共同吸附至同一POI，已驳回合规要求。`, '#ef4444');
+                return;
+            }
+
+            // 注射柔性惩罚线：计算直线最短路耗时并加上极大的容忍溢价缓冲
+            let directDist = getCachedPath(pNode.id, dNode.id).dist;
+            let directTime = directDist / SPEED;
+
+            // 核心修复：单车跑全城的物理耗时太高，原先的 10 分钟死锁墙很容易被打破。
+            // 现设定乘客愿意等半个小时（1800s）！以适配目前的低运力全城穿梭实验。
+            let maxPickupTime = sysTime + 3600.0;
+            let maxArrivalSysTime = maxPickupTime + directTime * 2.0 + 300.0;
+
+            // 引入真实物理模拟：该名乘客并非打车瞬间就出现在候车点，而是过个几分钟才慢慢走到。
+            // 极高概率下准时，但给予随机 [0, 400] 秒的步行达到用时（触发司机等单甚至超免责取消的机制）
+            let passengerReadyTime = sysTime + Math.random() * 10.0;
+
+            let order = {
+                id: orderCounter++, pNode: pNode, dNode: dNode, reqTime: sysTime,
+                maxPickupTime: maxPickupTime, maxArrivalTime: maxArrivalSysTime,
+                passengerMaxWait: 3600.0, vehicleMaxWait: 180.0, passengerReadyTime: passengerReadyTime,
+
+                // 业务元数据
+                businessId: generateRandomID(14),
+                journeyId: generateRandomID(19),
+                passengerId: generateRandomID(13),
+                answerTime: null,
+                actualPickTime: null,
+                completionTime: null,
+                cancelTime: null,
+                cancelType: "未取消",
+                status: "订单匹配中",
+                vAssigned: null,
+                pickupDist: 0,
+                loadedDist: 0
+            };
+
+            const realNow = getRealDateTime();
+
+            // 初始化运营数据记录
+            orderDataStore[order.id] = {
+                "统计日期": realNow.date,
+                "订单id": order.businessId,
+                "订单状态": order.status,
+                "行程id": order.journeyId,
+                "商户名称": "[易搭巴士]广州公交知识城",
+                "运营区域": "广州大学城",
+                "起点名称": pNode.name,
+                "终点名称": dNode.name,
+                "司机id": "", "司机工号": "", "车辆id": "", "车牌号": "",
+                "乘客id": order.passengerId,
+                "呼单时间": realNow.time,
+                "应答时间": "", "上客时间": "", "完单时间": "",
+                "取消类型": order.cancelType, "取消时间": "",
+                "发单乘客人次": "1",
+                "实际接驾里程(米)": "0", "实际接驾时长(分钟)": "0",
+                "乘客计费时长(分钟)": "0", "载客里程(米)": "0",
+                "送驾平均时速(千米/小时)": "0", "接驾平均时速(千米/小时)": "0"
+            };
+
+            function formatSysDate(s) {
+                // 现改为同步实际物理时间的增量
+                const baseDate = new Date();
+                const d = new Date(baseDate.getTime() + (s - sysTime) * 1000);
+                return d.getFullYear() + "-" +
+                    String(d.getMonth() + 1).padStart(2, '0') + "-" +
+                    String(d.getDate()).padStart(2, '0') + " " +
+                    String(d.getHours()).padStart(2, '0') + ":" +
+                    String(d.getMinutes()).padStart(2, '0') + ":" +
+                    String(d.getSeconds()).padStart(2, '0');
+            }
+            order.formatTime = formatSysDate;
+
+            // 取消单向贪婪：由于系统升级为【后悔值算法统筹】，我们将无论什么单都直接打入匹配池中暂存。
+            // 算法会每隔数秒扫描全盘运力和需求，依据“机会成本（Regret差价）”给出全局最稳定的组合方案。
+            orderPool.push(order);
+            activeOrders.push({ order: order, vId: '订单池期待排位', state: 'matching' });
+            addLog(`📡 新单 [单${order.id}] 注入系统统筹池，即将触发最高优先级【后悔值扫描】...`, '#f59e0b');
+
+            // 为了维持前台鼠标点击订单的交互灵敏度，如果时钟刚清零，我们将其垫高达1.5s以加速展示计算结果
+            if (poolUpdateTimer < 1.0) poolUpdateTimer = 1.0;
+
+            renderFleetCards();
+        }
+
+        window.cancelOrder = function (orderId) {
+            let aoIdx = activeOrders.findIndex(x => x.order.id === orderId);
+            if (aoIdx === -1) return;
+            let ao = activeOrders[aoIdx];
+            let o = ao.order;
+
+            if (ao.state === 'running') {
+                addLog(`❌ [单${orderId}] 乘客已在车上，无法中途取消。`, '#ef4444');
+                return;
+            }
+
+            // 更新数据记录
+            o.status = "订单取消";
+            o.cancelType = "乘客端取消";
+            o.cancelTime = sysTime;
+            let record = orderDataStore[o.id];
+            record["订单状态"] = "订单取消";
+            record["取消类型"] = "乘客端取消";
+            record["取消时间"] = getRealDateTime().time;
+
+            // 从池中移除
+            let pIdx = orderPool.findIndex(x => x.id === orderId);
+            if (pIdx !== -1) orderPool.splice(pIdx, 1);
+
+            // 从车辆路径中移除
+            fleet.forEach(v => {
+                let newRoute = v.plannedRoute.filter(step => step.order.id !== orderId);
+                if (newRoute.length !== v.plannedRoute.length) {
+                    v.plannedRoute = newRoute;
+                    rebuildPhysics(v);
+                }
+            });
+
+            activeOrders.splice(aoIdx, 1);
+            addLog(`🛒 [单${orderId}] 已成功取消。`, '#94a3b8');
+            renderFleetCards();
+        }
+
+        window.generateWildOrder = function () {
+            let rLon = minLon + Math.random() * (maxLon - minLon);
+            let rLat = minLat + Math.random() * (maxLat - minLat);
+            let dLon = minLon + Math.random() * (maxLon - minLon);
+            let dLat = minLat + Math.random() * (maxLat - minLat);
+
+            let nearest = (lon, lat) => {
+                let b = null, bd = Infinity;
+                MAP_DATA.pois.forEach(id => {
+                    let p = nodes[id];
+                    let d = haversineDist(lon, lat, p.lon, p.lat);
+                    if (d < bd) { bd = d; b = p; }
+                });
+                return b;
+            };
+
+            let pNode = nearest(rLon, rLat);
+            let dNode = nearest(dLon, dLat);
+            submitOrder(pNode, dNode);
+        };
+
+        window.batchGenerateOrders = function (count) {
+            addLog(`🚀 正在批量生成 ${count} 个随机订单并注入调度系统进行深度竞价...`, '#8b5cf6');
+            for (let i = 0; i < count; i++) {
+                generateWildOrder();
+            }
+        };
+
+        let lastETAContent = "";
+        function updateETA() {
+            let html = '';
+
+            let allPicks = {}, allArrs = {};
+            fleet.forEach(v => {
+                let res = evaluateRoute(v.plannedRoute, v);
+                if (res.pickT) Object.assign(allPicks, res.pickT);
+                if (res.arrT) Object.assign(allArrs, res.arrT);
+            });
+
+            fleet.forEach(v => {
+                html += `<div class="vehicle-eta-section" style="border-left: 3px solid ${v.color};">
+                    <div class="vehicle-eta-title" style="color: ${v.color};">${v.id} 任务追踪卡</div>`;
+
+                if (v.plannedRoute.length === 0) {
+                    html += `<div style="font-size:11px; color:#64748b;">✅ 辖区空闲巡回待命中...</div>`;
+                } else {
+                    v.plannedRoute.forEach(step => {
+                        let o = step.order;
+                        if (step.type === 'P') {
+                            let wait = Math.max(0, (allPicks[o.id] || 0) - sysTime);
+                            html += `<div class="status-item">
+                                <b>[${step.type}]</b> 👉 接驾 <b style="color:#0ea5e9">${o.pNode.name}</b> <small>[单${o.id}]</small>
+                                | <b style="color:#fcd34d">${wait.toFixed(1)}s</b>
+                                <button class="cancel-btn" data-order-id="${o.id}">取消</button>
+                            </div>`;
+                        } else {
+                            let arr = Math.max(0, (allArrs[o.id] || 0) - sysTime);
+                            html += `<div class="status-item" style="border-color: rgba(16,185,129,0.3); background:rgba(16,185,129,0.08);">
+                                <b>[${step.type}]</b> ✔️ 运载中 <b style="color:#10b981">[单${o.id}]</b> 
+                                | <span style="color:#94a3b8">距下车: </span><b style="color:#fcd34d">${arr.toFixed(1)}s</b>
+                            </div>`;
+                        }
+                    });
+                }
+                html += `</div>`;
+            });
+
+            // 只有当内容真正发生变化时（忽略小数点变化），才更新 DOM，极大地减少频繁重绘导致的取消按钮点击丢失
+            let simplifiedHtml = html.replace(/\d+\.\d+s/g, "Xs");
+            if (simplifiedHtml !== lastETAContent) {
+                orderStatusPanel.innerHTML = html;
+                lastETAContent = simplifiedHtml;
+            } else {
+                // 如果内容只是秒数在变，我们精准更新具体的秒数文本（可选，此处暂且直接赋回提高响应）
+                orderStatusPanel.innerHTML = html;
+            }
+        }
+
+        renderFleetCards();
+
+        // 渲染地图：带入全量坐标映射机制以及变焦透视引擎
+        function drawMap() {
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 绑定拖拽与滚轮矩阵变换
+            ctx.translate(panX, panY);
+            ctx.scale(scale, scale);
+
+            // 1. 铺设高亮实体宽大路网线（动态调整其粗细，使放大时路网不会无限膨胀导致糊成一团）
+            ctx.lineWidth = Math.max(0.5, 2.0 / scale);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            for (let e of edges) {
+                let u = nodes[e.u], v = nodes[e.v];
+                ctx.moveTo(u.x, u.y); ctx.lineTo(v.x, v.y);
+            }
+            ctx.stroke();
+
+            let ptRadius = Math.max(2, 4.0 / scale);
+
+            // 2. 绘制全系吸附点 POIs 基站 (更清晰显眼)
+            ctx.fillStyle = '#fff';
+            MAP_DATA.pois.forEach(id => {
+                let p = nodes[id];
+                ctx.beginPath(); ctx.arc(p.x, p.y, ptRadius, 0, 7); ctx.fill();
+                // 在极大放大率下，渲染站点ID
+                if (scale > 2.0) {
+                    ctx.fillStyle = '#94a3b8'; ctx.font = `${6 / scale}px Arial`;
+                    ctx.fillText(id, p.x + ptRadius, p.y - ptRadius);
+                    ctx.fillStyle = '#fff';
+                }
+            });
+
+            // 预计算 P/D 站点重叠偏移量 (防止不同订单落在同一物理坐标死角堆叠)
+            let pointOffsets = new Map();
+            let nodeStackCounter = {};
+            fleet.forEach(v => {
+                v.plannedRoute.forEach((step, idx) => {
+                    let tg = step.type === 'P' ? step.order.pNode : step.order.dNode;
+                    if (!nodeStackCounter[tg.id]) nodeStackCounter[tg.id] = 1;
+                    else nodeStackCounter[tg.id]++;
+                    pointOffsets.set(step, nodeStackCounter[tg.id] * ptRadius * 2.5);
+                });
+            });
+
+            // 3. 车辆和路径光晕渲染
+            fleet.forEach(v => {
+                if (v.pathQueue.length > 0) {
+                    ctx.beginPath();
+                    ctx.moveTo(v.x, v.y);
+                    for (let q of v.pathQueue) ctx.lineTo(q.node.x, q.node.y);
+                    ctx.strokeStyle = v.color;
+                    ctx.lineWidth = Math.max(1.0, 3.0 / scale);
+                    ctx.globalAlpha = 0.6; ctx.stroke(); ctx.globalAlpha = 1.0;
+                }
+
+                let vRad = Math.max(3, 8.0 / scale);
+                ctx.beginPath(); ctx.arc(v.x, v.y, vRad, 0, 7);
+                ctx.fillStyle = v.color; ctx.shadowBlur = 10; ctx.shadowColor = v.color; ctx.fill();
+                ctx.shadowBlur = 0;
+
+                // --- 新增：绘制逻辑接送顺序引导线 ---
+                if (v.plannedRoute.length > 0) {
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.moveTo(v.x, v.y);
+                    v.plannedRoute.forEach((step, idx) => {
+                        let tg = step.type === 'P' ? step.order.pNode : step.order.dNode;
+                        let offset = pointOffsets.get(step);
+                        ctx.lineTo(tg.x, tg.y - offset);
+                    });
+                    ctx.strokeStyle = v.color;
+                    ctx.lineWidth = Math.max(0.5, 1.5 / scale);
+                    ctx.globalAlpha = 0.4;
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.globalAlpha = 1.0;
+                }
+
+                v.plannedRoute.forEach((step, idx) => {
+                    let o = step.order;
+                    let tg = step.type === 'P' ? o.pNode : o.dNode;
+
+                    // 区分展示：根据订单 ID 生成一个浅亮色
+                    ctx.fillStyle = step.type === 'P' ? '#0ea5e9' : '#ef4444';
+
+                    let offset = pointOffsets.get(step);
+                    ctx.beginPath();
+                    ctx.arc(tg.x, tg.y - offset, ptRadius * 1.8, 0, 7);
+                    ctx.fill();
+
+                    // 增加边框以区分不同车辆
+                    ctx.strokeStyle = v.color;
+                    ctx.lineWidth = 2 / scale;
+                    ctx.stroke();
+
+                    // 绘制文字说明：[序号]:[类型][单号末尾]
+                    ctx.fillStyle = '#fff';
+                    ctx.font = `bold ${9 / scale}px Arial`;
+                    let shortId = o.id.toString().slice(-2); // 取单号末两位
+                    let label = `${idx + 1}:${step.type}${shortId}`;
+                    ctx.fillText(label, tg.x - ptRadius * 2, tg.y - offset + ptRadius / 2);
+                });
+            });
+
+            // 4. 展示站点名称
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
+            ctx.font = `${10 / scale}px Arial`;
+            MAP_DATA.pois.forEach(id => {
+                let p = nodes[id];
+                if (scale > 1.5) {
+                    ctx.fillText(p.name || id, p.x + ptRadius, p.y + ptRadius * 3);
+                }
+            });
+
+            // 5. 手动选点高亮
+            if (manualOrderState.active && manualOrderState.pNode) {
+                let p = manualOrderState.pNode;
+                ctx.strokeStyle = '#10b981'; ctx.lineWidth = 4 / scale;
+                ctx.beginPath(); ctx.arc(p.x, p.y, ptRadius * 4, 0, 7); ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+
+        let speedMultiplier = 1;
+        window.setSpeed = function (val, btn) {
+            speedMultiplier = val;
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        };
+
+        let lastTime = performance.now();
+        let etaUpdateTimer = 0;
+        let uiUpdateTimer = 0; // 新增：UI 动态看板刷新时钟
+        function animate() {
+            let now = performance.now();
+            let rawDt = (now - lastTime) / 1000.0;
+            lastTime = now;
+            let dt = rawDt * speedMultiplier;
+            sysTime += dt;
+            etaUpdateTimer += dt;
+
+            // 动态看板实时心跳：每 1 秒更新一次 UI 显示行驶时间
+            uiUpdateTimer += rawDt;
+            if (uiUpdateTimer > 1.0) {
+                renderFleetCards();
+                uiUpdateTimer = 0;
+            }
+
+            // 核心修改：订单池匹配计数器使用真实物理时间 rawDt，确保每 3 秒(人类感官)进行一次全局重排
+            poolUpdateTimer += rawDt;
+
+            // ===== 订单缓冲池实时匹配引擎 (核心升级为主流【后悔值插入法】) =====
+            // 在工业级网约调度中，积累一小批订单通过评估机会成本统一派发，能根本性改善绕路
+            if (poolUpdateTimer > 1.5 && orderPool.length > 0) {
+                poolUpdateTimer = 0;
+
+                // 1. 扫描死单清理（因长期超时无法履约被迫退单的情况）
+                for (let i = orderPool.length - 1; i >= 0; i--) {
+                    let o = orderPool[i];
+                    if (sysTime > o.maxPickupTime) {
+                        orderPool.splice(i, 1);
+                        activeOrders = activeOrders.filter(a => a.order.id !== o.id);
+                        addLog(`🗑️ 乘客 [单${o.id}] 在寒风中等多时未能被运力覆盖，无奈退出软件！`, '#ef4444');
+                        renderFleetCards();
+                    }
+                }
+
+                // 2. 运用【后悔值策略(Regret-Based)】执行全池协同降本派发
+                let assignCount = 0;
+                while (orderPool.length > 0) {
+                    let bestOIdx = -1, maxRegret = -1;
+                    let globalBestV = null, globalBestRoute = null;
+
+                    // 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
+                    for (let i = 0; i < orderPool.length; i++) {
+                        let o = orderPool[i];
+                        let c1 = Infinity, c2 = Infinity, v1 = null, r1 = null;
+
+                        fleet.forEach(v => {
+                            if (v.onBoardOrders.length >= CAPACITY) return;
+                            // ===== 疲劳驾驶与休息拦截限流 =====
+                            if (v.isRestRequested || v.isResting) return; // 本车停止接客接单
+
+                            let res = insertOrderForVehicle(v, o);
+                            let isIdle = v.onBoardOrders.length === 0 && v.plannedRoute.length === 0;
+                            let cost = res.cost;
+
+                            // 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
+                            if (!isIdle && cost > 30000.0) cost = Infinity;
+
+                            // 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2) 
+                            if (cost < c1) {
+                                c2 = c1;
+                                c1 = cost; v1 = v; r1 = res.route;
+                            } else if (cost < c2) {
+                                c2 = cost;
+                            }
+                        });
+
+                        // 没有任何合法运力可以消化他时，跳过本订单评估（可能由于座位爆满或都在绕远路）
+                        if (c1 === Infinity) continue;
+
+                        // 计算后悔值：如果不把这最优车占下，退而求其次选次优车，我系统就要额外承揽这些分数！
+                        // c2 为 Infinity 意味着除了该最优车外无人可接，后悔值极度膨胀达 1e6 (一票护航保量)
+                        let regret = (c2 === Infinity) ? 1e6 : (c2 - c1);
+
+                        // 从茫茫单数中寻找出“最经不起后悔打击”的痛点订单
+                        if (regret > maxRegret) {
+                            maxRegret = regret;
+                            bestOIdx = i; globalBestV = v1; globalBestRoute = r1;
+                        }
+                    }
+
+                    // 如果成功甄别出了王者订单
+                    if (bestOIdx !== -1) {
+                        let targetO = orderPool[bestOIdx];
+
+                        // 正式拍板：将这个单抽离池子，永久锁定在其专属天命车上
+                        orderPool.splice(bestOIdx, 1);
+                        globalBestV.plannedRoute = globalBestRoute;
+                        rebuildPhysics(globalBestV);
+                        assignCount++;
+
+                        // 同步到报表数据源体系（审计合作用）
+                        let record = orderDataStore[targetO.id];
+                        record["订单状态"] = "已接单";
+                        record["应答时间"] = getRealDateTime().time;
+                        record["司机id"] = globalBestV.driver_id;
+                        record["司机工号"] = globalBestV.driver_no;
+                        record["车辆id"] = globalBestV.vehicle_id;
+                        record["车牌号"] = globalBestV.plate_no;
+
+                        // 刷新看板上的车辆占位UI标识
+                        let ao = activeOrders.find(a => a.order.id === targetO.id);
+                        if (ao) { ao.vId = globalBestV.id; ao.state = 'waiting'; }
+
+                        addLog(`🏆 【后悔值拦截】算法差分比对后抢占关键运力防线，[单${targetO.id}] 被 ${globalBestV.id} 优先划拨！`, globalBestV.color);
+                    } else {
+                        // 本轮内部遍历时由于运力皆不满足，放弃并退出循环阻塞，留至 3 秒后的下次检测
+                        break;
+                    }
+                }
+
+                // 如果本轮触发了成功的资源调配，要求面板进行重绘刷新体现负载变更
+                if (assignCount > 0) renderFleetCards();
+            }
+
+            fleet.forEach(v => {
+                // ============== 疲劳与休息状态机时钟管理 ==============
+                if (v.isResting) {
+                    // 当车在休息状态下，不累计驾驶时间，停止物理移动，专注累加休息倒数机制
+                    v.restTimer += dt;
+                    if (v.restTimer >= 300.0) { // 满 5 分钟充能完毕
+                        v.isResting = false;
+                        v.isRestRequested = false;
+                        v.restTimer = 0.0;
+                        v.drivingTime = 0.0; // 完全洗去疲劳值
+                        addLog(`☀️ ${v.id} 休整五分钟完毕！已满血归来，重新回归调度统筹池。`, '#10b981');
+                        renderFleetCards();
+                    }
+                    return; // 跳过后续的物理寻路与接送客循环
+                }
+
+                // 仅当车辆处于【接单干活状态】时，才累加存续行驶时间
+                if (v.onBoardOrders.length > 0 || v.plannedRoute.length > 0 || v.pathQueue.length > 0) {
+                    v.drivingTime += dt;
+                }
+
+                // 极限工态疲劳触发器 (600s = 10分钟)
+                if (v.drivingTime > 600.0 && !v.isRestRequested) {
+                    v.isRestRequested = true;
+                    addLog(`⚠️ 司机 ${v.id} 连续运转突破10分钟阈值！已被调度系统防涉险阻断强制收车。`, '#ef4444');
+                    renderFleetCards();
+                }
+
+                // 收车预备 -> 正式深睡沉淀 判定：身上再无滴滴负债
+                if (v.isRestRequested && v.onBoardOrders.length === 0 && v.plannedRoute.length === 0) {
+                    v.isResting = true;
+                    v.restTimer = 0.0;
+                    addLog(`🌙 ${v.id} 收车卸客完毕，开始为期5分钟的安全休眠锁闭。`, '#64748b');
+                    renderFleetCards();
+                    return; // 首回合转睡时同样冻结物理移动
+                }
+                // ========================================================
+
+                v.time += dt;
+                let remainingMeters = SPEED * dt;
+                let loopSafety = 200;
+
+                while (remainingMeters > 0.001 && v.pathQueue.length > 0 && loopSafety-- > 0) {
+                    let nex = v.pathQueue[0];
+                    v.nextNode = nex.node;
+
+                    let distCanvas = Math.hypot(nex.node.x - v.x, nex.node.y - v.y);
+
+                    let streetLen = 1.0;
+                    for (let ne of v.lastNode.neighbors) {
+                        if (ne.id === v.nextNode.id) streetLen = ne.dist;
+                    }
+
+                    let fullCanvasLen = Math.hypot(v.nextNode.x - v.lastNode.x, v.nextNode.y - v.lastNode.y);
+                    if (fullCanvasLen < 0.001) fullCanvasLen = 1.0;
+
+                    let movePixel = fullCanvasLen * (remainingMeters / streetLen);
+
+                    if (distCanvas <= movePixel) {
+                        let spentMeters = (distCanvas / fullCanvasLen) * streetLen;
+                        remainingMeters -= spentMeters;
+
+                        v.x = v.nextNode.x;
+                        v.y = v.nextNode.y;
+
+                        if (nex.action) {
+                            let step = nex.action;
+                            let ao = activeOrders.find(a => a.order.id === step.order.id);
+
+                            // ===== 触发车辆等待、乘客爽约取消算法 =====
+                            if (step.type === 'P') {
+                                let o = step.order;
+                                // 若车辆早早抵达路口但乘客还在徒步走来图中尚未就绪
+                                if (sysTime < o.passengerReadyTime) {
+                                    if (v.waitingSince === null) {
+                                        v.waitingSince = sysTime; // 记录开始枯等的时间戳
+                                    }
+
+                                    // 容忍度超时判定：车辆干等超过了 vehicleMaxWait 的极值
+                                    if (sysTime - v.waitingSince > o.vehicleMaxWait) {
+                                        addLog(`🚫 乘客 [单${o.id}] 迟到超过 ${o.vehicleMaxWait}s 容忍限度，大巴司机取消该单！`, '#f43f5e');
+
+                                        // 从已排好的时间线序列中全面剔除这名尚未上车的乘客和终点
+                                        v.plannedRoute = v.plannedRoute.filter(s => s.order.id !== o.id);
+                                        activeOrders = activeOrders.filter(aod => aod.order.id !== o.id);
+
+                                        v.waitingSince = null;
+                                        rebuildPhysics(v);
+                                        remainingMeters = 0; // 直接丢弃本帧剩下的时间量执行重算
+                                        break;
+                                    } else {
+                                        // 枯等尚未超限，死等
+                                        remainingMeters = 0;
+                                        break;
+                                    }
+                                } else {
+                                    // 接驳合法：接到人就销掉计时器
+                                    v.waitingSince = null;
+                                    step.order.actualPickTime = sysTime;
+                                    v.onBoardOrders.push(step.order);
+                                    if (ao) ao.state = 'riding';
+                                    addLog(`🚙 ${v.id} 抵达接客站，请 <b style="color:#0ea5e9">${step.order.pNode.name}</b> 乘客上车。`, v.color);
+
+                                    // 更新运营数据：上客时间
+                                    let rec = orderDataStore[step.order.id];
+                                    if (rec) {
+                                        rec["上客时间"] = getRealDateTime().time;
+                                        // 计算接驾距离 (米) 和时长 (分钟)
+                                        let pickMeters = haversineDist(v.lastNode.lon, v.lastNode.lat, step.order.pNode.lon, step.order.pNode.lat);
+                                        rec["实际接驾里程(米)"] = pickMeters.toFixed(1);
+                                        rec["实际接驾时长(分钟)"] = ((sysTime - step.order.answerTime) / 60.0).toFixed(2);
+                                        rec["接驾平均时速(千米/小时)"] = (pickMeters * 3.6 / (sysTime - step.order.answerTime || 1)).toFixed(1);
+                                    }
+                                }
+                            } else {
+                                // 正常下客逻辑
+                                v.onBoardOrders = v.onBoardOrders.filter(o => o.id !== step.order.id);
+                                activeOrders = activeOrders.filter(o => o.order.id !== step.order.id);
+                                addLog(`💵 ${v.id} 抵达卸客站，<b style="color:#10b981">${step.order.dNode.name}</b> 下客。`, '#10b981');
+
+                                // 更新运营数据：完单时间与最终里程
+                                let rec = orderDataStore[step.order.id];
+                                if (rec) {
+                                    rec["完单时间"] = getRealDateTime().time;
+                                    rec["订单状态"] = "订单完成";
+                                    let loadMeters = haversineDist(step.order.pNode.lon, step.order.pNode.lat, step.order.dNode.lon, step.order.dNode.lat);
+                                    rec["载客里程(米)"] = loadMeters.toFixed(1);
+                                    rec["乘客计费时长(分钟)"] = ((sysTime - step.order.actualPickTime) / 60.0).toFixed(2);
+                                    rec["送驾平均时速(千米/小时)"] = (loadMeters * 3.6 / (sysTime - step.order.actualPickTime || 1)).toFixed(1);
+                                }
+                            }
+                            // 行为结转掉队
+                            v.plannedRoute.shift();
+                            renderFleetCards();
+                            updateETA();
+                        }
+
+                        v.lastNode = v.nextNode;
+                        v.pathQueue.shift();
+                        if (v.pathQueue.length === 0) v.nextNode = v.lastNode;
+                    } else {
+                        let vx = (nex.node.x - v.x) / distCanvas * movePixel;
+                        let vy = (nex.node.y - v.y) / distCanvas * movePixel;
+                        v.x += vx; v.y += vy;
+                        remainingMeters = 0; // 本帧剩余米数已全部用于插值移动，停止循环
+                    }
+                }
+            });
+
+            // 半秒测绘刷新一次实时的各个 ETA 推演，降低 JS 的高频性能损耗
+            if (etaUpdateTimer > 0.5) {
+                updateETA();
+                etaUpdateTimer = 0;
+            }
+
+            drawMap();
+            requestAnimationFrame(animate);
+        }
+
+        addLog('🌍 高精密 SHP 物理环境搭载完毕，视网膜地图驱动引擎启动。您可以直接使用鼠标对地图区域进行拖拽和滚轮放缩。');
+        updateETA();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+
+</html>
