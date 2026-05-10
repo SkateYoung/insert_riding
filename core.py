@@ -89,49 +89,90 @@ class CoreDispatcher:
                     return False, float('inf')
                 arrival_times[order.id] = sim_time
 
-        # ===== 终极综合多目标成本函数架构 (Comprehensive Cost Function - 同步 JS 算法) =====
-        ALPHA_1 = 2.0    # 空驶里程倍率惩罚 (同步调优：抑制跨城指派)
-        ALPHA_2 = 0.5    # 载客有效里程基准 (同步调优：降低绕路敏感度)
-        BETA = 4.0       # 站牌下乘客枯等耗时体验折损 (同步调优：显著提升就近优先级)
-        GAMMA = 3.0      # 车内乘客被拉着绕路耗时体验折损 (同步调优：鼓励高效并单)
-        OMEGA = float('inf') # SLA 红线超额一票否决
-        THETA = 1500.0   # 终点强引力防背叛护盾 (对老乘客绕路的极重处罚)
+        # ===== 终极综合多目标成本函数架构 (按最新四大维度重构) =====
         
-        cost = ALPHA_1 * empty_dist + ALPHA_2 * loaded_dist + cross_zone_penalty
+        # 1. 权重定义 (严格按照需求配比)
+        W_PASSENGER = 0.40  # 乘客体验 (候车时间、绕行系数、时间窗满意度)
+        W_ENTERPRISE = 0.30 # 企业效益 (满载率、单车收入、里程利用率)
+        W_SOCIAL = 0.20     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
+        W_FAIRNESS = 0.10   # 平台公平 (企业间订单分配基尼系数)
+
+        # 保留原有的核心调优参数
+        BETA = 4.0       # 站牌下乘客枯等耗时体验折损
+        GAMMA = 3.0      # 车内乘客被拉着绕路耗时体验折损 
+        OMEGA = float('inf') # SLA 时间窗红线超额一票否决
+        THETA = 1500.0       # 老客严重绕路的极限防背叛护盾
         
+        # ---------------------------------------------------------
+        # 维度 A: 乘客体验成本 (Passenger Cost)
+        passenger_cost = 0.0
         for step in route:
             order = step['order']
             if step['type'] == 'P':
                 wait_time = pickup_times[order.id] - order.req_time
-                cost += BETA * wait_time
+                passenger_cost += wait_time * BETA # 候车枯等惩罚
                 
-                # ------ 同步 JS SLA 时间窗拦截 ------
+                # 时间窗满意度：超出极限接客时间直接否决
                 if pickup_times[order.id] > order.max_pickup_time:
                     return False, OMEGA
             else:
-                # 核心修正：如果是已在车上的订单，由于缺失 P 点推演逻辑，其 pickup_times[order.id] 为空。
-                # 此处尝试引入 actual_pick_time，若未接到（或处于极端起步状态）则回退到车辆当前时间戳。
                 start_service_time = pickup_times.get(order.id) or order.actual_pick_time or vehicle_state['time']
                 in_car_time = arrival_times[order.id] - start_service_time
-                cost += GAMMA * in_car_time
+                passenger_cost += in_car_time * GAMMA # 车内绕行惩罚
                 
-                # ------ 同步 JS SLA 时间窗拦截 ------
+                # 时间窗满意度：超出极限送达时间直接否决
                 if arrival_times[order.id] > order.max_arrival_time:
                     return False, OMEGA
             
-        # ====== 乘客坐牢厚度强制挂载 (老乘客绕路代价) ======
+        # 乘客体验：强制挂载老乘客被绕路的代价
         for order in on_board_orders:
-            # 这些乘客已经在车上，计算他们到达各自目的地的时间
-            # 找到对应的下客步骤
             for step in route:
                 if step['type'] == 'D' and step['order'].id == order.id:
                     extra_in_car_time = arrival_times[order.id] - vehicle_state['time']
-                    cost += GAMMA * extra_in_car_time
-                    
-                    # 强制护盾：使得任何延宕老客越界三分钟的行为遭遇极大的数学阻力
+                    passenger_cost += extra_in_car_time * GAMMA
                     if extra_in_car_time > 180.0:
-                        cost += THETA
+                        passenger_cost += THETA
                     break
+
+        # ---------------------------------------------------------
+        # 维度 B: 企业效益成本 (Enterprise Cost)
+        # 企业效益 = 绝对油耗开销 + 里程利用率惩罚 + 满载率惩罚
+        
+        total_sim_dist = empty_dist + loaded_dist
+        
+        # 1. 里程利用率 (Mileage Utilization Rate)：载客里程占比
+        mileage_util_rate = loaded_dist / total_sim_dist if total_sim_dist > 0 else 0.0
+        # 利用率越低，空跑越多，惩罚越大 (基数可根据业务放大)
+        mileage_penalty = (1.0 - mileage_util_rate) * 1000.0
+        
+        # 2. 满载率 (Load Rate)：这里使用这趟路线服务的总客数占比作为满载率代理
+        # (车上原有的 + 这趟新接的) / 最大容量
+        total_pax = len(on_board_orders) + sum(1 for step in route if step['type'] == 'P')
+        load_rate = min(1.0, total_pax / max(1, capacity))
+        # 满载率越低（拉着一两座跑），效率越低，惩罚越大
+        load_penalty = (1.0 - load_rate) * 800.0
+        
+        # 综合企业成本
+        enterprise_cost =  mileage_penalty + load_penalty
+
+        # ---------------------------------------------------------
+        # 维度 C: 社会效益成本 (Social Cost)
+        # 总体路权占用、碳排放总长以及跨区调度的惩罚
+        total_dist = empty_dist + loaded_dist
+        social_cost = total_dist * 1.0 + cross_zone_penalty
+
+        # ---------------------------------------------------------
+        # 维度 D: 平台公平成本 (Fairness Cost) 
+        # 代理基尼系数：当前车辆负载越大、车上已有订单越多，成本增加。
+        # 目的是让派单系统更倾向于把新单分派给比较闲的车队/车辆，促进均衡分配。
+        fairness_cost = len(on_board_orders) * 500.0 
+
+        # ---------------------------------------------------------
+        # 最终归一化加权求和 Cost
+        cost = (W_PASSENGER * passenger_cost + 
+                W_ENTERPRISE * enterprise_cost + 
+                W_SOCIAL * social_cost + 
+                W_FAIRNESS * fairness_cost)
         
         return True, cost
 
