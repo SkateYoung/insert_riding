@@ -16,7 +16,7 @@ class CoreDispatcher:
     completed_orders_pool = []
 
     @staticmethod
-    def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None):
+    def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None, original_etas=None):
         """核心评级器：沙盘量化时间线成本（Cost）以评估未来路线质量分数。
         
         该算法引入了由于车辆绕路等问题产生的物理油耗距离分数、乘客空等惩罚分，
@@ -29,9 +29,10 @@ class CoreDispatcher:
             city_map (CityGraph): 可以用于通过 A* 推算空间距离字典的数字路网基站。
             capacity (int, optional): 车辆容量限制。
             v_zone (int, optional): 本车本命所在的主行政区用于加成跨界拒载权重。
+            original_etas (dict, optional): 插入新订单前老乘客的原计划预计到达时间字典，用于计算拼车真实延误。
             
         Returns:
-            tuple: (可不可行分支True/False, 最终累计积分成本 float)。成本分越低代表更偏向于选择此行程。
+            tuple: (可不可行分支True/False, 最终累计积分成本 float, 推演各订单到达时间字典 dict)。成本分越低代表路线越优。
         """
         speed = SPEED_MPS 
         sim_time = vehicle_state['time']
@@ -65,7 +66,7 @@ class CoreDispatcher:
             dist, path = city_map.get_path(city_map.nodes_map[sim_next_node], target_node)
             
             if dist == float('inf'):
-                return False, float('inf')
+                return False, float('inf'), None
                 
             if current_load == 0:
                 empty_dist += dist
@@ -81,12 +82,12 @@ class CoreDispatcher:
             if step['type'] == 'P':
                 current_load += 1
                 if current_load > capacity: 
-                    return False, float('inf') 
+                    return False, float('inf'), None 
                 pickup_times[order.id] = sim_time
             elif step['type'] == 'D':
                 current_load -= 1
                 if current_load < 0:
-                    return False, float('inf')
+                    return False, float('inf'), None
                 arrival_times[order.id] = sim_time
 
         # ===== 终极综合多目标成本函数架构 (按最新四大维度重构) =====
@@ -97,7 +98,7 @@ class CoreDispatcher:
         W_SOCIAL = 0.20     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
         W_FAIRNESS = 0.10   # 平台公平 (企业间订单分配基尼系数)
 
-        # 保留原有的核心调优参数
+        # 核心调优参数
         BETA = 4.0       # 站牌下乘客枯等耗时体验折损
         GAMMA = 3.0      # 车内乘客被拉着绕路耗时体验折损 
         OMEGA = float('inf') # SLA 时间窗红线超额一票否决
@@ -110,28 +111,31 @@ class CoreDispatcher:
             order = step['order']
             if step['type'] == 'P':
                 wait_time = pickup_times[order.id] - order.req_time
-                passenger_cost += wait_time * BETA # 候车枯等惩罚
+                passenger_cost += wait_time * BETA # 乘客候车时间指标（BETA为候车时间成本系数，wait_time * BETA即是乘客候车时间成本）
                 
-                # 时间窗满意度：超出极限接客时间直接否决
+                # 时间窗满意度：超出极限接客时间直接否决（暂定功能，因为实际订单中的信息没加入乘客愿意等待的最大时长）
                 if pickup_times[order.id] > order.max_pickup_time:
-                    return False, OMEGA
+                    return False, OMEGA, None
             else:
                 start_service_time = pickup_times.get(order.id) or order.actual_pick_time or vehicle_state['time']
                 in_car_time = arrival_times[order.id] - start_service_time
-                passenger_cost += in_car_time * GAMMA # 车内绕行惩罚
+                passenger_cost += in_car_time * GAMMA # 绕行系数1（这里是统计所有订单中，乘客会在车上等待的时间成本）   
                 
                 # 时间窗满意度：超出极限送达时间直接否决
                 if arrival_times[order.id] > order.max_arrival_time:
-                    return False, OMEGA
+                    return False, OMEGA, None
             
-        # 乘客体验：强制挂载老乘客被绕路的代价
+        # 乘客体验：强制挂载老乘客被绕路的代价(真实的延误时间)
         for order in on_board_orders:
             for step in route:
                 if step['type'] == 'D' and step['order'].id == order.id:
-                    extra_in_car_time = arrival_times[order.id] - vehicle_state['time']
-                    passenger_cost += extra_in_car_time * GAMMA
-                    if extra_in_car_time > 180.0:
-                        passenger_cost += THETA
+                    # 如果有原计划ETA，则仅惩罚真正多出来的老乘客的延误时间
+                    if original_etas and order.id in original_etas:
+                        delay_time = arrival_times[order.id] - original_etas[order.id]
+                        if delay_time > 0:
+                            passenger_cost += delay_time * GAMMA # 绕行系数2（这里是统计所有订单中，已经上车的老乘客被顺路绕行的额外时间成本）
+                            if delay_time > 180.0:
+                                passenger_cost += THETA
                     break
 
         # ---------------------------------------------------------
@@ -154,18 +158,20 @@ class CoreDispatcher:
         
         # 综合企业成本
         enterprise_cost =  mileage_penalty + load_penalty
+        enterprise_cost = 0.0
 
         # ---------------------------------------------------------
         # 维度 C: 社会效益成本 (Social Cost)
         # 总体路权占用、碳排放总长以及跨区调度的惩罚
         total_dist = empty_dist + loaded_dist
         social_cost = total_dist * 1.0 + cross_zone_penalty
-
+        social_cost = 0.0
         # ---------------------------------------------------------
         # 维度 D: 平台公平成本 (Fairness Cost) 
         # 代理基尼系数：当前车辆负载越大、车上已有订单越多，成本增加。
         # 目的是让派单系统更倾向于把新单分派给比较闲的车队/车辆，促进均衡分配。
-        fairness_cost = len(on_board_orders) * 500.0 
+        # fairness_cost = len(on_board_orders) * 500.0 
+        fairness_cost = 0.0
 
         # ---------------------------------------------------------
         # 最终归一化加权求和 Cost
@@ -174,7 +180,7 @@ class CoreDispatcher:
                 W_SOCIAL * social_cost + 
                 W_FAIRNESS * fairness_cost)
         
-        return True, cost
+        return True, cost, arrival_times
 
     @staticmethod
     def _try_insert_order(vehicle, new_order, city_map):
@@ -203,12 +209,17 @@ class CoreDispatcher:
             'progress': vehicle.progress
         }
         
+        # [新增] 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
+        orig_etas = None
+        if vehicle.on_board_orders and route:
+            _, _, orig_etas = CoreDispatcher.evaluate_route(route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
+        
         for i in range(n + 1):
             temp_route = route[:i] + [p_step] + route[i:]
             for j in range(i + 1, n + 2):
                 test_route = temp_route[:j] + [d_step] + temp_route[j:]
                 
-                is_feasible, cost = CoreDispatcher.evaluate_route(test_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
+                is_feasible, cost, _ = CoreDispatcher.evaluate_route(test_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone, original_etas=orig_etas)
                 if is_feasible and cost < best_cost:
                     best_cost = cost
                     best_route = test_route
@@ -247,7 +258,7 @@ class CoreDispatcher:
                             continue
                             
                         # 评估新路径
-                        is_feasible, cost = CoreDispatcher.evaluate_route(mut_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
+                        is_feasible, cost, _ = CoreDispatcher.evaluate_route(mut_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone, original_etas=orig_etas)
                         
                         # 若成本存在优化，立刻吸纳新的序列
                         if is_feasible and cost < (best_cost - 0.001):

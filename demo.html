@@ -783,7 +783,7 @@
             document.getElementById('vPanel').innerHTML = html;
         }
 
-        function evaluateRoute(route, vehicle) {
+        function evaluateRoute(route, vehicle, originalEtas) {
             let sl = vehicle.lastNode;
             let sn = vehicle.nextNode;
 
@@ -830,43 +830,76 @@
                 }
             }
 
-            // ===== 终极综合多目标成本函数架构 (Comprehensive Cost Function) =====
-            const ALPHA_1 = 2.0;    // 空驶里程参数
-            const ALPHA_2 = 0.5;    // 载客有效里程参数
-            const BETA = 3.0;       // 站牌下乘客枯等耗时参数
-            const GAMMA = 4.0;      // 车内乘客被拉着绕路耗时参数
-            const OMEGA = Infinity;        // SLA 红线超额一票否决
-            const THETA = 1500.0;   // 防止老客户被新订单频繁插队参数
+            // ===== 终极综合多目标成本函数架构 (按最新四大维度重构) =====
+            const W_PASSENGER = 0.50;
+            const W_ENTERPRISE = 0.40;
+            const W_SOCIAL = 0.20;
+            const W_FAIRNESS = 0.10;
 
-            let cost = ALPHA_1 * emptyDist + ALPHA_2 * loadedDist + zonePenalty;
+            const BETA = 4.0;
+            const GAMMA = 3.0;
+            const OMEGA = Infinity;
+            const THETA = 1500.0;
 
+            // 维度 A: 乘客体验成本
+            let passengerCost = 0.0;
             for (let step of route) {
                 let o = step.order;
                 if (step.type === 'P') {
                     let waitTime = pickT[o.id] - o.reqTime;
-                    cost += BETA * waitTime;
-
+                    passengerCost += BETA * waitTime;
                     if (pickT[o.id] > o.maxPickupTime) return { feasible: false, cost: OMEGA };
                 } else {
-                    // 核心修复：如果是已在车上的订单，其 pickT[o.id] 在当前推演中是 undefined
-                    // 我们使用其下单时记录的真实接人时间 (actualPickTime) 进行耗时计算
                     let startTime = pickT[o.id] || o.actualPickTime || vehicle.time;
                     let inCarTime = arrT[o.id] - startTime;
-                    cost += GAMMA * inCarTime;
-
+                    passengerCost += GAMMA * inCarTime;
                     if (arrT[o.id] > o.maxArrivalTime) return { feasible: false, cost: OMEGA };
                 }
             }
 
+            // 乘客体验：挂载老乘客被绕路的真实延误代价
             for (let onboardUser of vehicle.onBoardOrders) {
-                let extraInCarTime = arrT[onboardUser.id] - vehicle.time;
-                cost += GAMMA * extraInCarTime;
-
-                // 强制护盾：防止车上的老客户频繁的被新订单插到前面
-                if (extraInCarTime > 180.0) {
-                    cost += THETA;
+                for (let step of route) {
+                    if (step.type === 'D' && step.order.id === onboardUser.id) {
+                        if (originalEtas && originalEtas[onboardUser.id] !== undefined) {
+                            let delayTime = arrT[onboardUser.id] - originalEtas[onboardUser.id];
+                            if (delayTime > 0) {
+                                passengerCost += delayTime * GAMMA;
+                                if (delayTime > 180.0) passengerCost += THETA;
+                            }
+                        } else {
+                            let extraInCarTime = arrT[onboardUser.id] - vehicle.time;
+                            if (extraInCarTime > 180.0) passengerCost += THETA;
+                        }
+                        break;
+                    }
                 }
             }
+
+            // 维度 B: 企业效益成本
+            let totalSimDist = emptyDist + loadedDist;
+            let mileageUtilRate = totalSimDist > 0 ? (loadedDist / totalSimDist) : 0.0;
+            let mileagePenalty = (1.0 - mileageUtilRate) * 5000.0;
+
+            let totalPax = vehicle.onBoardOrders.length + route.filter(s => s.type === 'P').length;
+            let loadRate = Math.min(1.0, totalPax / Math.max(1, vehicle.capacity));
+            let loadPenalty = (1.0 - loadRate) * 800.0;
+
+            let enterpriseCost = mileagePenalty + loadPenalty;
+
+
+            // 维度 C: 社会效益成本
+            let socialCost = totalSimDist * 1.0 + zonePenalty;
+            socialCost = 0.0; // 同步 Python 置零
+
+            // 维度 D: 平台公平成本
+            let fairnessCost = vehicle.onBoardOrders.length * 500.0;
+            fairnessCost = 0.0; // 同步 Python 置零
+
+            let cost = W_PASSENGER * passengerCost +
+                W_ENTERPRISE * enterpriseCost +
+                W_SOCIAL * socialCost +
+                W_FAIRNESS * fairnessCost;
 
             return { feasible: true, cost: cost, pickT: pickT, arrT: arrT };
         }
@@ -875,12 +908,20 @@
             let bestR = null, bestC = Infinity, bestP = null, bestA = null;
             let r = v.plannedRoute, n = r.length;
             let pStep = { type: 'P', order: order }, dStep = { type: 'D', order: order };
+
+            // 新增：先推演一次原始路线以获取 origEtas
+            let origEtas = null;
+            if (v.onBoardOrders.length > 0 && r.length > 0) {
+                let origRes = evaluateRoute(r, v, null);
+                if (origRes.feasible) origEtas = origRes.arrT;
+            }
+
             // 贪心插入 (Greedy Insertion)
             for (let i = 0; i <= n; i++) {
                 let tr1 = [...r.slice(0, i), pStep, ...r.slice(i)];
                 for (let j = i + 1; j <= n + 1; j++) {
                     let tr2 = [...tr1.slice(0, j), dStep, ...tr1.slice(j)];
-                    let res = evaluateRoute(tr2, v);
+                    let res = evaluateRoute(tr2, v, origEtas);
                     if (res.feasible && res.cost < bestC) {
                         bestC = res.cost; bestR = tr2;
                         bestP = res.pickT; bestA = res.arrT;
@@ -915,7 +956,7 @@
                             }
                             if (!valid) continue;
 
-                            let res = evaluateRoute(mutR, v);
+                            let res = evaluateRoute(mutR, v, origEtas);
                             // 若成本存在哪怕微乎其微的优化，立刻吸纳新的基因重组序列
                             if (res.feasible && res.cost < bestC - 0.001) {
                                 bestC = res.cost; bestR = mutR;
