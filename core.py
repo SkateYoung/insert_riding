@@ -283,7 +283,7 @@ class CoreDispatcher:
         Returns:
             bool: 永远返回 False 表示进入池化，切断即时指派避免出现极度绕路。
         """
-        print(f"[Core.Dispatcher] 新订单 [单{order.id}] 注入系统统筹池，进入【后悔值扫描】序列等待...")
+        print(f"[Core.Dispatcher] 新订单 [单{order.id}] 注入系统统筹池，等待匹配车辆中...")
         CoreDispatcher.order_pool.append(order)
         return False
 
@@ -297,6 +297,7 @@ class CoreDispatcher:
         
         while True:
             if not CoreDispatcher.order_pool:
+                print(f"[Core.Pool] 池中暂无订单...")
                 time.sleep(5)
                 continue
                 
@@ -356,10 +357,10 @@ class CoreDispatcher:
                     target_o = CoreDispatcher.order_pool.pop(best_o_idx)
                     global_best_v.planned_route = global_best_route
                     assign_count += 1
-                    print(f"[Core.Pool] [Match] 后悔值出警：痛点单 {target_o.id} 被 {global_best_v.id} 优先划拨！")
+                    print(f"[Core.Pool] [Match] 后悔值匹配成功：单 {target_o.id} 被 {global_best_v.id} 优先划拨！")
                     
                     # ==========================================
-                    # [新增] 打印车辆更新后的轨迹点 (途径站点) 
+                    # 打印车辆更新后的轨迹点 (途径站点) 
                     # ==========================================
                     waypoints = []
                     total_path = []
@@ -380,8 +381,8 @@ class CoreDispatcher:
                         curr_node_id = target_node.id
                         
                     print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
-                    print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点(用于前端高亮连线)")
-                    print(f"    [明细] 该路线总里程: {total_path} ")
+                    print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
+                    # print(f"    [明细] 该路线总里程: {total_path} ")
                 else:
                     # 池中剩余订单当前均无法匹配
                     break

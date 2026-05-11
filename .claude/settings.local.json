@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import flask; print\\('Flask', flask.__version__\\)\")",
+      "Bash(ls -la dxc_traffic_shp/)",
+      "Bash(ls *.shp)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('main.py', doraise=True\\); print\\('语法检查通过'\\)\")",
+      "Bash(python -c \"from flask import Flask; print\\('Flask import OK'\\); import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('AST parse OK'\\)\")",
+      "Bash(python main.py)"
+    ]
+  }
+}
