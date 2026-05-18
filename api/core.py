@@ -4,7 +4,8 @@
 """
 
 import time
-from models import SPEED_MPS
+from .models import SPEED_MPS
+from .auxiliary import AuxiliaryFunctions
 
 class CoreDispatcher:
     """提供拼单博弈算力与核心派车路线演算的中枢处理台。"""
@@ -289,7 +290,7 @@ class CoreDispatcher:
 
     @staticmethod
     def process_pool_matching(fleet, city_map):
-        """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法(Regret-Based)】。
+        """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法】。
         
         该函数现在会以 5 秒为周期持续运行，实时监控订单池并进行统筹派发。
         """
@@ -356,6 +357,7 @@ class CoreDispatcher:
                 if best_o_idx != -1:
                     target_o = CoreDispatcher.order_pool.pop(best_o_idx)
                     global_best_v.planned_route = global_best_route
+                    CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
                     assign_count += 1
                     print(f"[Core.Pool] [Match] 后悔值匹配成功：单 {target_o.id} 被 {global_best_v.id} 优先划拨！")
                     
@@ -392,6 +394,383 @@ class CoreDispatcher:
             
             # 等待 5 秒进行下一轮匹配
             time.sleep(5)
+
+    @staticmethod
+    def _project_point_to_segment(lon, lat, u_node, v_node):
+        """将 GPS 点投影到道路线段上，返回投影点和距离。"""
+        ax, ay = u_node.lon, u_node.lat
+        bx, by = v_node.lon, v_node.lat
+        dx, dy = bx - ax, by - ay
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq == 0:
+            progress = 0.0
+        else:
+            progress = ((lon - ax) * dx + (lat - ay) * dy) / seg_len_sq
+            progress = max(0.0, min(1.0, progress))
+
+        projected_lon = ax + progress * dx
+        projected_lat = ay + progress * dy
+        distance = AuxiliaryFunctions.haversine_distance(lon, lat, projected_lon, projected_lat)
+        return projected_lon, projected_lat, progress, distance
+
+    @staticmethod
+    def _projection_result(city_map, lon, lat, u_id, v_id, snap_source):
+        u_node = city_map.nodes_map.get(u_id)
+        v_node = city_map.nodes_map.get(v_id)
+        if u_node is None or v_node is None:
+            return None
+
+        projected_lon, projected_lat, progress, distance = CoreDispatcher._project_point_to_segment(lon, lat, u_node, v_node)
+        return {
+            "lon": projected_lon,
+            "lat": projected_lat,
+            "edge_u": u_id,
+            "edge_v": v_id,
+            "progress": progress,
+            "distance_to_gps": distance,
+            "next_node": v_node,
+            "snap_source": snap_source,
+        }
+
+    @staticmethod
+    def _nearest_road_projection(city_map, lon, lat, vehicle=None):
+        """将车辆 GPS 坐标吸附到路网边上的最近投影点。"""
+        if vehicle is not None and vehicle.planned_route_point:
+            route_points = vehicle.planned_route_point
+            best_projection = None
+            max_lookahead_distance = 500.0
+
+            current_projection = CoreDispatcher._projection_result(
+                city_map,
+                lon,
+                lat,
+                vehicle.last_node,
+                vehicle.next_node,
+                "planned_route",
+            )
+            if (
+                current_projection is not None
+                and current_projection["progress"] + 0.02 >= vehicle.progress
+            ):
+                best_projection = current_projection
+
+            start_index = None
+            for i, point in enumerate(route_points):
+                if point["id"] == vehicle.next_node:
+                    start_index = i
+                    break
+            if start_index is None:
+                start_index = 0
+
+            lookahead_distance = 0.0
+            for i in range(start_index, len(route_points) - 1):
+                u_id = route_points[i]["id"]
+                v_id = route_points[i + 1]["id"]
+                projection = CoreDispatcher._projection_result(
+                    city_map,
+                    lon,
+                    lat,
+                    u_id,
+                    v_id,
+                    "planned_route",
+                )
+                if projection is not None and (
+                    best_projection is None
+                    or projection["distance_to_gps"] < best_projection["distance_to_gps"]
+                ):
+                    best_projection = projection
+
+                u_node = city_map.nodes_map.get(u_id)
+                v_node = city_map.nodes_map.get(v_id)
+                if u_node is None or v_node is None:
+                    continue
+                lookahead_distance += AuxiliaryFunctions.haversine_distance(
+                    u_node.lon,
+                    u_node.lat,
+                    v_node.lon,
+                    v_node.lat,
+                )
+                if lookahead_distance >= max_lookahead_distance:
+                    break
+
+            if best_projection is not None:
+                return best_projection
+
+        best_projection = None
+        for edge in city_map.edges:
+            projection = CoreDispatcher._projection_result(
+                city_map,
+                lon,
+                lat,
+                edge["u"],
+                edge["v"],
+                "road_network",
+            )
+            if projection is None:
+                continue
+            if best_projection is None or projection["distance_to_gps"] < best_projection["distance_to_gps"]:
+                best_projection = projection
+
+        return best_projection
+
+    @staticmethod
+    def _planned_route_targets(vehicle):
+        """按车辆当前订单计划提取后续接送目标点。"""
+        targets = []
+        for step in vehicle.planned_route:
+            order = step["order"]
+            target_node = order.p_node if step["type"] == "P" else order.d_node
+            targets.append({
+                "type": step["type"],
+                "order_id": order.id,
+                "node": target_node,
+            })
+        return targets
+
+    @staticmethod
+    def _node_to_path_point(node):
+        """将路网节点转成接口可返回的轨迹点。"""
+        return {
+            "id": node.id,
+            "lon": node.lon,
+            "lat": node.lat,
+            "name": node.name,
+            "zone": node.zone,
+        }
+
+    @staticmethod
+    def rebuild_vehicle_path_from_node(vehicle, city_map, start_node):
+        """从指定路网节点出发，按车辆计划订单重新拼接完整路网轨迹。"""
+        path_points = []
+        route_segments = []
+        current_node = start_node
+        total_distance = 0.0
+
+        for target in CoreDispatcher._planned_route_targets(vehicle):
+            dist, path = city_map.get_path(current_node, target["node"])
+            if dist == float("inf"):
+                return None
+
+            segment_points = [CoreDispatcher._node_to_path_point(n) for n in path]
+            if path_points and segment_points:
+                path_points.extend(segment_points[1:])
+            else:
+                path_points.extend(segment_points)
+
+            route_segments.append({
+                "type": target["type"],
+                "order_id": target["order_id"],
+                "target_node": CoreDispatcher._node_to_path_point(target["node"]),
+                "distance": dist,
+                "path": segment_points,
+            })
+            total_distance += dist
+            current_node = target["node"]
+
+        return {
+            "start_node": CoreDispatcher._node_to_path_point(start_node),
+            "planned_route_size": len(vehicle.planned_route),
+            "total_distance": total_distance,
+            "path": path_points,
+            "segments": route_segments,
+        }
+
+    @staticmethod
+    def refresh_vehicle_route_metadata(vehicle, city_map, start_node=None):
+        """刷新车辆当前 GPS 和计划路径轨迹点元数据。"""
+        if start_node is None:
+            start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if start_node is None:
+            vehicle.gps = {"lon": None, "lat": None}
+            vehicle.planned_route_point = []
+            return None
+
+        vehicle.gps = {"lon": start_node.lon, "lat": start_node.lat}
+        result = CoreDispatcher.rebuild_vehicle_path_from_node(vehicle, city_map, start_node)
+        if result is None:
+            vehicle.planned_route_point = []
+            return None
+
+        vehicle.planned_route_point = result["path"]
+        return result
+
+    @staticmethod
+    def _projection_to_path_point(projection):
+        """将道路投影点转成接口轨迹点。"""
+        return {
+            "id": f"{projection['edge_u']}|{projection['edge_v']}@{projection['progress']:.6f}",
+            "lon": projection["lon"],
+            "lat": projection["lat"],
+            "name": "车辆当前位置",
+            "zone": projection["next_node"].zone,
+            "edge_u": projection["edge_u"],
+            "edge_v": projection["edge_v"],
+            "progress": projection["progress"],
+            "is_projection": True,
+        }
+
+    @staticmethod
+    def sync_vehicle_route_progress(vehicle, city_map, current_node):
+        """根据车辆当前路网节点，同步上下客状态和剩余计划路径。"""
+        vehicle.last_node = current_node.id
+        vehicle.next_node = current_node.id
+        vehicle.progress = 0.0
+        vehicle.gps = {"lon": current_node.lon, "lat": current_node.lat}
+
+        changed_steps = []
+        while vehicle.planned_route:
+            step = vehicle.planned_route[0]
+            order = step["order"]
+            target_node = order.p_node if step["type"] == "P" else order.d_node
+            if target_node.id != current_node.id:
+                break
+
+            if step["type"] == "P":
+                if all(o.id != order.id for o in vehicle.on_board_orders):
+                    vehicle.on_board_orders.append(order)
+                order.actual_pick_time = order.actual_pick_time or vehicle.time
+                action = "pickup"
+            else:
+                vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.id != order.id]
+                if order not in CoreDispatcher.completed_orders_pool:
+                    CoreDispatcher.completed_orders_pool.append(order)
+                action = "dropoff"
+
+            vehicle.planned_route.pop(0)
+            changed_steps.append({
+                "action": action,
+                "type": step["type"],
+                "order_id": order.id,
+                "node": CoreDispatcher._node_to_path_point(target_node),
+            })
+
+        return changed_steps
+
+    @staticmethod
+    def _route_point_index(route_points, node_id):
+        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
+        for i, point in enumerate(route_points):
+            if point.get("id") == node_id:
+                return i
+        return None
+
+    @staticmethod
+    def _apply_reached_route_step(vehicle, step, target_node):
+        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
+        order = step["order"]
+        if step["type"] == "P":
+            if all(o.id != order.id for o in vehicle.on_board_orders):
+                vehicle.on_board_orders.append(order)
+            order.actual_pick_time = order.actual_pick_time or vehicle.time
+            action = "pickup"
+        else:
+            vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.id != order.id]
+            if order not in CoreDispatcher.completed_orders_pool:
+                CoreDispatcher.completed_orders_pool.append(order)
+            action = "dropoff"
+
+        return {
+            "action": action,
+            "type": step["type"],
+            "order_id": order.id,
+            "node": CoreDispatcher._node_to_path_point(target_node),
+        }
+
+    @staticmethod
+    def _sync_passed_route_targets(vehicle, route_points, projection):
+        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
+        """GPS 跨过接送目标点时，同步已经经过的上下客步骤。"""
+        projection_index = None
+        for i in range(len(route_points) - 1):
+            if (
+                route_points[i].get("id") == projection["edge_u"]
+                and route_points[i + 1].get("id") == projection["edge_v"]
+            ):
+                projection_index = i
+                break
+        if projection_index is None:
+            return []
+
+        changed_steps = []
+        while vehicle.planned_route:
+            step = vehicle.planned_route[0]
+            order = step["order"]
+            target_node = order.p_node if step["type"] == "P" else order.d_node
+            target_index = CoreDispatcher._route_point_index(route_points, target_node.id)
+            if target_index is None:
+                break
+
+            is_passed = target_index <= projection_index
+            is_at_edge_end = target_index == projection_index + 1 and projection["progress"] >= 0.999
+            if not is_passed and not is_at_edge_end:
+                break
+
+            vehicle.planned_route.pop(0)
+            changed_steps.append(CoreDispatcher._apply_reached_route_step(vehicle, step, target_node))
+
+        return changed_steps
+
+    @staticmethod
+    def rebuild_vehicle_path_from_gps(vehicle, city_map, lon, lat):
+        """根据车辆 GPS 坐标和当前订单计划，重新计算后续路网轨迹。"""
+        old_route_points = list(vehicle.planned_route_point)
+        # 将车辆的gps投影至最近的路网中
+        projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, vehicle)
+        if projection is None:
+            return None
+
+        next_node = projection["next_node"]
+        # 同步经过的上下客步骤
+        changed_steps = CoreDispatcher._sync_passed_route_targets(vehicle, old_route_points, projection)
+        # 如果到达了终点，将终点加入 changed_steps 并更新车辆的上下客状态
+        if projection["progress"] >= 0.999:
+            changed_steps.extend(CoreDispatcher.sync_vehicle_route_progress(vehicle, city_map, next_node))
+        # 刷新车辆的轨迹点元数据
+        result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, next_node)
+        if result is None:
+            return None
+
+        vehicle.gps = {"lon": lon, "lat": lat}
+        vehicle.last_node = projection["edge_u"]
+        vehicle.next_node = projection["edge_v"]
+        vehicle.progress = projection["progress"]
+
+        projection_point = CoreDispatcher._projection_to_path_point(projection)
+        result["path"] = [projection_point] + result["path"]
+        result["planned_route_point"] = result["path"]
+        vehicle.planned_route_point = result["planned_route_point"]
+
+        result["gps"] = vehicle.gps
+        result.pop("start_node", None)
+        result["snapped_point"] = {
+            "id": projection_point["id"],
+            "lon": projection["lon"],
+            "lat": projection["lat"],
+            "name": projection_point["name"],
+            "zone": projection_point["zone"],
+            "edge": {
+                "u": projection["edge_u"],
+                "v": projection["edge_v"],
+            },
+            "progress": projection["progress"],
+            "distance_to_gps": projection["distance_to_gps"],
+            "next_node": CoreDispatcher._node_to_path_point(next_node),
+            "snap_source": projection["snap_source"],
+        }
+        result["snapped_node"] = result["snapped_point"]
+        result["changed_steps"] = changed_steps
+        result["on_board_orders"] = [o.id for o in vehicle.on_board_orders]
+        result["planned_route"] = [
+            {
+                "type": step["type"],
+                "order_id": step["order"].id,
+                "target_node": CoreDispatcher._node_to_path_point(
+                    step["order"].p_node if step["type"] == "P" else step["order"].d_node
+                ),
+            }
+            for step in vehicle.planned_route
+        ]
+        return result
 
     @staticmethod
     def idle_parking_scenario(vehicle, city_map):

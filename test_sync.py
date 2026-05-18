@@ -1,6 +1,6 @@
 # test_sync.py
-from models import CityGraph, Order, Vehicle
-from core import CoreDispatcher
+from api.models import CityGraph, Order, Vehicle
+from api.core import CoreDispatcher
 
 # 1. 启动数字路网引擎模型实例
 print("🌍 正在加载路网...")

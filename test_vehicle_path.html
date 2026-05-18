@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>车辆实时路径更新测试</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            color: #1f2937;
+            background: #f3f4f6;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 380px;
+            height: 100vh;
+        }
+
+        .map-panel {
+            position: relative;
+            min-width: 0;
+            background: #0f172a;
+        }
+
+        #mapCanvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+        }
+
+        .map-tip {
+            position: absolute;
+            left: 12px;
+            top: 12px;
+            padding: 8px 10px;
+            color: #e5e7eb;
+            background: rgba(15, 23, 42, 0.82);
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .side-panel {
+            overflow: auto;
+            padding: 18px;
+            background: #ffffff;
+            border-left: 1px solid #d1d5db;
+        }
+
+        h1 {
+            margin: 0 0 14px;
+            font-size: 20px;
+        }
+
+        label {
+            display: block;
+            margin-top: 12px;
+            font-weight: 600;
+        }
+
+        input,
+        select,
+        button {
+            width: 100%;
+            padding: 8px;
+            margin-top: 6px;
+            font-size: 14px;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        .button-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        #summary {
+            margin-top: 14px;
+            padding: 10px;
+            min-height: 118px;
+            white-space: pre-wrap;
+            background: #f9fafb;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        pre {
+            margin-top: 12px;
+            padding: 10px;
+            max-height: 320px;
+            overflow: auto;
+            color: #e5e7eb;
+            background: #111827;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .muted {
+            color: #6b7280;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="layout">
+        <div class="map-panel">
+            <canvas id="mapCanvas"></canvas>
+            <div class="map-tip">滚轮缩放，拖拽平移，点击地图可写入车辆 GPS 坐标。</div>
+        </div>
+
+        <aside class="side-panel">
+            <h1>车辆实时路径更新测试</h1>
+            <div class="muted">
+                路网由后端 `main.py` 从 `dxc_traffic_shp/dxc_rule.shp` 加载后返回，前端只负责绘图和周期性调用路径更新接口。
+            </div>
+
+            <div class="button-row">
+                <button id="initBtn">初始化系统</button>
+                <button id="loadBtn">加载地图</button>
+            </div>
+
+            <label for="vehicleSelect">车辆</label>
+            <select id="vehicleSelect"></select>
+
+            <label for="poiSelect">快速填入 POI 坐标</label>
+            <select id="poiSelect"></select>
+
+            <label for="lonInput">车辆经度 lon</label>
+            <input id="lonInput" type="number" step="0.000001" placeholder="例如 113.400432">
+
+            <label for="latInput">车辆纬度 lat</label>
+            <input id="latInput" type="number" step="0.000001" placeholder="例如 23.058342">
+
+            <div class="button-row">
+                <button id="submitBtn">更新一次路径</button>
+                <button id="realtimeBtn">开始实时更新</button>
+            </div>
+            <button id="createOrderBtn">创建测试订单</button>
+
+            <label for="intervalInput">更新间隔（毫秒）</label>
+            <input id="intervalInput" type="number" min="500" step="100" value="2000">
+
+            <div id="summary">等待加载地图...</div>
+            <pre id="output"></pre>
+        </aside>
+    </div>
+
+    <script>
+        const API_BASE = location.origin && location.origin !== "null" && location.origin.startsWith("http")
+            ? location.origin
+            : "http://127.0.0.1:5000";
+
+        const canvas = document.getElementById("mapCanvas");
+        const ctx = canvas.getContext("2d");
+        const vehicleSelect = document.getElementById("vehicleSelect");
+        const poiSelect = document.getElementById("poiSelect");
+        const lonInput = document.getElementById("lonInput");
+        const latInput = document.getElementById("latInput");
+        const intervalInput = document.getElementById("intervalInput");
+        const realtimeBtn = document.getElementById("realtimeBtn");
+        const summary = document.getElementById("summary");
+        const output = document.getElementById("output");
+
+        let roadNetwork = null;
+        let latestPath = null;
+        let scale = 1;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let didDrag = false;
+        let dragStart = { x: 0, y: 0 };
+        let pointerStart = { x: 0, y: 0 };
+        let realtimeTimer = null;
+        let poiList = [];
+
+        async function requestJson(path, options = {}) {
+            const resp = await fetch(`${API_BASE}${path}`, {
+                headers: { "Content-Type": "application/json" },
+                ...options
+            });
+            const text = await resp.text();
+            let data;
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch {
+                throw new Error(`${path} 返回的不是 JSON：${text.slice(0, 200)}`);
+            }
+            if (!resp.ok) {
+                throw new Error(data.error || `${path} 请求失败，HTTP ${resp.status}`);
+            }
+            return data;
+        }
+
+        function resizeCanvas() {
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+            canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+            fitMapToCanvas();
+            drawMap();
+        }
+
+        function fitMapToCanvas() {
+            if (!roadNetwork) return;
+            const b = roadNetwork.bounds;
+            const width = b.max_lon - b.min_lon;
+            const height = b.max_lat - b.min_lat;
+            const sx = canvas.width / width;
+            const sy = canvas.height / height;
+            scale = Math.min(sx, sy) * 0.88;
+            offsetX = (canvas.width - width * scale) / 2 - b.min_lon * scale;
+            offsetY = (canvas.height + height * scale) / 2 + b.min_lat * scale;
+        }
+
+        function worldToScreen(lon, lat) {
+            return {
+                x: lon * scale + offsetX,
+                y: -lat * scale + offsetY
+            };
+        }
+
+        function screenToWorld(x, y) {
+            return {
+                lon: (x - offsetX) / scale,
+                lat: -(y - offsetY) / scale
+            };
+        }
+
+        function drawMap() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#0f172a";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            if (!roadNetwork) return;
+
+            ctx.save();
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+
+            ctx.strokeStyle = "rgba(148, 163, 184, 0.55)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (const edge of roadNetwork.edges) {
+                const u = roadNetwork.nodes[edge.u];
+                const v = roadNetwork.nodes[edge.v];
+                if (!u || !v) continue;
+                const a = worldToScreen(u.lon, u.lat);
+                const b = worldToScreen(v.lon, v.lat);
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+            }
+            ctx.stroke();
+
+            ctx.fillStyle = "#f8fafc";
+            for (const poiId of roadNetwork.pois) {
+                const poi = roadNetwork.nodes[poiId];
+                if (!poi) continue;
+                const p = worldToScreen(poi.lon, poi.lat);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            if (latestPath) {
+                drawUpdatedPath(latestPath);
+            }
+            ctx.restore();
+        }
+
+        function drawUpdatedPath(data) {
+            const path = data.planned_route_point || data.path || [];
+            if (path.length > 0) {
+                ctx.strokeStyle = "#22c55e";
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                path.forEach((node, index) => {
+                    const p = worldToScreen(node.lon, node.lat);
+                    if (index === 0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                });
+                ctx.stroke();
+            }
+
+            const snappedPoint = data.snapped_point || data.snapped_node;
+            if (snappedPoint) {
+                const p = worldToScreen(snappedPoint.lon, snappedPoint.lat);
+                ctx.fillStyle = "#ef4444";
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            for (const segment of data.segments || []) {
+                const t = segment.target_node;
+                const p = worldToScreen(t.lon, t.lat);
+                ctx.fillStyle = segment.type === "P" ? "#38bdf8" : "#f97316";
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "12px Arial";
+                ctx.fillText(`${segment.type}${segment.order_id}`, p.x + 8, p.y - 8);
+            }
+        }
+
+        function showResult(data) {
+            latestPath = data;
+            const snappedPoint = data.snapped_point || data.snapped_node;
+            const changedSteps = (data.changed_steps || []).map(step => {
+                const action = step.action === "pickup" ? "接客" : "送客";
+                return `${action}${step.order_id}`;
+            }).join("，") || "无";
+            summary.textContent = [
+                `车辆：${data.vehicle_id}`,
+                `吸附点：${snappedPoint?.name || snappedPoint?.id || "-"}`,
+                `GPS 到吸附点距离：${Number(snappedPoint?.distance_to_gps || 0).toFixed(2)} 米`,
+                `计划任务数：${data.planned_route_size}`,
+                `总距离：${Number(data.total_distance || 0).toFixed(2)} 米`,
+                `轨迹点数量：${(data.planned_route_point || data.path || []).length}`,
+                `分段数量：${(data.segments || []).length}`,
+                `本次上下客：${changedSteps}`,
+                `车上订单：${(data.on_board_orders || []).join(", ") || "无"}`,
+                `剩余计划：${(data.planned_route || []).length}`,
+                `更新时间：${new Date().toLocaleTimeString()}`
+            ].join("\n");
+            output.textContent = JSON.stringify(data, null, 2);
+            drawMap();
+        }
+
+        function distanceMeters(a, b) {
+            const r = 6371000;
+            const lat1 = a.lat * Math.PI / 180;
+            const lat2 = b.lat * Math.PI / 180;
+            const dLat = (b.lat - a.lat) * Math.PI / 180;
+            const dLon = (b.lon - a.lon) * Math.PI / 180;
+            const h = Math.sin(dLat / 2) ** 2
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return 2 * r * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+        }
+
+        function interpolatePoint(a, b, ratio) {
+            return {
+                lon: a.lon + (b.lon - a.lon) * ratio,
+                lat: a.lat + (b.lat - a.lat) * ratio
+            };
+        }
+
+        function advanceGpsForNextRequest(data) {
+            const points = (data.planned_route_point || data.path || [])
+                .filter(point => Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat)));
+            if (points.length < 2) return false;
+
+            // 后端返回的第一个点通常是当前吸附点，前端按固定距离沿轨迹推进来模拟 GPS 变化。
+            const snappedPoint = data.snapped_point || data.snapped_node || points[0];
+            let current = { lon: Number(snappedPoint.lon), lat: Number(snappedPoint.lat) };
+            let remainingDistance = 40;
+            let nextPoint = points[points.length - 1];
+
+            for (const point of points) {
+                const target = { lon: Number(point.lon), lat: Number(point.lat) };
+                const segmentDistance = distanceMeters(current, target);
+                if (segmentDistance < 0.1) {
+                    current = target;
+                    continue;
+                }
+                if (segmentDistance >= remainingDistance) {
+                    nextPoint = interpolatePoint(current, target, remainingDistance / segmentDistance);
+                    break;
+                }
+                remainingDistance -= segmentDistance;
+                current = target;
+            }
+
+            lonInput.value = Number(nextPoint.lon).toFixed(6);
+            latInput.value = Number(nextPoint.lat).toFixed(6);
+            return true;
+        }
+
+        async function initSystem() {
+            summary.textContent = "正在初始化系统...";
+            const data = await requestJson("/init", {
+                method: "POST",
+                body: JSON.stringify({})
+            });
+            summary.textContent = `初始化结果：${data.status}`;
+            output.textContent = JSON.stringify(data, null, 2);
+        }
+
+        async function loadAll() {
+            summary.textContent = "正在加载路网、车辆和 POI...";
+            const mapData = await requestJson("/map/road-network");
+            const fleetData = await requestJson("/fleet");
+            const poiData = await requestJson("/pois");
+
+            roadNetwork = mapData;
+            fillVehicles(fleetData.fleet || []);
+            fillPois(poiData.pois || []);
+            fitMapToCanvas();
+            drawMap();
+            summary.textContent = `已加载 ${Object.keys(mapData.nodes || {}).length} 个路网点，${mapData.edges.length} 条边，${vehicleSelect.options.length} 辆车。`;
+        }
+
+        function fillVehicles(fleet) {
+            vehicleSelect.innerHTML = "";
+            for (const vehicle of fleet) {
+                const option = document.createElement("option");
+                option.value = vehicle.id;
+                const routeSize = (vehicle.planned_route || []).length;
+                option.textContent = routeSize > 0 ? `${vehicle.id}（有任务）` : vehicle.id;
+                vehicleSelect.appendChild(option);
+            }
+        }
+
+        function fillPois(pois) {
+            poiList = pois;
+            poiSelect.innerHTML = "";
+            for (const poi of pois) {
+                const option = document.createElement("option");
+                option.value = `${poi.lon},${poi.lat}`;
+                option.textContent = `${poi.name} (${poi.lon.toFixed(6)}, ${poi.lat.toFixed(6)})`;
+                poiSelect.appendChild(option);
+            }
+            if (poiSelect.options.length > 0) {
+                fillPoiCoords();
+            }
+        }
+
+        function fillPoiCoords() {
+            const [lon, lat] = poiSelect.value.split(",");
+            lonInput.value = lon;
+            latInput.value = lat;
+        }
+
+        async function waitForAssignedVehicle(orderId) {
+            for (let i = 0; i < 12; i++) {
+                const fleetData = await requestJson("/fleet");
+                const fleet = fleetData.fleet || [];
+                const assigned = fleet.find(vehicle =>
+                    (vehicle.planned_route || []).some(step => String(step.order_id) === String(orderId))
+                ) || fleet.find(vehicle => (vehicle.planned_route || []).length > 0);
+
+                fillVehicles(fleet);
+                if (assigned) {
+                    vehicleSelect.value = assigned.id;
+                    const gps = assigned.gps || {};
+                    if (Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
+                        lonInput.value = Number(gps.lon).toFixed(6);
+                        latInput.value = Number(gps.lat).toFixed(6);
+                    }
+                    return assigned;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            return null;
+        }
+
+        async function createTestOrder() {
+            if (poiList.length < 2) {
+                const poiData = await requestJson("/pois");
+                poiList = poiData.pois || [];
+            }
+            if (poiList.length < 2) {
+                summary.textContent = "POI 数量不足，无法创建测试订单。";
+                return;
+            }
+
+            const pickup = poiList[3] || poiList[0];
+            const dropoff = poiList[8] || poiList[poiList.length - 1];
+            summary.textContent = "正在创建测试订单并等待调度分配...";
+            const orderData = await requestJson("/order", {
+                method: "POST",
+                body: JSON.stringify({
+                    plon: pickup.lon,
+                    plat: pickup.lat,
+                    dlon: dropoff.lon,
+                    dlat: dropoff.lat
+                })
+            });
+
+            const assigned = await waitForAssignedVehicle(orderData.order_id);
+            if (!assigned) {
+                summary.textContent = `测试订单 ${orderData.order_id} 已创建，但暂未分配到车辆。请稍后点击“加载地图”。`;
+                output.textContent = JSON.stringify(orderData, null, 2);
+                return;
+            }
+
+            summary.textContent = `测试订单 ${orderData.order_id} 已分配给 ${assigned.id}，可以开始实时更新。`;
+            output.textContent = JSON.stringify({ order: orderData, vehicle: assigned }, null, 2);
+        }
+
+        async function submitPathUpdate() {
+            const vehicleId = vehicleSelect.value;
+            const lon = Number(lonInput.value);
+            const lat = Number(latInput.value);
+
+            if (!vehicleId) {
+                summary.textContent = "请先选择车辆。";
+                return null;
+            }
+            if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+                summary.textContent = "请填写合法的 lon/lat 数字。";
+                return null;
+            }
+
+            const data = await requestJson(`/fleet/${encodeURIComponent(vehicleId)}/path`, {
+                method: "POST",
+                body: JSON.stringify({ lon, lat })
+            });
+            showResult(data);
+            if (!advanceGpsForNextRequest(data)) {
+                summary.textContent += "\n当前车辆没有可推进的规划轨迹，请先创建测试订单或选择有任务车辆。";
+            }
+            return data;
+        }
+
+        function toggleRealtime() {
+            if (realtimeTimer) {
+                clearInterval(realtimeTimer);
+                realtimeTimer = null;
+                realtimeBtn.textContent = "开始实时更新";
+                summary.textContent += "\n实时更新已停止。";
+                return;
+            }
+
+            const interval = Math.max(500, Number(intervalInput.value) || 2000);
+            realtimeBtn.textContent = "停止实时更新";
+            submitPathUpdate().catch(err => summary.textContent = err.message);
+            realtimeTimer = setInterval(() => {
+                submitPathUpdate().catch(err => summary.textContent = err.message);
+            }, interval);
+        }
+
+        canvas.addEventListener("mousedown", event => {
+            isDragging = true;
+            didDrag = false;
+            const dpr = window.devicePixelRatio || 1;
+            pointerStart = { x: event.clientX * dpr, y: event.clientY * dpr };
+            dragStart = {
+                x: pointerStart.x - offsetX,
+                y: pointerStart.y - offsetY
+            };
+        });
+
+        canvas.addEventListener("mousemove", event => {
+            if (!isDragging) return;
+            const dpr = window.devicePixelRatio || 1;
+            const x = event.clientX * dpr;
+            const y = event.clientY * dpr;
+            if (Math.hypot(x - pointerStart.x, y - pointerStart.y) > 4) {
+                didDrag = true;
+            }
+            offsetX = x - dragStart.x;
+            offsetY = y - dragStart.y;
+            drawMap();
+        });
+
+        canvas.addEventListener("mouseup", event => {
+            if (!isDragging) return;
+            isDragging = false;
+            if (didDrag) return;
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            const x = (event.clientX - rect.left) * dpr;
+            const y = (event.clientY - rect.top) * dpr;
+            const pos = screenToWorld(x, y);
+            lonInput.value = pos.lon.toFixed(6);
+            latInput.value = pos.lat.toFixed(6);
+        });
+        canvas.addEventListener("mouseleave", () => { isDragging = false; });
+
+        canvas.addEventListener("wheel", event => {
+            event.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            const x = (event.clientX - rect.left) * dpr;
+            const y = (event.clientY - rect.top) * dpr;
+            const before = screenToWorld(x, y);
+            const factor = event.deltaY < 0 ? 1.15 : 0.87;
+            scale *= factor;
+            const after = worldToScreen(before.lon, before.lat);
+            offsetX += x - after.x;
+            offsetY += y - after.y;
+            drawMap();
+        }, { passive: false });
+
+        document.getElementById("initBtn").addEventListener("click", () => {
+            initSystem().then(loadAll).catch(err => summary.textContent = err.message);
+        });
+        document.getElementById("loadBtn").addEventListener("click", () => {
+            loadAll().catch(err => summary.textContent = `${err.message}\n如果系统未初始化，请先点击“初始化系统”。`);
+        });
+        document.getElementById("submitBtn").addEventListener("click", () => {
+            submitPathUpdate().catch(err => summary.textContent = err.message);
+        });
+        document.getElementById("createOrderBtn").addEventListener("click", () => {
+            createTestOrder().catch(err => summary.textContent = err.message);
+        });
+        realtimeBtn.addEventListener("click", toggleRealtime);
+        poiSelect.addEventListener("change", fillPoiCoords);
+        window.addEventListener("resize", resizeCanvas);
+
+        resizeCanvas();
+        loadAll().catch(err => {
+            summary.textContent = `${err.message}\n如果系统未初始化，请先点击“初始化系统”。`;
+        });
+    </script>
+</body>
+
+</html>

@@ -6,7 +6,7 @@
 import os
 import random
 import heapq
-from auxiliary import AuxiliaryFunctions
+from .auxiliary import AuxiliaryFunctions
 
 # 尝试并实现自动热加载安装 shapefile (pyshp)
 HAS_SHAPEFILE = False
@@ -411,8 +411,8 @@ class Vehicle:
     
     Args:
         v_id (str): 车牌系统内部串行号或自编号。
-        start_node (str|Node对象的主键): 最初始化被挂载入库进入服务状态的点。
-        color (str): 前端展示时向外透传的底漆 HEX。
+        start_node (str|Node对象的主键): 最初始化被挂载入库进入服务状态的点。 -- 实际根据车辆GPS坐标决定
+        color (str): 前端展示时向外透传的底漆 HEX。 --测试使用的
         zone (int): 该车归属的车队原籍驻地标签。
         capacity (int, optional): 座位载客量定额。默认为 10 大巴制。
     """
@@ -440,6 +440,8 @@ class Vehicle:
         self.time = 0.0                    
         self.on_board_orders = []          
         self.planned_route = []            
+        self.planned_route_point = []
+        self.gps = {"lon": None, "lat": None}
         
         self.last_node = start_node
         self.next_node = start_node

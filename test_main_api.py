@@ -1,0 +1,193 @@
+﻿# -*- coding: utf-8 -*-
+"""main.py HTTP 接口冒烟测试脚本。
+
+用法：
+    python main.py
+    python test_main_api.py
+
+可选：
+    python test_main_api.py --base-url http://127.0.0.1:5000
+"""
+
+import argparse
+import json
+import os
+import platform
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+DEFAULT_BASE_URL = "http://127.0.0.1:5000"
+TEMP_EXPORT_FILE = "__tmp_main_api_export_test.js"
+
+
+def configure_console_encoding():
+    """尽量让 Windows 控制台按 UTF-8 显示中文，避免输出乱码。"""
+    if platform.system() == "Windows":
+        os.system("chcp 65001 > nul")
+
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+class ApiTestError(Exception):
+    """接口测试失败时抛出的异常。"""
+
+
+def request_json(base_url, method, path, body=None, expected_status=200):
+    """发送 HTTP 请求，并把响应解析成 JSON。"""
+    url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    data = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        raw = exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        raise ApiTestError(f"无法连接到 {base_url}：{exc.reason}") from exc
+
+    if status != expected_status:
+        raise ApiTestError(f"{method} {path} 返回 {status}，预期 {expected_status}：{raw[:300]}")
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ApiTestError(f"{method} {path} 没有返回合法 JSON：{raw[:300]}") from exc
+
+
+def assert_true(condition, message):
+    """断言条件成立；失败时抛出统一的测试异常。"""
+    if not condition:
+        raise ApiTestError(message)
+
+
+def run_tests(base_url):
+    """按顺序测试 main.py 暴露的主要 HTTP 接口。"""
+    results = []
+
+    def check(name, func):
+        """执行单个测试项并输出耗时。"""
+        started = time.perf_counter()
+        data = func()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        results.append((name, elapsed_ms))
+        print(f"[通过] {name}（{elapsed_ms:.0f} 毫秒）")
+        return data
+
+    health = check("健康检查 GET /health", lambda: request_json(base_url, "GET", "/health"))
+    assert_true(health.get("status") == "ok", "/health 的 status 应为 ok")
+
+    if not health.get("initialized"):
+        init = check("初始化系统 POST /init", lambda: request_json(base_url, "POST", "/init", {}))
+        assert_true(init.get("status") in {"initialized", "already_initialized"}, "/init 返回了非预期状态")
+        assert_true(init.get("nodes", 0) > 0, "/init 应加载到路网节点")
+    else:
+        print("[跳过] 初始化系统 POST /init（系统已初始化）")
+
+    status = check("系统状态 GET /status", lambda: request_json(base_url, "GET", "/status"))
+    assert_true(status.get("initialized") is True, "/status 应返回 initialized=true")
+    assert_true(status.get("nodes_count", 0) > 0, "/status 的 nodes_count 应大于 0")
+    assert_true(len(status.get("fleet", [])) > 0, "/status 的 fleet 不应为空")
+
+    pois = check("POI 列表 GET /pois", lambda: request_json(base_url, "GET", "/pois"))
+    poi_list = pois.get("pois", [])
+    assert_true(len(poi_list) >= 2, "/pois 至少应返回 2 个 POI")
+
+    fleet = check("车队列表 GET /fleet", lambda: request_json(base_url, "GET", "/fleet"))
+    fleet_list = fleet.get("fleet", [])
+    assert_true(len(fleet_list) > 0, "/fleet 应返回车辆列表")
+
+    first_vehicle_id = fleet_list[0]["id"]
+    vehicle = check(
+        f"单车状态 GET /fleet/{first_vehicle_id}",
+        lambda: request_json(base_url, "GET", "/fleet/" + urllib.parse.quote(first_vehicle_id, safe="")),
+    )
+    assert_true(vehicle.get("id") == first_vehicle_id, "/fleet/<vehicle_id> 返回了错误车辆")
+
+    missing_vehicle = check(
+        "不存在车辆 GET /fleet/__missing__ 应返回 404",
+        lambda: request_json(base_url, "GET", "/fleet/__missing__", expected_status=404),
+    )
+    assert_true("error" in missing_vehicle, "不存在车辆的响应应包含 error 字段")
+
+    p0, p1 = poi_list[0], poi_list[1]
+    path_body = {"lon": p0["lon"], "lat": p0["lat"]}
+    path = check(
+        f"更新车辆路径 POST /fleet/{first_vehicle_id}/path",
+        lambda: request_json(
+            base_url,
+            "POST",
+            "/fleet/" + urllib.parse.quote(first_vehicle_id, safe="") + "/path",
+            path_body,
+        ),
+    )
+    assert_true(path.get("vehicle_id") == first_vehicle_id, "更新路径接口应返回对应车辆 id")
+    assert_true("path" in path and "segments" in path, "更新路径接口应返回 path 和 segments")
+
+    order_body = {
+        "plon": p0["lon"],
+        "plat": p0["lat"],
+        "dlon": p1["lon"],
+        "dlat": p1["lat"],
+    }
+    order = check("创建订单 POST /order", lambda: request_json(base_url, "POST", "/order", order_body))
+    assert_true(order.get("status") == "pooled", "/order 应返回 status=pooled")
+    assert_true("order_id" in order, "/order 应返回 order_id")
+
+    pool = check("订单池 GET /orders/pool", lambda: request_json(base_url, "GET", "/orders/pool"))
+    assert_true("pool_size" in pool and "orders" in pool, "/orders/pool 应返回订单池字段")
+
+    tick = check("推进仿真 POST /tick", lambda: request_json(base_url, "POST", "/tick", {"dt": 0.1}))
+    assert_true(tick.get("dt") == 0.1, "/tick 应回显 dt")
+    assert_true(len(tick.get("fleet", [])) > 0, "/tick 应返回车队状态")
+
+    try:
+        export = check(
+            "导出地图 POST /export",
+            lambda: request_json(base_url, "POST", "/export", {"file_path": TEMP_EXPORT_FILE}),
+        )
+        assert_true(export.get("status") == "ok", "/export 应返回 status=ok")
+        assert_true(os.path.exists(TEMP_EXPORT_FILE), "/export 应创建临时导出文件")
+    finally:
+        if os.path.exists(TEMP_EXPORT_FILE):
+            os.remove(TEMP_EXPORT_FILE)
+
+    print(f"\n全部 {len(results)} 项接口检查通过。")
+
+
+def main():
+    """解析命令行参数并执行接口测试。"""
+    configure_console_encoding()
+
+    parser = argparse.ArgumentParser(description="测试 main.py 暴露的 HTTP 接口。")
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("MAIN_API_BASE_URL", DEFAULT_BASE_URL),
+        help="后端服务地址",
+    )
+    args = parser.parse_args()
+
+    try:
+        run_tests(args.base_url)
+    except ApiTestError as exc:
+        print(f"[失败] {exc}", file=sys.stderr)
+        print("请先启动后端服务：python main.py", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

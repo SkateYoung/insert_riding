@@ -1,0 +1,836 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>真实空间数据多车协同派发中心</title>
+    <!-- 拉取本地 Python 解析好的脱水地图模型 -->
+    <script src="map_data.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b1120;
+            --panel-bg: rgba(15, 23, 42, 0.9);
+            --text-color: #f8fafc;
+            --accent: #0ea5e9;
+            --btn-bg: #2563eb;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Inter', system-ui, sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            background-image:
+                radial-gradient(circle at 50% 50%, rgba(15, 23, 42, 0.3) 0%, transparent 80%),
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 100% 100%, 40px 40px, 40px 40px;
+        }
+
+        .container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+        }
+
+        .canvas-area {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+
+        canvas:active {
+            cursor: grabbing;
+        }
+
+        .panel {
+            width: 440px;
+            background: var(--panel-bg);
+            backdrop-filter: blur(20px);
+            border-left: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            box-shadow: -10px 0 30px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0 0 4px 0;
+            color: #fff;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.2s;
+            box-shadow: 0 4px 15px rgba(37, 99, 235, 0.4);
+            width: 100%;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.6);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .logs-container {
+            height: 160px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .log-item {
+            font-size: 12px;
+            padding: 10px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.03);
+            border-left: 3px solid #64748b;
+            line-height: 1.5;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+        }
+
+        .vehicle-card {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            text-align: center;
+        }
+
+        .vehicle-title {
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .vehicle-load {
+            font-size: 18px;
+            font-weight: bold;
+            color: #cbd5e1;
+        }
+
+        .eta-panel {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .status-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .vehicle-eta-section {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .vehicle-eta-title {
+            font-size: 13px;
+            font-weight: bold;
+            margin-bottom: 2px;
+        }
+
+        .tips {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            pointer-events: none;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        .speed-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .speed-btn {
+            background: rgba(255, 255, 255, 0.06);
+            color: #94a3b8;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.15s;
+        }
+
+        .speed-btn:hover {
+            background: rgba(255, 255, 255, 0.12);
+            color: #f8fafc;
+        }
+
+        .speed-btn.active {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+            color: #fff;
+            border-color: #3b82f6;
+            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+        }
+
+        /* 新增：统计数据中心模态框样式 */
+        #statsModal {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 85%;
+            height: 80%;
+            background: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            z-index: 1000;
+            display: none;
+            flex-direction: column;
+            padding: 20px;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
+        }
+
+        #statsModal .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        #statsModal .content {
+            flex: 1;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 15px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #10b981;
+            border-radius: 8px;
+            white-space: pre-wrap;
+        }
+
+        .cancel-btn {
+            background: #ef4444;
+            color: #fff;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .cancel-btn:hover {
+            background: #dc2626;
+            transform: scale(1.05);
+        }
+
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .stats-table th {
+            background: rgba(255, 255, 255, 0.1);
+            color: #94a3b8;
+            padding: 10px;
+            text-align: left;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .stats-table td {
+            padding: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            color: #e2e8f0;
+        }
+
+        .stats-table tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .manual-active {
+            outline: 3px solid #10b981 !important;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="canvas-area" id="canvasWrapper">
+            <canvas id="simCanvas"></canvas>
+            <div class="tips">🖱️ 支持鼠标滚轮缩放与拖拽平移路网</div>
+        </div>
+
+        <div class="panel">
+            <div class="header">
+                <h1>🌐 SHP高精路网三车指派中心</h1>
+                <div style="font-size:12px; color:#94a3b8">✅ 坐标吸附系统 | ✅ 全局分配</div>
+            </div>
+
+            <div class="status-grid" id="vPanel"></div>
+
+            <div class="speed-controls" id="speedControls">
+                <span style="font-size:12px; color:#94a3b8; margin-right:4px;">⏱ 倍速:</span>
+                <button class="speed-btn active" onclick="setSpeed(1, this)">1x</button>
+                <button class="speed-btn" onclick="setSpeed(2, this)">2x</button>
+                <button class="speed-btn" onclick="setSpeed(5, this)">5x</button>
+                <button class="speed-btn" onclick="setSpeed(10, this)">10x</button>
+                <button class="speed-btn" onclick="setSpeed(50, this)">50x</button>
+                <button class="speed-btn" onclick="setSpeed(100, this)">100x</button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px;">
+                <button onclick="generateWildOrder()" class="btn">🚀 模拟野外发起</button>
+                <button onclick="batchGenerateOrders(10)" class="btn"
+                    style="background: linear-gradient(135deg, #6366f1, #8b5cf6);">批量+10</button>
+                <button onclick="batchGenerateOrders(20)" class="btn"
+                    style="background: linear-gradient(135deg, #4f46e5, #7c3aed);">批量+20</button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <button onclick="toggleManualMode(this)" class="btn" style="background: #10b981;">🖱️ 手动选点下单</button>
+                <button onclick="openStatsModal()" class="btn" style="background: #8b5cf6;">📊 运营数据中心</button>
+            </div>
+
+            <h3 style="font-size:13px; margin: 0; color:#cbd5e1; display:flex; justify-content:space-between;">
+                <span>🎯 在线订单详细跟踪(ETA)</span>
+            </h3>
+            <div class="eta-panel" id="orderStatusPanel"></div>
+
+            <h3 style="font-size:13px; margin: 0; color:#cbd5e1;">⚡ 调度审计系统日志</h3>
+            <div class="logs-container" id="logPanel"></div>
+        </div>
+    </div>
+
+    <!-- 统计模态框 -->
+    <div id="statsModal">
+        <div class="header">
+            <h2 style="margin:0; font-size:18px;">📊 运营中心实时流水审计</h2>
+            <div style="display:flex; gap:10px;">
+                <button onclick="downloadCSV()" class="btn"
+                    style="background:#10b981; padding:6px 15px; font-size:13px;">📥 导出 CSV</button>
+                <button onclick="closeStatsModal()" class="speed-btn">关闭窗口</button>
+            </div>
+        </div>
+        <div class="content" id="statsContent" style="padding:0; overflow:hidden;">
+            <div style="width:100%; height:100%; overflow:auto;" id="statsTableWrapper">
+                <!-- 表格将在此渲染 -->
+                <div style="padding:20px; color:#94a3b8;">暂无流水数据...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const BACKEND = (location.origin && location.origin !== 'null' && location.origin.startsWith('http'))
+            ? location.origin
+            : 'http://localhost:5000';
+        const API_PREFIX = `${BACKEND}/sim`;
+
+        const logPanel = document.getElementById('logPanel');
+        const orderStatusPanel = document.getElementById('orderStatusPanel');
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const wrapper = document.getElementById('canvasWrapper');
+
+        let MAP = null;
+        let mapPath = null;
+        let latestState = null;
+        let speedMultiplier = 1;
+        let manualOrderState = { active: false, step: 0, pNode: null };
+        let lastTime = performance.now();
+        let tickInFlight = false;
+        let pendingDt = 0;
+        let lastRenderStateTime = 0;
+        let lastRenderWallTime = performance.now();
+        let orderRecords = {};
+
+        function getRealDateTime() {
+            const now = new Date();
+            return {
+                date: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`,
+                time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+            };
+        }
+
+        function ensureRecord(orderId, stateText = '运行中') {
+            if (orderRecords[orderId]) return orderRecords[orderId];
+            const now = getRealDateTime();
+            orderRecords[orderId] = {
+                '统计日期': now.date,
+                '订单id': orderId,
+                '订单状态': stateText,
+                '行程id': '',
+                '商户名称': '[易搭巴士]广州公交知识城',
+                '运营区域': '广州大学城',
+                '起点名称': '',
+                '终点名称': '',
+                '司机id': '', '司机工号': '', '车辆id': '', '车牌号': '',
+                '乘客id': '',
+                '呼单时间': now.time,
+                '应答时间': '', '上客时间': '', '完单时间': '',
+                '取消类型': '未取消', '取消时间': '',
+                '发单乘客人次': '1',
+                '实际接驾里程(米)': '0', '实际接驾时长(分钟)': '0',
+                '乘客计费时长(分钟)': '0', '载客里程(米)': '0',
+                '送驾平均时速(千米/小时)': '0', '接驾平均时速(千米/小时)': '0'
+            };
+            return orderRecords[orderId];
+        }
+
+        window.openStatsModal = function () {
+            const modal = document.getElementById('statsModal');
+            const wrapper = document.getElementById('statsTableWrapper');
+            modal.style.display = 'flex';
+            const records = Object.values(orderRecords);
+            if (records.length === 0) {
+                wrapper.innerHTML = '<div style="padding:20px; color:#94a3b8;">暂无流水数据...</div>';
+                return;
+            }
+            const headers = Object.keys(records[0]);
+            let html = '<table class="stats-table"><thead><tr>';
+            headers.forEach(h => html += `<th>${h}</th>`);
+            html += '</tr></thead><tbody>';
+            records.forEach(r => {
+                html += '<tr>';
+                headers.forEach(h => html += `<td>${r[h] || ''}</td>`);
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+            wrapper.innerHTML = html;
+        };
+
+        window.downloadCSV = function () {
+            const records = Object.values(orderRecords);
+            if (records.length === 0) return;
+            const headers = Object.keys(records[0]);
+            let csv = headers.join(',') + '\n';
+            records.forEach(r => {
+                csv += headers.map(h => `"${String(r[h] || '').replace(/"/g, '""')}"`).join(',') + '\n';
+            });
+            const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `dispatch_records_${Date.now()}.csv`;
+            link.click();
+        };
+
+        window.closeStatsModal = function () {
+            document.getElementById('statsModal').style.display = 'none';
+        };
+
+        window.toggleManualMode = function (btn) {
+            manualOrderState.active = !manualOrderState.active;
+            manualOrderState.step = 0;
+            manualOrderState.pNode = null;
+            btn.classList.toggle('manual-active', manualOrderState.active);
+            btn.textContent = manualOrderState.active ? '✅ 请选择上车点' : '🖱️ 手动选点下单';
+            addLog(manualOrderState.active ? '手动模式已开启，请在地图上选择上车 POI。' : '手动模式已关闭。', '#10b981');
+        };
+
+        let scale = 1.0;
+        let panX = 0;
+        let panY = 0;
+
+        function resizeCanvas() {
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = wrapper.clientWidth * dpr;
+            canvas.height = wrapper.clientHeight * dpr;
+            scale = Math.min(canvas.width / 1000, canvas.height / 800) * 0.9;
+            panX = (canvas.width - 1000 * scale) / 2;
+            panY = (canvas.height - 800 * scale) / 2;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        let isDragging = false;
+        let startDrag = { x: 0, y: 0 };
+        canvas.addEventListener('mousedown', e => {
+            if (manualOrderState.active && MAP) {
+                const rect = canvas.getBoundingClientRect();
+                const dpr = window.devicePixelRatio || 1;
+                const worldX = ((e.clientX - rect.left) * dpr - panX) / scale;
+                const worldY = ((e.clientY - rect.top) * dpr - panY) / scale;
+                let bestNode = null;
+                let bestDist = Infinity;
+                MAP.pois.forEach(id => {
+                    const n = MAP.nodes[id];
+                    const d = Math.hypot(n.x - worldX, n.y - worldY);
+                    if (d < bestDist) { bestDist = d; bestNode = n; }
+                });
+                if (!bestNode || bestDist > 25 / scale) return;
+                if (manualOrderState.step === 0) {
+                    manualOrderState.pNode = bestNode;
+                    manualOrderState.step = 1;
+                    addLog(`已选择上车点：${bestNode.name || bestNode.id}，请继续选择下车点。`, '#0ea5e9');
+                } else {
+                    submitManualOrder(manualOrderState.pNode, bestNode);
+                    manualOrderState.step = 0;
+                    manualOrderState.pNode = null;
+                }
+                return;
+            }
+            isDragging = true;
+            startDrag = { x: e.clientX * (window.devicePixelRatio || 1) - panX, y: e.clientY * (window.devicePixelRatio || 1) - panY };
+        });
+        canvas.addEventListener('mousemove', e => {
+            if (!isDragging) return;
+            panX = e.clientX * (window.devicePixelRatio || 1) - startDrag.x;
+            panY = e.clientY * (window.devicePixelRatio || 1) - startDrag.y;
+        });
+        ['mouseup', 'mouseleave'].forEach(evt => canvas.addEventListener(evt, () => isDragging = false));
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = (e.clientX - rect.left) * dpr;
+            const mouseY = (e.clientY - rect.top) * dpr;
+            const zoomFactor = Math.exp((e.deltaY < 0 ? 1 : -1) * 0.1);
+            panX = mouseX - (mouseX - panX) * zoomFactor;
+            panY = mouseY - (mouseY - panY) * zoomFactor;
+            scale *= zoomFactor;
+        }, { passive: false });
+
+        function addLog(msg, color = '#64748b') {
+            const el = document.createElement('div');
+            el.className = 'log-item';
+            el.style.borderLeftColor = color;
+            el.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logPanel.prepend(el);
+            if (logPanel.children.length > 50) logPanel.removeChild(logPanel.lastChild);
+        }
+
+        async function fetchMapData() {
+            const resp = await fetch(`${API_PREFIX}/map_snapshot`);
+            if (!resp.ok) throw new Error(`map_snapshot ${resp.status}`);
+            MAP = await resp.json();
+            mapPath = new Path2D();
+            MAP.edges.forEach(e => {
+                const u = MAP.nodes[e.u];
+                const v = MAP.nodes[e.v];
+                if (u && v) { mapPath.moveTo(u.x, u.y); mapPath.lineTo(v.x, v.y); }
+            });
+            addLog('SHP 物理环境已由 Python 后端加载，前端展示引擎启动。', '#0ea5e9');
+        }
+
+        function formatTime(sec) {
+            const m = Math.floor(Math.max(0, sec) / 60);
+            const s = Math.floor(Math.max(0, sec) % 60);
+            return `${m}分${s}秒`;
+        }
+
+        function renderFleetCards() {
+            if (!latestState) return;
+            let html = '';
+            latestState.fleet.forEach(v => {
+                html += `<div class="vehicle-card" style="border-bottom: 3px solid ${v.color};">
+                    <div style="display:flex; justify-content:space-between; align-items:center; width:100%">
+                        <div class="vehicle-title" style="color:${v.color}">${v.id}</div>
+                        <button disabled class="speed-btn" style="opacity:0.5; padding:2px 8px; cursor:not-allowed;">Python调度</button>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-top:5px; color:#94a3b8">
+                        <div>系统时间: ${formatTime(latestState.sysTime || 0)}</div>
+                        <div class="vehicle-load">${v.onBoardCount}<span style="font-size:10px;color:#64748b"> / 10</span></div>
+                    </div>
+                </div>`;
+            });
+            document.getElementById('vPanel').innerHTML = html;
+        }
+
+        function renderOrders() {
+            if (!latestState) return;
+            const routeByOrder = new Map();
+            latestState.fleet.forEach(v => {
+                (v.plannedRoute || []).forEach(step => routeByOrder.set(step.order.id, { vehicle: v, step }));
+            });
+            let html = '';
+            latestState.fleet.forEach(v => {
+                html += `<div class="vehicle-eta-section" style="border-left: 3px solid ${v.color};">
+                    <div class="vehicle-eta-title" style="color: ${v.color};">${v.id} 任务追踪卡</div>`;
+                const orders = (latestState.activeOrders || []).filter(ao => ao.vId === v.id);
+                if (orders.length === 0) {
+                    html += '<div style="font-size:11px; color:#64748b;">✅ 辖区空闲巡回待命中...</div>';
+                } else {
+                    orders.forEach(ao => {
+                        const route = routeByOrder.get(ao.orderId);
+                        const step = route ? route.step : null;
+                        const pName = step ? (MAP.nodes[step.order.pNode.id]?.name || step.order.pNode.id) : '';
+                        const dName = step ? (MAP.nodes[step.order.dNode.id]?.name || step.order.dNode.id) : '';
+                        const rec = ensureRecord(ao.orderId, ao.state === 'riding' ? '运载中' : '已接单');
+                        rec['订单状态'] = ao.state === 'riding' ? '运载中' : '已接单';
+                        rec['起点名称'] = pName;
+                        rec['终点名称'] = dName;
+                        rec['应答时间'] = rec['应答时间'] || getRealDateTime().time;
+                        if (ao.state === 'riding') rec['上客时间'] = rec['上客时间'] || getRealDateTime().time;
+                        if (ao.state === 'waiting') {
+                            html += `<div class="status-item"><b>[P]</b> 👉 接驾 <b style="color:#0ea5e9">${pName || '候车点'}</b> <small>[单${ao.orderId}]</small> | <b style="color:#fcd34d">${ao.pickRemain.toFixed(1)}s</b></div>`;
+                        } else {
+                            html += `<div class="status-item" style="border-color: rgba(16,185,129,0.3); background:rgba(16,185,129,0.08);"><b>[D]</b> ✔️ 运载中 <b style="color:#10b981">[单${ao.orderId}]</b> | <span style="color:#94a3b8">距下车: </span><b style="color:#fcd34d">${ao.arrRemain.toFixed(1)}s</b></div>`;
+                        }
+                    });
+                }
+                html += '</div>';
+            });
+            orderStatusPanel.innerHTML = html;
+        }
+
+        function drawMap() {
+            if (!MAP) return;
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.translate(panX, panY);
+            ctx.scale(scale, scale);
+
+            ctx.lineWidth = Math.max(0.5, 2.0 / scale);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke(mapPath);
+
+            const ptRadius = Math.max(2, 4.0 / scale);
+            ctx.fillStyle = '#fff';
+            MAP.pois.forEach(id => {
+                const p = MAP.nodes[id];
+                ctx.beginPath(); ctx.arc(p.x, p.y, ptRadius, 0, Math.PI * 2); ctx.fill();
+                if (scale > 2.0) {
+                    ctx.fillStyle = '#94a3b8'; ctx.font = `${6 / scale}px Arial`;
+                    ctx.fillText(id, p.x + ptRadius, p.y - ptRadius);
+                    ctx.fillStyle = '#fff';
+                }
+            });
+
+            if (latestState) {
+                latestState.fleet.forEach(v => {
+                    if (v.pathQueue && v.pathQueue.length > 0) {
+                        ctx.beginPath();
+                        ctx.moveTo(v.x, v.y);
+                        v.pathQueue.forEach(q => ctx.lineTo(q.node.x, q.node.y));
+                        ctx.strokeStyle = v.color;
+                        ctx.lineWidth = Math.max(1.0, 3.0 / scale);
+                        ctx.globalAlpha = 0.6; ctx.stroke(); ctx.globalAlpha = 1.0;
+                    }
+
+                    const vRad = Math.max(3, 8.0 / scale);
+                    ctx.beginPath(); ctx.arc(v.x, v.y, vRad, 0, Math.PI * 2);
+                    ctx.fillStyle = v.color; ctx.shadowBlur = 10; ctx.shadowColor = v.color; ctx.fill();
+                    ctx.shadowBlur = 0;
+
+                    if (v.plannedRoute && v.plannedRoute.length > 0) {
+                        ctx.setLineDash([5, 5]);
+                        ctx.beginPath();
+                        ctx.moveTo(v.x, v.y);
+                        v.plannedRoute.forEach((step, idx) => {
+                            const target = step.type === 'P' ? step.order.pNode : step.order.dNode;
+                            ctx.lineTo(target.x, target.y - ((idx + 1) * ptRadius * 2.5));
+                        });
+                        ctx.strokeStyle = v.color;
+                        ctx.lineWidth = Math.max(0.5, 1.5 / scale);
+                        ctx.globalAlpha = 0.4; ctx.stroke(); ctx.globalAlpha = 1.0;
+                        ctx.setLineDash([]);
+                    }
+
+                    (v.plannedRoute || []).forEach((step, idx) => {
+                        const target = step.type === 'P' ? step.order.pNode : step.order.dNode;
+                        const offset = (idx + 1) * ptRadius * 2.5;
+                        ctx.fillStyle = step.type === 'P' ? '#0ea5e9' : '#ef4444';
+                        ctx.beginPath(); ctx.arc(target.x, target.y - offset, ptRadius * 1.8, 0, Math.PI * 2); ctx.fill();
+                        ctx.strokeStyle = v.color; ctx.lineWidth = 2 / scale; ctx.stroke();
+                        ctx.fillStyle = '#fff'; ctx.font = `bold ${9 / scale}px Arial`;
+                        ctx.fillText(`${idx + 1}:${step.type}${String(step.order.id).slice(-2)}`, target.x - ptRadius * 2, target.y - offset + ptRadius / 2);
+                    });
+                });
+            }
+
+            if (scale > 1.5) {
+                ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                ctx.font = `${10 / scale}px Arial`;
+                MAP.pois.forEach(id => {
+                    const p = MAP.nodes[id];
+                    ctx.fillText(p.name || id, p.x + ptRadius, p.y + ptRadius * 3);
+                });
+            }
+
+            if (manualOrderState.active && manualOrderState.pNode) {
+                const p = manualOrderState.pNode;
+                ctx.strokeStyle = '#10b981'; ctx.lineWidth = 4 / scale;
+                ctx.beginPath(); ctx.arc(p.x, p.y, ptRadius * 4, 0, Math.PI * 2); ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+
+        function applyState(state) {
+            latestState = state;
+            lastRenderStateTime = state.sysTime || 0;
+            lastRenderWallTime = performance.now();
+            (state.logs || []).forEach(log => addLog(log.msg, log.color));
+            renderFleetCards();
+            renderOrders();
+        }
+
+        async function postJson(path, body) {
+            const resp = await fetch(`${API_PREFIX}${path}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body || {})
+            });
+            if (!resp.ok) throw new Error(`${path} ${resp.status}`);
+            return resp.json();
+        }
+
+        window.generateWildOrder = async function () {
+            try {
+                applyState(await postJson('/spawn_order', {}));
+            } catch (e) {
+                addLog(`下单失败：${e.message}`, '#ef4444');
+            }
+        };
+
+        window.batchGenerateOrders = async function (count) {
+            addLog(`正在向 Python 后端提交 ${count} 个随机订单。`, '#8b5cf6');
+            try {
+                applyState(await postJson('/spawn_order', { count }));
+            } catch (e) {
+                addLog(`批量下单失败：${e.message}`, '#ef4444');
+            }
+        };
+
+        async function submitManualOrder(pNode, dNode) {
+            if (!pNode || !dNode || pNode.id === dNode.id) {
+                addLog('上下车点相同，手动订单已取消。', '#ef4444');
+                return;
+            }
+            try {
+                applyState(await postJson('/spawn_order', { p_node_id: pNode.id, d_node_id: dNode.id }));
+                addLog(`手动订单已提交：${pNode.name || pNode.id} → ${dNode.name || dNode.id}`, '#10b981');
+            } catch (e) {
+                addLog(`手动下单失败：${e.message}`, '#ef4444');
+            }
+        }
+
+        window.requestRest = function () {
+            addLog('该展示页仅接入 Python 调度接口，休息控制未在本次迁移中启用。', '#f59e0b');
+        };
+
+        window.cancelOrder = function () {
+            addLog('该展示页仅接入 Python 调度接口，取消订单未在本次迁移中启用。', '#f59e0b');
+        };
+
+        window.setSpeed = function (val, btn) {
+            speedMultiplier = val;
+            document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+        };
+
+        async function animate() {
+            const now = performance.now();
+            const rawDt = Math.min((now - lastTime) / 1000.0, 0.1);
+            lastTime = now;
+            pendingDt += rawDt * speedMultiplier;
+
+            if (!tickInFlight && MAP && pendingDt > 0) {
+                tickInFlight = true;
+                const dt = pendingDt;
+                pendingDt = 0;
+                postJson('/tick', { dt })
+                    .then(applyState)
+                    .catch(e => addLog(`后端心跳失败：${e.message}`, '#ef4444'))
+                    .finally(() => { tickInFlight = false; });
+            }
+
+            drawMap();
+            requestAnimationFrame(animate);
+        }
+
+        fetchMapData()
+            .then(async () => {
+                applyState(await postJson('/tick', { dt: 0 }));
+                requestAnimationFrame(animate);
+            })
+            .catch(e => {
+                addLog(`初始化失败：${e.message}，请确认 python main.py 正在运行。`, '#ef4444');
+            });
+    </script>
+</body>
+
+</html>
