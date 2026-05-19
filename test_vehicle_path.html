@@ -187,6 +187,12 @@
         let realtimeTimer = null;
         let poiList = [];
 
+        /**
+         * 调用后端 JSON API，并统一处理非 2xx 错误。
+         * @param {string} path API 路径，例如 "/fleet"。
+         * @param {RequestInit} options fetch 配置。
+         * @returns {Promise<object>} 后端返回的 JSON 对象。
+         */
         async function requestJson(path, options = {}) {
             const resp = await fetch(`${API_BASE}${path}`, {
                 headers: { "Content-Type": "application/json" },
@@ -205,6 +211,10 @@
             return data;
         }
 
+        /**
+         * 按设备像素比调整画布尺寸，并重新适配地图视野。
+         * @returns {void}
+         */
         function resizeCanvas() {
             const rect = canvas.getBoundingClientRect();
             const dpr = window.devicePixelRatio || 1;
@@ -214,6 +224,10 @@
             drawMap();
         }
 
+        /**
+         * 根据路网边界计算初始缩放和平移量。
+         * @returns {void}
+         */
         function fitMapToCanvas() {
             if (!roadNetwork) return;
             const b = roadNetwork.bounds;
@@ -226,6 +240,12 @@
             offsetY = (canvas.height + height * scale) / 2 + b.min_lat * scale;
         }
 
+        /**
+         * 将经纬度坐标转换为 Canvas 像素坐标。
+         * @param {number} lon 经度。
+         * @param {number} lat 纬度。
+         * @returns {{x: number, y: number}} 屏幕坐标。
+         */
         function worldToScreen(lon, lat) {
             return {
                 x: lon * scale + offsetX,
@@ -233,6 +253,12 @@
             };
         }
 
+        /**
+         * 将 Canvas 像素坐标反算为经纬度坐标。
+         * @param {number} x Canvas X 坐标。
+         * @param {number} y Canvas Y 坐标。
+         * @returns {{lon: number, lat: number}} 经纬度坐标。
+         */
         function screenToWorld(x, y) {
             return {
                 lon: (x - offsetX) / scale,
@@ -240,6 +266,10 @@
             };
         }
 
+        /**
+         * 绘制基础路网、POI 和最新车辆路径。
+         * @returns {void}
+         */
         function drawMap() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = "#0f172a";
@@ -280,6 +310,11 @@
             ctx.restore();
         }
 
+        /**
+         * 绘制后端返回的车辆轨迹、吸附点和接送目标点。
+         * @param {object} data /fleet/<vehicle_id>/path 返回的数据。
+         * @returns {void}
+         */
         function drawUpdatedPath(data) {
             const path = data.planned_route_point || data.path || [];
             if (path.length > 0) {
@@ -319,6 +354,11 @@
             }
         }
 
+        /**
+         * 将路径更新结果写入摘要面板，并触发地图重绘。
+         * @param {object} data 路径更新接口返回体。
+         * @returns {void}
+         */
         function showResult(data) {
             latestPath = data;
             const snappedPoint = data.snapped_point || data.snapped_node;
@@ -343,6 +383,12 @@
             drawMap();
         }
 
+        /**
+         * 计算两个经纬度点之间的球面距离。
+         * @param {{lon: number, lat: number}} a 起点。
+         * @param {{lon: number, lat: number}} b 终点。
+         * @returns {number} 两点距离，单位米。
+         */
         function distanceMeters(a, b) {
             const r = 6371000;
             const lat1 = a.lat * Math.PI / 180;
@@ -354,6 +400,13 @@
             return 2 * r * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
         }
 
+        /**
+         * 按比例在线段上插值，生成下一次模拟 GPS。
+         * @param {{lon: number, lat: number}} a 起点。
+         * @param {{lon: number, lat: number}} b 终点。
+         * @param {number} ratio 插值比例，范围 0~1。
+         * @returns {{lon: number, lat: number}} 插值后的经纬度。
+         */
         function interpolatePoint(a, b, ratio) {
             return {
                 lon: a.lon + (b.lon - a.lon) * ratio,
@@ -361,6 +414,11 @@
             };
         }
 
+        /**
+         * 沿后端返回的规划轨迹推进车辆 GPS，模拟车辆持续行驶。
+         * @param {object} data 路径更新接口返回体。
+         * @returns {boolean} 成功写入下一次 GPS 时返回 true。
+         */
         function advanceGpsForNextRequest(data) {
             const points = (data.planned_route_point || data.path || [])
                 .filter(point => Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat)));
@@ -392,6 +450,10 @@
             return true;
         }
 
+        /**
+         * 调用后端初始化接口，并显示初始化结果。
+         * @returns {Promise<void>}
+         */
         async function initSystem() {
             summary.textContent = "正在初始化系统...";
             const data = await requestJson("/init", {
@@ -402,6 +464,10 @@
             output.textContent = JSON.stringify(data, null, 2);
         }
 
+        /**
+         * 加载路网、车队和 POI 数据，并刷新页面控件。
+         * @returns {Promise<void>}
+         */
         async function loadAll() {
             summary.textContent = "正在加载路网、车辆和 POI...";
             const mapData = await requestJson("/map/road-network");
@@ -416,6 +482,11 @@
             summary.textContent = `已加载 ${Object.keys(mapData.nodes || {}).length} 个路网点，${mapData.edges.length} 条边，${vehicleSelect.options.length} 辆车。`;
         }
 
+        /**
+         * 将车辆列表写入下拉框，带任务车辆会在名称中标记。
+         * @param {Array<object>} fleet /fleet 接口返回的车辆列表。
+         * @returns {void}
+         */
         function fillVehicles(fleet) {
             vehicleSelect.innerHTML = "";
             for (const vehicle of fleet) {
@@ -427,6 +498,11 @@
             }
         }
 
+        /**
+         * 将 POI 列表写入下拉框，并默认填入第一个 POI 坐标。
+         * @param {Array<object>} pois /pois 接口返回的 POI 列表。
+         * @returns {void}
+         */
         function fillPois(pois) {
             poiList = pois;
             poiSelect.innerHTML = "";
@@ -441,12 +517,21 @@
             }
         }
 
+        /**
+         * 将当前选中的 POI 坐标填入 GPS 输入框。
+         * @returns {void}
+         */
         function fillPoiCoords() {
             const [lon, lat] = poiSelect.value.split(",");
             lonInput.value = lon;
             latInput.value = lat;
         }
 
+        /**
+         * 轮询车队状态，等待测试订单被后台匹配线程分配给车辆。
+         * @param {string|number} orderId 测试订单 ID。
+         * @returns {Promise<object|null>} 已分配车辆；超时返回 null。
+         */
         async function waitForAssignedVehicle(orderId) {
             for (let i = 0; i < 12; i++) {
                 const fleetData = await requestJson("/fleet");
@@ -470,6 +555,10 @@
             return null;
         }
 
+        /**
+         * 创建一条测试订单，并自动选中接到该订单的车辆。
+         * @returns {Promise<void>}
+         */
         async function createTestOrder() {
             if (poiList.length < 2) {
                 const poiData = await requestJson("/pois");
@@ -504,6 +593,10 @@
             output.textContent = JSON.stringify({ order: orderData, vehicle: assigned }, null, 2);
         }
 
+        /**
+         * 提交当前 GPS，触发车辆路径更新并推进下一次模拟 GPS。
+         * @returns {Promise<object|null>} 后端路径更新结果；输入不合法时返回 null。
+         */
         async function submitPathUpdate() {
             const vehicleId = vehicleSelect.value;
             const lon = Number(lonInput.value);
@@ -529,6 +622,10 @@
             return data;
         }
 
+        /**
+         * 开启或停止定时路径更新。
+         * @returns {void}
+         */
         function toggleRealtime() {
             if (realtimeTimer) {
                 clearInterval(realtimeTimer);

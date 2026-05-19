@@ -1,3 +1,9 @@
+"""Flask API 路由层。
+
+本模块只负责 HTTP 请求解析、参数校验和 JSON 响应组装。
+调度、寻路、预测等业务逻辑统一委托给 api.core.CoreDispatcher。
+"""
+
 import time
 
 from flask import Blueprint, jsonify, request
@@ -12,7 +18,14 @@ bp = Blueprint("api_routes", __name__)
 
 
 def _vehicle_to_dict(v):
-    """将 Vehicle 对象转为 JSON 可序列化的字典。"""
+    """将 Vehicle 对象转为接口可返回的 JSON 字典。
+
+    Args:
+        v (Vehicle): 运行期车辆对象。
+
+    Returns:
+        dict: 包含车辆身份、载客状态、订单计划、轨迹点和空车预测信息的快照。
+    """
     return {
         "id": v.id,
         "color": v.color,
@@ -26,6 +39,8 @@ def _vehicle_to_dict(v):
         "on_board_count": len(v.on_board_orders),
         "on_board_orders": [o.id for o in v.on_board_orders],
         "gps": v.gps,
+        "idle_target": v.idle_target,
+        "idle_forecast": v.idle_forecast,
         "planned_route": [
             {
                 "type": s["type"],
@@ -50,13 +65,29 @@ def _vehicle_to_dict(v):
 
 @bp.route("/health", methods=["GET"])
 def health():
-    """健康检查。"""
+    """健康检查接口。
+
+    Request:
+        GET /health
+
+    Returns:
+        JSON: status 表示服务状态，initialized 表示系统是否已完成初始化。
+    """
     return jsonify({"status": "ok", "initialized": state.system_initialized})
 
 
 @bp.route("/init", methods=["POST"])
 def init_route():
-    """初始化整个调度系统（加载路网、车队、启动匹配引擎）。"""
+    """初始化整个调度系统。
+
+    Request:
+        POST /init
+        Body JSON 可选字段:
+            shp_path (str): 自定义路网 SHP 文件路径。
+
+    Returns:
+        JSON: 初始化状态、路网节点数量、POI 数量和道路边数量。
+    """
     if state.system_initialized:
         return jsonify({
             "status": "already_initialized",
@@ -82,7 +113,17 @@ def init_route():
 
 @bp.route("/order", methods=["POST"])
 def create_order():
-    """创建新订单并注入调度池。"""
+    """创建新订单并注入调度池。
+
+    Request:
+        POST /order
+        Body JSON 可选字段:
+            plon/plat (float): 乘客上车原始经纬度。
+            dlon/dlat (float): 乘客下车原始经纬度。
+
+    Returns:
+        JSON: 新订单 ID、吸附后的上下车 POI 信息和当前订单池大小。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化，请先调用 POST /init"}), 400
 
@@ -109,7 +150,14 @@ def create_order():
 
 @bp.route("/orders/pool", methods=["GET"])
 def get_order_pool():
-    """查看订单池当前状态。"""
+    """查看订单池当前状态。
+
+    Request:
+        GET /orders/pool
+
+    Returns:
+        JSON: 待匹配订单数量、已完成订单数量和待匹配订单列表。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     return jsonify({
@@ -129,7 +177,14 @@ def get_order_pool():
 
 @bp.route("/fleet", methods=["GET"])
 def get_fleet():
-    """获取全部车辆状态。"""
+    """获取全部车辆状态。
+
+    Request:
+        GET /fleet
+
+    Returns:
+        JSON: fleet 数组，每项为 _vehicle_to_dict 生成的车辆快照。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     return jsonify({"fleet": [_vehicle_to_dict(v) for v in state.fleet]})
@@ -137,7 +192,14 @@ def get_fleet():
 
 @bp.route("/fleet/<vehicle_id>", methods=["GET"])
 def get_vehicle(vehicle_id):
-    """获取单辆车状态。"""
+    """获取单辆车状态。
+
+    Args:
+        vehicle_id (str): URL 路径中的车辆业务 ID。
+
+    Returns:
+        JSON: 指定车辆快照；车辆不存在时返回 404。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     for v in state.fleet:
@@ -148,7 +210,20 @@ def get_vehicle(vehicle_id):
 
 @bp.route("/fleet/<vehicle_id>/path", methods=["POST"])
 def update_vehicle_path(vehicle_id):
-    """根据车辆 GPS 坐标和当前订单计划，实时更新后续路网轨迹。"""
+    """根据车辆 GPS 坐标实时更新车辆后续路网轨迹。
+
+    Args:
+        vehicle_id (str): URL 路径中的车辆业务 ID。
+
+    Request:
+        POST /fleet/<vehicle_id>/path
+        Body JSON 字段:
+            lon/lng/longitude (float): 车辆当前 GPS 经度。
+            lat/latitude (float): 车辆当前 GPS 纬度。
+
+    Returns:
+        JSON: 吸附点、更新后的 planned_route_point、上下客变更和车辆订单状态。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
 
@@ -184,7 +259,16 @@ def update_vehicle_path(vehicle_id):
 
 @bp.route("/tick", methods=["POST"])
 def tick_vehicles():
-    """推进所有车辆的时间步进（用于物理仿真测试）。"""
+    """推进所有车辆的仿真时间。
+
+    Request:
+        POST /tick
+        Body JSON 可选字段:
+            dt (float): 推进秒数，默认 1 秒。
+
+    Returns:
+        JSON: 本次推进时长和推进后的车队状态。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     data = request.get_json(silent=True) or {}
@@ -199,7 +283,14 @@ def tick_vehicles():
 
 @bp.route("/status", methods=["GET"])
 def full_status():
-    """获取系统全量状态快照。"""
+    """获取系统全量状态快照。
+
+    Request:
+        GET /status
+
+    Returns:
+        JSON: 初始化状态、路网规模、车队状态、订单池和完成订单统计。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     return jsonify({
@@ -215,7 +306,16 @@ def full_status():
 
 @bp.route("/export", methods=["POST"])
 def export_visualization():
-    """导出可视化数据到 map_data.js（供前端 demo.html 使用）。"""
+    """导出前端可视化数据。
+
+    Request:
+        POST /export
+        Body JSON 可选字段:
+            file_path (str): 导出的 JS 文件路径。
+
+    Returns:
+        JSON: 导出状态和文件路径；导出失败时返回错误信息。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     data = request.get_json(silent=True) or {}
@@ -229,7 +329,14 @@ def export_visualization():
 
 @bp.route("/pois", methods=["GET"])
 def get_pois():
-    """获取所有 POI 站点列表。"""
+    """获取所有 POI 站点列表。
+
+    Request:
+        GET /pois
+
+    Returns:
+        JSON: POI 的 id、名称、经纬度和分区。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     return jsonify({
@@ -248,7 +355,14 @@ def get_pois():
 
 @bp.route("/map/road-network", methods=["GET"])
 def get_road_network():
-    """获取前端绘图所需的路网节点、边和 POI。"""
+    """获取前端绘图所需的路网数据。
+
+    Request:
+        GET /map/road-network
+
+    Returns:
+        JSON: 路网节点字典、有向边列表、POI ID 列表和地图边界。
+    """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
 

@@ -20,12 +20,27 @@ from api.routes import bp as api_routes
 
 
 def create_app():
-    """创建 Flask 应用并注册 API 路由。"""
+    """创建 Flask 应用实例并挂载 API 蓝图。
+
+    Args:
+        None。
+
+    Returns:
+        Flask: 已注册业务路由和跨域响应头处理器的 Flask 应用。
+    """
     app = Flask(__name__)
     app.register_blueprint(api_routes)
 
     @app.after_request
     def add_cors_headers(response):
+        """为所有接口响应追加跨域访问头。
+
+        Args:
+            response (flask.Response): Flask 即将返回给客户端的响应对象。
+
+        Returns:
+            flask.Response: 已追加 CORS 头的同一个响应对象。
+        """
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"

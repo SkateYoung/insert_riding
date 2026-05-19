@@ -52,6 +52,11 @@ class Node:
         self.is_poi = False
 
     def __str__(self):
+        """返回节点的调试展示字符串。
+
+        Returns:
+            str: 包含节点 ID 和所属分区的简短描述。
+        """
         return f"Node_{self.id}({self.zone}区)"
 
 
@@ -83,6 +88,7 @@ class CityGraph:
         sf = shapefile.Reader(shp_path)
         
         def get_id(pt):
+            """将 SHP 点坐标稳定转换为路网节点 ID。"""
             return f"{pt[0]:.6f}_{pt[1]:.6f}"
             
         for sr in sf.shapeRecords():
@@ -310,6 +316,7 @@ class Order:
         self.req_time = req_time
         
         def nearest_poi(lon, lat):
+            """将订单原始经纬度吸附到最近的合法上下客 POI。"""
             best = None
             best_dist = float('inf')
             for p in city_map.pois:
@@ -438,10 +445,17 @@ class Vehicle:
         self.plate_no = ""
         
         self.time = 0.0                    
-        self.on_board_orders = []          
-        self.planned_route = []            
+        # 当前车上真实订单对象列表，仅由接客/送客状态推进逻辑维护。
+        self.on_board_orders = []
+        # 真实订单计划队列，元素格式为 {"type": "P"|"D", "order": Order}。
+        self.planned_route = []
+        # 前端绘制使用的路网轨迹点，既可表示订单路径，也可表示空车停靠路径。
         self.planned_route_point = []
+        # 车辆最新 GPS，经纬度来自前端模拟或实时定位接口。
         self.gps = {"lon": None, "lat": None}
+        # 空车停靠目标和预测解释信息；它们不是订单任务，可被新订单直接覆盖。
+        self.idle_target = None
+        self.idle_forecast = None
         
         self.last_node = start_node
         self.next_node = start_node
@@ -463,6 +477,12 @@ class Vehicle:
         
         Args:
             dt (float): 经过的物理推演真实步进时间（秒）。
+
+        Returns:
+            None。
+
+        Side Effects:
+            更新 driving_time、is_rest_requested、is_resting 和 rest_timer。
         """
         # ============== 疲劳与休息状态机时钟管理 ==============
         if self.is_resting:

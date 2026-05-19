@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""insert_riding 的 OD 预测小模块。
+"""OD 预测模块。
 
-这个文件只负责一件事：把 insert_riding 里的订单对象转换成 OD 预测结果。
+这个文件只负责一件事：把订单对象转换成OD预测结果。
 外部调度系统不需要知道内部的 slot_idx、H3 编码、训练特征等细节，只需要拿到：
 
 forecast_start_time, forecast_end_time,
-o_center_lon, o_center_lat, d_center_lon, d_center_lat, pred_count
+o_center_lon, o_center_lat, d_center_lon, d_center_lat, pred_count等字段数据
 
 注意：
 1. 输出只保留 pred_count > 0 的 OD，预测为 0 的 OD 不输出。
@@ -44,7 +44,6 @@ except Exception:  # pragma: no cover - fallback keeps the module runnable witho
 class CleanOrder:
     """统一后的干净订单格式。
 
-    insert_riding 里可能传入 Order 对象，也可能从前端/API 传入 dict。
     为了后面训练稳定，先统一成这个格式：
     - request_time: 真实时间或由仿真秒数换算后的时间
     - o/d_lon/lat: 上下车 POI 节点经纬度
@@ -64,18 +63,45 @@ class CleanOrder:
 
 
 def _node_id(node: Any) -> str:
+    """读取节点 ID，兼容 dict 和对象两种输入。
+
+    Args:
+        node (Any): 路网节点 dict 或具有 id 属性的对象。
+
+    Returns:
+        str: 节点 ID；缺失时返回空字符串。
+    """
     if isinstance(node, dict):
         return str(node.get("id", ""))
     return str(getattr(node, "id", ""))
 
 
 def _node_lon_lat(node: Any) -> tuple[float, float]:
+    """读取节点经纬度，兼容 dict 和对象两种输入。
+
+    Args:
+        node (Any): 包含 lon/lat 的 dict 或对象。
+
+    Returns:
+        tuple[float, float]: (lon, lat)。
+    """
     if isinstance(node, dict):
         return float(node["lon"]), float(node["lat"])
     return float(getattr(node, "lon")), float(getattr(node, "lat"))
 
 
 def _read_order_value(order: Any, attr: str, key: str | None = None, default: Any = None) -> Any:
+    """读取订单字段，兼容 dict 和对象。
+
+    Args:
+        order (Any): 订单 dict 或 Order 对象。
+        attr (str): 对象属性名。
+        key (str | None): dict 键名；为空时使用 attr。
+        default (Any): 字段缺失时返回的默认值。
+
+    Returns:
+        Any: 读取到的字段值或默认值。
+    """
     if isinstance(order, dict):
         return order.get(key or attr, default)
     return getattr(order, attr, default)
@@ -89,6 +115,13 @@ def normalize_request_time(value: Any, base_datetime: datetime | None = None) ->
     - req_time/request_time 已经是真实 datetime 或字符串
 
     模型内部会再把 datetime 归入 15 分钟窗口，但原始订单时间不会被强行改成整点。
+
+    Args:
+        value (Any): 时间输入，支持 datetime、秒数、ISO 字符串。
+        base_datetime (datetime | None): 秒数型时间的基准时间。
+
+    Returns:
+        datetime: 去掉微秒后的标准 datetime。
     """
     if isinstance(value, datetime):
         return value.replace(microsecond=0)
@@ -114,6 +147,15 @@ def orders_from_insert_riding(
 
     如果传入 city_map，会用真实路网 get_path 计算 network_dist_m；
     如果再传入 speed_mps，会进一步计算 travel_time_min。
+
+    Args:
+        orders (Iterable[Any]): 原始订单对象或字典。
+        city_map (Any | None): 可选路网对象，用于计算 OD 路网距离。
+        base_datetime (datetime | None): 仿真秒数转换为 datetime 的基准时间。
+        speed_mps (float | None): 车辆速度，用于估算行程分钟数。
+
+    Returns:
+        list[CleanOrder]: 预测模型使用的标准化订单列表。
     """
     clean: list[CleanOrder] = []
     for idx, order in enumerate(orders, 1):
@@ -173,7 +215,16 @@ def _fallback_cell(lon: float, lat: float, cell_m: float = 180.0) -> str:
 
 
 def _cell_for(lon: float, lat: float, resolution: int) -> str:
-    """把一个经纬度点映射到 hex 单元。"""
+    """把一个经纬度点映射到 hex 单元。
+
+    Args:
+        lon (float): 经度。
+        lat (float): 纬度。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        str: H3 单元 ID；h3 不可用时返回 fallback 网格 ID。
+    """
     if h3 is not None:
         if hasattr(h3, "latlng_to_cell"):
             return str(h3.latlng_to_cell(lat, lon, resolution))
@@ -188,6 +239,13 @@ def _cell_center(cell: str, samples: list[tuple[float, float]]) -> tuple[float, 
     由于系统传入 h3 库的经纬度本身就是 GCJ-02（火星坐标），
     所以 h3 返回的中心点也天然是 GCJ-02 坐标，可以直接在火星底图上使用，
     无需再做 WGS84 -> GCJ-02 的转化。
+
+    Args:
+        cell (str): H3 或 fallback 网格 ID。
+        samples (list[tuple[float, float]]): 落入该网格的样本点。
+
+    Returns:
+        tuple[float, float]: 网格中心经纬度。
     """
     if h3 is not None and not cell.startswith("fallback"):
         if hasattr(h3, "cell_to_latlng"):
@@ -207,6 +265,13 @@ def build_hex_lookup(clean_orders: Iterable[CleanOrder], resolution: int = H3_RE
 
     不写死 POI，也不复用 new_hex_precision 的旧 hex_lookup。
     换一套路网/POI，只要订单里有经纬度，这里就会重新生成 H001、H002 这种简单标签。
+
+    Args:
+        clean_orders (Iterable[CleanOrder]): 标准化订单。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        dict[str, dict[str, Any]]: 原始 cell ID 到展示标签和中心坐标的映射。
     """
     cell_points: dict[str, list[tuple[float, float]]] = defaultdict(list)
     for order in clean_orders:
@@ -247,6 +312,16 @@ def _slot_index(dt: datetime) -> int:
 
 
 def _label_order(order: CleanOrder, lookup: dict[str, dict[str, Any]], resolution: int = H3_RESOLUTION) -> tuple[str, str]:
+    """把订单 OD 经纬度转换为内部 hex 展示标签。
+
+    Args:
+        order (CleanOrder): 标准化订单。
+        lookup (dict): build_hex_lookup 生成的 cell 映射表。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        tuple[str, str]: (上车 hex_label, 下车 hex_label)。
+    """
     o_cell = _cell_for(order.o_lon, order.o_lat, resolution)
     d_cell = _cell_for(order.d_lon, order.d_lat, resolution)
     return lookup[o_cell]["hex_label"], lookup[d_cell]["hex_label"]
@@ -277,7 +352,14 @@ def _compact_row(
 
 
 def _positive_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """统一过滤输出：只保留预测单数大于 0 的 OD。"""
+    """统一过滤输出：只保留预测单数大于 0 的 OD。
+
+    Args:
+        rows (Iterable[dict[str, Any]]): 原始预测结果。
+
+    Returns:
+        list[dict[str, Any]]: pred_count 为正数的预测结果。
+    """
     return [row for row in rows if int(row.get("pred_count", 0)) > 0]
 
 
@@ -295,6 +377,16 @@ def predict_od_flows(
     - 最近两小时需求
     - pair 总体基线
     三者加权得到 pred_count。
+
+    Args:
+        clean_orders (Iterable[CleanOrder]): 标准化订单样本。
+        forecast_time (datetime | None): 预测窗口起点；为空时使用最后一单后的下一个窗口。
+        horizons_min (Iterable[int]): 预测时间跨度，单位分钟。
+        top_k (int): 参与预测的高频 OD 数量。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        tuple: (预测结果行列表, hex 映射表)。
     """
     orders = sorted(list(clean_orders), key=lambda x: x.request_time)
     if not orders:
@@ -356,11 +448,27 @@ def predict_od_flows(
 
 
 def export_hex_lookup_rows(lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    """导出 hex_label 到地图中心坐标的映射表，供可视化或排查使用。"""
+    """导出 hex_label 到地图中心坐标的映射表，供可视化或排查使用。
+
+    Args:
+        lookup (dict): build_hex_lookup 生成的映射表。
+
+    Returns:
+        list[dict[str, Any]]: 按 hex_label 排序后的映射行。
+    """
     return sorted(lookup.values(), key=lambda r: r["hex_label"])
 
 
 def _time_range(start: datetime, end: datetime) -> list[datetime]:
+    """生成 15 分钟粒度的闭区间时间序列。
+
+    Args:
+        start (datetime): 起始窗口。
+        end (datetime): 结束窗口。
+
+    Returns:
+        list[datetime]: 从 start 到 end 的 15 分钟窗口列表。
+    """
     out: list[datetime] = []
     t = start
     while t <= end:
@@ -370,7 +478,15 @@ def _time_range(start: datetime, end: datetime) -> list[datetime]:
 
 
 def _dist_proxy(a: dict[str, Any], b: dict[str, Any]) -> float:
-    """根据两个 hex 展示中心估算距离，作为模型静态特征。"""
+    """根据两个 hex 展示中心估算距离，作为模型静态特征。
+
+    Args:
+        a (dict): 起点 hex 映射行。
+        b (dict): 终点 hex 映射行。
+
+    Returns:
+        float: 两个中心点之间的近似平面距离，单位米。
+    """
     lon_scale = 111_320.0 * math.cos(math.radians((float(a["center_lat"]) + float(b["center_lat"])) / 2.0))
     dx = (float(a["center_lon"]) - float(b["center_lon"])) * lon_scale
     dy = (float(a["center_lat"]) - float(b["center_lat"])) * 111_320.0
@@ -388,6 +504,16 @@ def _build_count_series(
 
     这里会先筛选历史最活跃的跨区 OD pair，减少稀疏噪声。
     每个 pair 得到一条 15 分钟粒度的计数序列。
+
+    Args:
+        clean_orders (list[CleanOrder]): 标准化订单。
+        lookup (dict): hex 映射表。
+        forecast_start_time (datetime): 预测窗口起点。
+        top_k (int): 参与训练的高频 OD 数量。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        tuple: slots、OD pair 列表、计数 Counter、hex label 反查表。
     """
     labeled: list[tuple[datetime, str, str]] = []
     for order in clean_orders:
@@ -428,6 +554,17 @@ def _features_for(
     - dist_km：起终点空间距离
     - sin/cos：一天内时间周期
     - weekend：是否周末
+
+    Args:
+        slot_i (int): 当前时间片索引。
+        pair (tuple[str, str]): OD hex_label。
+        slots (list[datetime]): 时间片列表。
+        series (list[int]): 当前 OD 的历史计数序列。
+        pair_total (int): 当前 OD 的历史累计单量。
+        label_lookup (dict): hex_label 到中心坐标的映射。
+
+    Returns:
+        list[float]: 模型训练和预测使用的特征向量。
     """
     t = slots[slot_i]
     lags = []
@@ -454,7 +591,16 @@ def _features_for(
 
 
 def _future_sum(series: list[int], slot_i: int, steps: int) -> int | None:
-    """累计未来窗口目标，例如 steps=4 表示未来 60 分钟累计单数。"""
+    """累计未来窗口目标，例如 steps=4 表示未来 60 分钟累计单数。
+
+    Args:
+        series (list[int]): 单个 OD 的时间序列。
+        slot_i (int): 当前时间片索引。
+        steps (int): 需要累计的未来窗口数量。
+
+    Returns:
+        int | None: 未来窗口累计订单数；越界时返回 None。
+    """
     end = slot_i + steps
     if end > len(series):
         return None
@@ -466,6 +612,12 @@ def _allocate_integer_budget(scores: np.ndarray) -> np.ndarray:
 
     v6 的核心思想之一是：模型先给每个 OD 一个连续强度分数，
     然后按总预算分配成 0、1、2... 这种可解释的订单数。
+
+    Args:
+        scores (np.ndarray): 每个 OD 的连续预测强度。
+
+    Returns:
+        np.ndarray: 与 scores 等长的整数预测单数。
     """
     scores = np.clip(scores.astype(float), 0.0, None)
     budget = int(round(float(scores.sum())))
@@ -486,10 +638,28 @@ def _allocate_integer_budget(scores: np.ndarray) -> np.ndarray:
 
 
 def _mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """计算平均绝对误差。
+
+    Args:
+        y_true (np.ndarray): 真实值。
+        y_pred (np.ndarray): 预测值。
+
+    Returns:
+        float: MAE 指标。
+    """
     return float(np.mean(np.abs(y_true - y_pred))) if len(y_true) else 0.0
 
 
 def _wape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """计算加权绝对百分比误差。
+
+    Args:
+        y_true (np.ndarray): 真实值。
+        y_pred (np.ndarray): 预测值。
+
+    Returns:
+        float: WAPE 指标。
+    """
     return float(np.abs(y_true - y_pred).sum() / max(float(y_true.sum()), 1.0))
 
 
@@ -508,6 +678,16 @@ def predict_od_flows_v6(
     3. 用 lag/rolling/time/距离等特征训练 HistGradientBoostingRegressor。
     4. 对 15/30/60 分钟分别预测未来累计单数。
     5. 用整数预算压缩成 pred_count，并且只输出 pred_count > 0 的结果。
+
+    Args:
+        clean_orders (Iterable[CleanOrder]): 标准化订单样本。
+        forecast_start_time (datetime): 预测窗口起点。
+        horizons_min (Iterable[int]): 预测时间跨度，单位分钟。
+        top_k (int): 参与训练的高频 OD 数量。
+        resolution (int): H3 分辨率。
+
+    Returns:
+        tuple: (预测结果行列表, hex 映射表, 训练评估指标列表)。
     """
     if HistGradientBoostingRegressor is None:
         predictions, lookup = predict_od_flows(

@@ -4,8 +4,10 @@
 """
 
 import time
+from datetime import datetime, timedelta
 from .models import SPEED_MPS
 from .auxiliary import AuxiliaryFunctions
+from forecast import od_forecast_module
 
 class CoreDispatcher:
     """提供拼单博弈算力与核心派车路线演算的中枢处理台。"""
@@ -293,12 +295,34 @@ class CoreDispatcher:
         """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法】。
         
         该函数现在会以 5 秒为周期持续运行，实时监控订单池并进行统筹派发。
+
+        Args:
+            fleet (list[Vehicle]): 当前系统中的全部车辆对象。
+            city_map (CityGraph): 用于评估路线成本和刷新轨迹的路网对象。
+
+        Returns:
+            None。该函数设计为后台常驻循环。
+
+        Side Effects:
+            持续消费 CoreDispatcher.order_pool。
+            成功派单时写入车辆 planned_route/planned_route_point。
+            订单池为空时会尝试触发空车停靠预测。
         """
         print("[Core.Pool] 订单池匹配引擎已启动，每 5 秒进行一轮后悔值统筹调度...")
         
         while True:
             if not CoreDispatcher.order_pool:
                 print(f"[Core.Pool] 池中暂无订单...")
+                if CoreDispatcher._collect_forecast_orders(fleet):
+                    for v in fleet:
+                        # 无订单时只对真正空闲且未休息的车辆下发热点停靠建议。
+                        if (
+                            len(v.on_board_orders) == 0
+                            and len(v.planned_route) == 0
+                            and not getattr(v, "is_rest_requested", False)
+                            and not getattr(v, "is_resting", False)
+                        ):
+                            CoreDispatcher.idle_parking_scenario(v, city_map, fleet)
                 time.sleep(5)
                 continue
                 
@@ -356,6 +380,8 @@ class CoreDispatcher:
                         
                 if best_o_idx != -1:
                     target_o = CoreDispatcher.order_pool.pop(best_o_idx)
+                    # 空车热点只是可中断引导；一旦接到真实订单，必须立即清理。
+                    CoreDispatcher._clear_idle_parking(global_best_v)
                     global_best_v.planned_route = global_best_route
                     CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
                     assign_count += 1
@@ -397,7 +423,17 @@ class CoreDispatcher:
 
     @staticmethod
     def _project_point_to_segment(lon, lat, u_node, v_node):
-        """将 GPS 点投影到道路线段上，返回投影点和距离。"""
+        """将 GPS 点投影到指定路段线段上。
+
+        Args:
+            lon (float): 车辆 GPS 经度。
+            lat (float): 车辆 GPS 纬度。
+            u_node (Node): 路段起点。
+            v_node (Node): 路段终点。
+
+        Returns:
+            tuple: (投影经度, 投影纬度, 路段进度 0~1, GPS 到投影点距离米)。
+        """
         ax, ay = u_node.lon, u_node.lat
         bx, by = v_node.lon, v_node.lat
         dx, dy = bx - ax, by - ay
@@ -415,6 +451,19 @@ class CoreDispatcher:
 
     @staticmethod
     def _projection_result(city_map, lon, lat, u_id, v_id, snap_source):
+        """构造 GPS 到一条路网边的吸附结果。
+
+        Args:
+            city_map (CityGraph): 路网对象。
+            lon (float): 车辆 GPS 经度。
+            lat (float): 车辆 GPS 纬度。
+            u_id (str): 路段起点节点 ID。
+            v_id (str): 路段终点节点 ID。
+            snap_source (str): 吸附来源标记，例如 planned_route 或 road_network。
+
+        Returns:
+            dict | None: 投影结果；节点不存在时返回 None。
+        """
         u_node = city_map.nodes_map.get(u_id)
         v_node = city_map.nodes_map.get(v_id)
         if u_node is None or v_node is None:
@@ -434,12 +483,23 @@ class CoreDispatcher:
 
     @staticmethod
     def _nearest_road_projection(city_map, lon, lat, vehicle=None):
-        """将车辆 GPS 坐标吸附到路网边上的最近投影点。"""
+        """将车辆 GPS 坐标吸附到路网边上的最近投影点。
+
+        Args:
+            city_map (CityGraph): 路网对象。
+            lon (float): 车辆 GPS 经度。
+            lat (float): 车辆 GPS 纬度。
+            vehicle (Vehicle | None): 当前车辆。传入车辆时优先约束在车辆规划轨迹附近。
+
+        Returns:
+            dict | None: 最近路段投影信息；没有可用边时返回 None。
+        """
         if vehicle is not None and vehicle.planned_route_point:
             route_points = vehicle.planned_route_point
             best_projection = None
             max_lookahead_distance = 500.0
 
+            # 先检查当前所在路段，避免 GPS 轻微偏移时被吸到相邻或对向道路。
             current_projection = CoreDispatcher._projection_result(
                 city_map,
                 lon,
@@ -480,6 +540,7 @@ class CoreDispatcher:
                 ):
                     best_projection = projection
 
+                # 只向前搜索有限距离，避免车辆被吸回已走过很远的历史路段。
                 u_node = city_map.nodes_map.get(u_id)
                 v_node = city_map.nodes_map.get(v_id)
                 if u_node is None or v_node is None:
@@ -515,7 +576,14 @@ class CoreDispatcher:
 
     @staticmethod
     def _planned_route_targets(vehicle):
-        """按车辆当前订单计划提取后续接送目标点。"""
+        """按车辆当前订单计划提取后续接送目标点。
+
+        Args:
+            vehicle (Vehicle): 需要读取 planned_route 的车辆。
+
+        Returns:
+            list[dict]: 每项包含步骤类型、订单 ID 和目标 Node。
+        """
         targets = []
         for step in vehicle.planned_route:
             order = step["order"]
@@ -529,7 +597,14 @@ class CoreDispatcher:
 
     @staticmethod
     def _node_to_path_point(node):
-        """将路网节点转成接口可返回的轨迹点。"""
+        """将路网节点转成接口可返回的轨迹点。
+
+        Args:
+            node (Node): 路网节点对象。
+
+        Returns:
+            dict: 包含 id、经纬度、名称和分区的轨迹点。
+        """
         return {
             "id": node.id,
             "lon": node.lon,
@@ -539,8 +614,157 @@ class CoreDispatcher:
         }
 
     @staticmethod
+    def _clear_idle_parking(vehicle):
+        """清理车辆的空车停靠预测状态。
+
+        Args:
+            vehicle (Vehicle): 需要清理空车引导状态的车辆。
+
+        Returns:
+            None。
+        """
+        vehicle.idle_target = None
+        vehicle.idle_forecast = None
+
+    @staticmethod
+    def _nearest_graph_node(city_map, lon, lat):
+        """查找距离给定经纬度最近的路网节点。
+
+        Args:
+            city_map (CityGraph): 路网对象。
+            lon (float): 待吸附经度。
+            lat (float): 待吸附纬度。
+
+        Returns:
+            tuple: (最近 Node | None, 当前经纬度到最近节点的距离(米))。
+        """
+        best_node = None
+        best_dist = float("inf")
+        for node in city_map.nodes_map.values():
+            dist = AuxiliaryFunctions.haversine_distance(lon, lat, node.lon, node.lat)
+            if dist < best_dist:
+                best_node = node
+                best_dist = dist
+        return best_node, best_dist
+
+    @staticmethod
+    def _collect_forecast_orders(fleet=None):
+        """收集可供 OD 预测使用的历史和运行期订单样本。
+
+        Args:
+            fleet (list[Vehicle] | None): 当前车队；为空时只读取全局订单池。
+
+        Returns:
+            list[Order]: 去重后的订单对象列表。
+        """
+        orders = []
+        seen_ids = set()
+
+        def add_order(order):
+            """按订单 ID 去重后加入预测样本集合。"""
+            order_id = getattr(order, "id", None)
+            key = str(order_id) if order_id is not None else id(order)
+            if key in seen_ids:
+                return
+            seen_ids.add(key)
+            orders.append(order)
+
+        for order in CoreDispatcher.completed_orders_pool:
+            add_order(order)
+        for order in CoreDispatcher.order_pool:
+            add_order(order)
+        for v in fleet or []:
+            for order in v.on_board_orders:
+                add_order(order)
+            for step in v.planned_route:
+                add_order(step["order"])
+
+        return orders
+
+    @staticmethod
+    def _select_idle_hotspot(predictions, vehicle, city_map):
+        """从预测结果中选择空车应前往的上车热点。
+
+        Args:
+            predictions (list[dict]): od_forecast_module 输出的预测行。
+            vehicle (Vehicle): 当前空车，用于距离 tie-break。
+            city_map (CityGraph): 路网对象，用于读取车辆当前位置。
+
+        Returns:
+            dict | None: 被选中的预测行；没有有效预测时返回 None。
+        """
+        rows = [row for row in predictions if int(row.get("horizon_min", 15)) == 15]
+        if not rows:
+            rows = list(predictions)
+        if not rows:
+            return None
+
+        start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if start_node is None:
+            return None
+
+        def score(row):
+            """按预测订单数降序、距离升序排序。"""
+            lon = float(row["o_center_lon"])
+            lat = float(row["o_center_lat"])
+            dist = AuxiliaryFunctions.haversine_distance(start_node.lon, start_node.lat, lon, lat)
+            return (-int(row.get("pred_count", 0)), dist)
+
+        return sorted(rows, key=score)[0]
+
+    @staticmethod
+    def _build_idle_route_from_node(vehicle, city_map, start_node):
+        """构建空车从当前节点前往预测热点的展示轨迹。
+
+        Args:
+            vehicle (Vehicle): 已写入 idle_target 的空车。
+            city_map (CityGraph): 路网对象。
+            start_node (Node): 轨迹起点节点。
+
+        Returns:
+            dict | None: 与订单路径结构兼容的轨迹结果；不可达时返回 None。
+        """
+        if not vehicle.idle_target:
+            return None
+
+        target_node = city_map.nodes_map.get(vehicle.idle_target.get("node_id"))
+        if target_node is None:
+            return None
+
+        dist, path = city_map.get_path(start_node, target_node)
+        if dist == float("inf"):
+            return None
+
+        path_points = [CoreDispatcher._node_to_path_point(node) for node in path]
+        return {
+            "start_node": CoreDispatcher._node_to_path_point(start_node),
+            "planned_route_size": 0,
+            "total_distance": dist,
+            "path": path_points,
+            "segments": [
+                {
+                    "type": "IDLE",
+                    "order_id": None,
+                    "target_node": CoreDispatcher._node_to_path_point(target_node),
+                    "distance": dist,
+                    "path": path_points,
+                    "forecast": vehicle.idle_forecast,
+                }
+            ],
+        }
+
+    @staticmethod
     def rebuild_vehicle_path_from_node(vehicle, city_map, start_node):
-        """从指定路网节点出发，按车辆计划订单重新拼接完整路网轨迹。"""
+        """从指定路网节点出发，按车辆计划订单重新拼接完整路网轨迹。
+
+        Args:
+            vehicle (Vehicle): 需要重建路径的车辆。
+            city_map (CityGraph): 路网对象。
+            start_node (Node): 后续路径起点。
+
+        Returns:
+            dict | None: 后续总轨迹、分段轨迹和总距离；存在不可达路段时返回 None。
+        """
         path_points = []
         route_segments = []
         current_node = start_node
@@ -577,7 +801,20 @@ class CoreDispatcher:
 
     @staticmethod
     def refresh_vehicle_route_metadata(vehicle, city_map, start_node=None):
-        """刷新车辆当前 GPS 和计划路径轨迹点元数据。"""
+        """刷新车辆当前 GPS 和前端展示所需路径元数据。
+
+        Args:
+            vehicle (Vehicle): 需要同步元数据的车辆。
+            city_map (CityGraph): 路网对象。
+            start_node (Node | None): 指定刷新起点；为空时使用车辆 next_node/last_node。
+
+        Returns:
+            dict | None: 最新轨迹结果；起点无效或路径不可达时返回 None。
+
+        Side Effects:
+            更新 vehicle.gps 和 vehicle.planned_route_point。
+            车辆已有真实订单时会清理 idle_target/idle_forecast。
+        """
         if start_node is None:
             start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
         if start_node is None:
@@ -585,8 +822,14 @@ class CoreDispatcher:
             vehicle.planned_route_point = []
             return None
 
+        if vehicle.planned_route:
+            CoreDispatcher._clear_idle_parking(vehicle)
+
         vehicle.gps = {"lon": start_node.lon, "lat": start_node.lat}
-        result = CoreDispatcher.rebuild_vehicle_path_from_node(vehicle, city_map, start_node)
+        if not vehicle.planned_route and vehicle.idle_target:
+            result = CoreDispatcher._build_idle_route_from_node(vehicle, city_map, start_node)
+        else:
+            result = CoreDispatcher.rebuild_vehicle_path_from_node(vehicle, city_map, start_node)
         if result is None:
             vehicle.planned_route_point = []
             return None
@@ -596,7 +839,14 @@ class CoreDispatcher:
 
     @staticmethod
     def _projection_to_path_point(projection):
-        """将道路投影点转成接口轨迹点。"""
+        """将道路投影点转成接口轨迹点。
+
+        Args:
+            projection (dict): _nearest_road_projection 返回的投影结果。
+
+        Returns:
+            dict: 可直接拼接到 planned_route_point 的虚拟轨迹点。
+        """
         return {
             "id": f"{projection['edge_u']}|{projection['edge_v']}@{projection['progress']:.6f}",
             "lon": projection["lon"],
@@ -611,7 +861,20 @@ class CoreDispatcher:
 
     @staticmethod
     def sync_vehicle_route_progress(vehicle, city_map, current_node):
-        """根据车辆当前路网节点，同步上下客状态和剩余计划路径。"""
+        """根据车辆到达的路网节点同步上下客状态和剩余计划。
+
+        Args:
+            vehicle (Vehicle): 需要推进订单状态的车辆。
+            city_map (CityGraph): 路网对象，当前函数保留该参数用于接口一致性。
+            current_node (Node): 车辆已到达的路网节点。
+
+        Returns:
+            list[dict]: 本次触发的 pickup/dropoff 变更列表。
+
+        Side Effects:
+            更新 vehicle.last_node、vehicle.next_node、vehicle.progress、vehicle.gps。
+            可能修改 vehicle.on_board_orders、vehicle.planned_route 和 completed_orders_pool。
+        """
         vehicle.last_node = current_node.id
         vehicle.next_node = current_node.id
         vehicle.progress = 0.0
@@ -648,7 +911,18 @@ class CoreDispatcher:
 
     @staticmethod
     def _route_point_index(route_points, node_id):
-        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
+        """查找目标节点在轨迹点列表中的位置。
+
+        Args:
+            route_points (list[dict]): planned_route_point 轨迹点列表。
+            node_id (str): 需要查找的路网节点 ID。
+
+        Returns:
+            int | None: 首次出现的位置；未找到时返回 None。
+
+        Note:
+            当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
+        """
         for i, point in enumerate(route_points):
             if point.get("id") == node_id:
                 return i
@@ -656,7 +930,19 @@ class CoreDispatcher:
 
     @staticmethod
     def _apply_reached_route_step(vehicle, step, target_node):
-        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
+        """应用一个已到达接送点的订单步骤。
+
+        Args:
+            vehicle (Vehicle): 被更新上下客状态的车辆。
+            step (dict): planned_route 中的步骤，包含 type 和 order。
+            target_node (Node): 当前步骤对应的接客或送客节点。
+
+        Returns:
+            dict: 描述本次 pickup/dropoff 的变更记录。
+
+        Note:
+            当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
+        """
         order = step["order"]
         if step["type"] == "P":
             if all(o.id != order.id for o in vehicle.on_board_orders):
@@ -678,8 +964,19 @@ class CoreDispatcher:
 
     @staticmethod
     def _sync_passed_route_targets(vehicle, route_points, projection):
-        """这个只是暂时的函数，用于前端模拟，实际中乘客的上下车由车辆司机输入"""
-        """GPS 跨过接送目标点时，同步已经经过的上下客步骤。"""
+        """GPS 跨过接送目标点时，同步已经经过的上下客步骤。
+
+        Args:
+            vehicle (Vehicle): 需要同步上下客状态的车辆。
+            route_points (list[dict]): 本次 GPS 更新前的旧轨迹点列表。
+            projection (dict): 新 GPS 吸附到路段后的投影结果。
+
+        Returns:
+            list[dict]: 被自动判定为已经完成的 pickup/dropoff 步骤。
+
+        Note:
+            当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
+        """
         projection_index = None
         for i in range(len(route_points) - 1):
             if (
@@ -712,20 +1009,36 @@ class CoreDispatcher:
 
     @staticmethod
     def rebuild_vehicle_path_from_gps(vehicle, city_map, lon, lat):
-        """根据车辆 GPS 坐标和当前订单计划，重新计算后续路网轨迹。"""
+        """根据车辆 GPS 坐标和当前任务状态重新计算后续路网轨迹。
+
+        Args:
+            vehicle (Vehicle): 需要更新位置和路径的车辆。
+            city_map (CityGraph): 路网对象。
+            lon (float): 车辆 GPS 经度。
+            lat (float): 车辆 GPS 纬度。
+
+        Returns:
+            dict | None: 前端展示所需的吸附点、轨迹点、上下客变更和订单状态；
+                吸附失败或路径不可达时返回 None。
+
+        Side Effects:
+            更新 vehicle.gps、last_node、next_node、progress 和 planned_route_point。
+            可能触发 pickup/dropoff，从而修改 on_board_orders、planned_route 和 completed_orders_pool。
+        """
         old_route_points = list(vehicle.planned_route_point)
-        # 将车辆的gps投影至最近的路网中
+        # GPS 先吸附到路网边线，避免原始坐标偏移导致车辆脱离道路。
         projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, vehicle)
         if projection is None:
             return None
 
         next_node = projection["next_node"]
-        # 同步经过的上下客步骤
+        # 离散 GPS 可能一次跨过接客/送客点，需要先按旧轨迹判断越点。
         changed_steps = CoreDispatcher._sync_passed_route_targets(vehicle, old_route_points, projection)
-        # 如果到达了终点，将终点加入 changed_steps 并更新车辆的上下客状态
+        # 投影接近路段终点时，再按节点到达逻辑推进订单状态。
         if projection["progress"] >= 0.999:
             changed_steps.extend(CoreDispatcher.sync_vehicle_route_progress(vehicle, city_map, next_node))
-        # 刷新车辆的轨迹点元数据
+
+        # 以吸附后的下一节点为起点重建剩余轨迹；真实 GPS 会作为虚拟起点补回结果首位。
         result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, next_node)
         if result is None:
             return None
@@ -773,18 +1086,112 @@ class CoreDispatcher:
         return result
 
     @staticmethod
-    def idle_parking_scenario(vehicle, city_map):
-        """【车辆空单停靠场景】：由于由于车辆空虚或无任务，引导其向热力源滑行的索敌调度。
+    def idle_parking_scenario(vehicle, city_map, fleet=None):
+        """为空车生成前往未来订单热点的停靠路径。
         
         Args:
-            vehicle (Vehicle): 处于闲置待命状态的车辆对象。
-            city_map (CityGraph): 引导参考的网格密度路网实例。
+            vehicle (Vehicle): 处于闲置待命状态的车辆。
+            city_map (CityGraph): 路网对象。
+            fleet (list[Vehicle] | None): 当前车队，用于收集运行期订单样本。
             
         Returns:
-            bool: 是否成功执行索敌指令下发。
+            bool: 成功生成或已存在空车停靠路径时返回 True，否则返回 False。
+
+        Side Effects:
+            成功时写入 vehicle.idle_target、vehicle.idle_forecast 和 planned_route_point。
+            不写入 vehicle.planned_route，确保车辆途中接到新订单时可以被真实订单路径覆盖。
         """
-        print(f"[Core.Planner] {vehicle.id} 由于深层待命陷入无主，触发引擎激活 【高热空单停靠索敌规矩】...")
-        # 预留待办算法：算出近点高热度蜂窝将车赶过去
+        # 只有完全空闲车辆才允许进入空车停靠场景。
+        if vehicle.on_board_orders or vehicle.planned_route:
+            return False
+        if getattr(vehicle, "is_rest_requested", False) or getattr(vehicle, "is_resting", False):
+            return False
+        if vehicle.idle_target and vehicle.planned_route_point:
+            return True
+
+        print(f"[Core.Planner] {vehicle.id} 空车待命，触发未来 15 分钟订单热点预测...")
+        orders = CoreDispatcher._collect_forecast_orders(fleet)
+        if not orders:
+            print(f"[Core.Planner] {vehicle.id} 当前没有历史订单，无法生成空车停靠预测。")
+            return False
+
+        try:
+            clean_orders = od_forecast_module.orders_from_insert_riding(
+                orders,
+                city_map=city_map,
+                base_datetime=datetime.fromtimestamp(0),
+                speed_mps=SPEED_MPS,
+            )
+        except Exception as exc:
+            print(f"[Core.Planner] 订单预测输入转换失败：{exc}")
+            return False
+        if not clean_orders:
+            return False
+
+        # 预测窗口选择“最近一条历史订单之后的下一个 15 分钟窗口”。
+        forecast_time = max(order.request_time for order in clean_orders) + timedelta(minutes=15)
+        predictions = []
+        metrics = []
+        try:
+            predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+                clean_orders,
+                forecast_start_time=forecast_time,
+                horizons_min=(15,),
+                top_k=50,
+            )
+        except Exception as exc:
+            print(f"[Core.Planner] v6 预测失败，降级使用历史统计预测：{exc}")
+
+        if not predictions:
+            predictions, _ = od_forecast_module.predict_od_flows(
+                clean_orders,
+                forecast_time=forecast_time,
+                horizons_min=(15,),
+                top_k=50,
+            )
+        if not predictions:
+            print(f"[Core.Planner] {vehicle.id} 没有预测到未来 15 分钟正向订单热点。")
+            return False
+
+        hotspot = CoreDispatcher._select_idle_hotspot(predictions, vehicle, city_map)
+        if hotspot is None:
+            return False
+
+        # 预测输出是经纬度中心点，实际寻路前必须吸附到可达路网节点。
+        target_lon = float(hotspot["o_center_lon"])
+        target_lat = float(hotspot["o_center_lat"])
+        target_node, snap_distance = CoreDispatcher._nearest_graph_node(city_map, target_lon, target_lat)
+        start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if target_node is None or start_node is None:
+            return False
+
+        # idle_forecast/idle_target 会透传给接口，用于解释空车为何去该热点。
+        vehicle.idle_forecast = {
+            "forecast_start_time": hotspot.get("forecast_start_time"),
+            "forecast_end_time": hotspot.get("forecast_end_time"),
+            "horizon_min": int(hotspot.get("horizon_min", 15)),
+            "pred_count": int(hotspot.get("pred_count", 0)),
+            "metrics": metrics,
+        }
+        vehicle.idle_target = {
+            "lon": target_lon,
+            "lat": target_lat,
+            "node_id": target_node.id,
+            "node_name": target_node.name,
+            "node_lon": target_node.lon,
+            "node_lat": target_node.lat,
+            "snap_distance_to_node": snap_distance,
+        }
+
+        result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, start_node)
+        if result is None:
+            CoreDispatcher._clear_idle_parking(vehicle)
+            return False
+
+        print(
+            f"[Core.Planner] {vehicle.id} 空车前往预测热点 {target_node.name} "
+            f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
+        )
         return True
 
     @staticmethod
@@ -796,6 +1203,9 @@ class CoreDispatcher:
             
         Returns:
             bool: 是否下达强制切断接单信令。
+
+        Note:
+            当前为预留风控入口，尚未接入真实疲劳、电量或健康度预测模型。
         """
         print(f"[Core.WindControl] 对 {vehicle.id} 下发了疲劳驾驶、晚高峰以及掉电预期寿命扫描...")
         # 预留待办算法：截断车队被推演插入池
