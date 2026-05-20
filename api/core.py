@@ -1,11 +1,12 @@
-# core.py
+﻿# core.py
 """打车系统的大脑业务算子主控层。
 负责派单、重组架构、以及闲置管控等绝对智能内核逻辑。
 """
 
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta
-from .models import SPEED_MPS
+from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS
 from .auxiliary import AuxiliaryFunctions
 from forecast import od_forecast_module
 
@@ -18,6 +19,11 @@ class CoreDispatcher:
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
     completed_orders_pool = []
 
+    # ============================================================
+    # 功能一：订单路线成本评估与单车插单寻优
+    # 相关方法：evaluate_route、_try_insert_order
+    # ============================================================
+
     @staticmethod
     def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None, original_etas=None):
         """核心评级器：沙盘量化时间线成本（Cost）以评估未来路线质量分数。
@@ -26,7 +32,7 @@ class CoreDispatcher:
         并在后续可以接入真正的 SLA 防止无限插队模型。
         
         Args:
-            route (list): 一条排列好的装载字典列队（每项包含 'type': 'P'/'D', 和 'order' 对象）。
+            route (list): 一条排列好的装载字典列队（每项包含 'type': 'O'/'D', 和 'order' 对象）。
             vehicle_state (dict): 执行这段未来可能路线前的车辆状态副本，如目前开到了哪个节点坐标。
             on_board_orders (list): 该车上目前正被关着的已有乘客清单。
             city_map (CityGraph): 可以用于通过 A* 推算空间距离字典的数字路网基站。
@@ -42,7 +48,7 @@ class CoreDispatcher:
         sim_last_node = vehicle_state['last_node']
         sim_next_node = vehicle_state['next_node']
         
-        current_load = len(on_board_orders)
+        current_load = sum(order.passenger_count for order in on_board_orders)
         empty_dist = 0.0
         loaded_dist = 0.0
         
@@ -64,7 +70,7 @@ class CoreDispatcher:
         
         for step in route:
             order = step['order']
-            target_node = order.p_node if step['type'] == 'P' else order.d_node
+            target_node = order.o_node if step['type'] == 'O' else order.d_node
             
             dist, path = city_map.get_path(city_map.nodes_map[sim_next_node], target_node)
             
@@ -82,18 +88,18 @@ class CoreDispatcher:
             if target_node.zone != v_zone:
                 cross_zone_penalty += 300.0 
             
-            if step['type'] == 'P':
-                current_load += 1
+            if step['type'] == 'O':
+                current_load += order.passenger_count
                 if current_load > capacity: 
                     return False, float('inf'), None 
-                pickup_times[order.id] = sim_time
+                pickup_times[order.request_id] = sim_time
             elif step['type'] == 'D':
-                current_load -= 1
+                current_load -= order.passenger_count
                 if current_load < 0:
                     return False, float('inf'), None
-                arrival_times[order.id] = sim_time
+                arrival_times[order.request_id] = sim_time
 
-        # ===== 终极综合多目标成本函数架构 (按最新四大维度重构) =====
+        # ===== 综合多目标成本函数架构 =====
         
         # 1. 权重定义 (严格按照需求配比)
         W_PASSENGER = 0.40  # 乘客体验 (候车时间、绕行系数、时间窗满意度)
@@ -104,7 +110,7 @@ class CoreDispatcher:
         # 核心调优参数
         BETA = 4.0       # 站牌下乘客枯等耗时体验折损
         GAMMA = 3.0      # 车内乘客被拉着绕路耗时体验折损 
-        OMEGA = float('inf') # SLA 时间窗红线超额一票否决
+        SLA_LATE_PENALTY = 1.0 # 时间窗超时惩罚系数；过期订单仍允许继续匹配
         THETA = 1500.0       # 老客严重绕路的极限防背叛护盾
         
         # ---------------------------------------------------------
@@ -112,29 +118,29 @@ class CoreDispatcher:
         passenger_cost = 0.0
         for step in route:
             order = step['order']
-            if step['type'] == 'P':
-                wait_time = pickup_times[order.id] - order.req_time
+            if step['type'] == 'O':
+                wait_time = pickup_times[order.request_id] - order.req_time
                 passenger_cost += wait_time * BETA # 乘客候车时间指标（BETA为候车时间成本系数，wait_time * BETA即是乘客候车时间成本）
                 
-                # 时间窗满意度：超出极限接客时间直接否决（暂定功能，因为实际订单中的信息没加入乘客愿意等待的最大时长）
-                if pickup_times[order.id] > order.max_pickup_time:
-                    return False, OMEGA, None
+                # 时间窗满意度：超出期望上车时间不再一票否决，改为有限惩罚，允许积压订单继续派单。
+                late_pickup_time = max(0.0, pickup_times[order.request_id] - order.max_pickup_time)
+                passenger_cost += late_pickup_time * SLA_LATE_PENALTY
             else:
-                start_service_time = pickup_times.get(order.id) or order.actual_pick_time or vehicle_state['time']
-                in_car_time = arrival_times[order.id] - start_service_time
+                start_service_time = pickup_times.get(order.request_id) or order.actual_pick_time or vehicle_state['time']
+                in_car_time = arrival_times[order.request_id] - start_service_time
                 passenger_cost += in_car_time * GAMMA # 绕行系数1（这里是统计所有订单中，乘客会在车上等待的时间成本）   
                 
-                # 时间窗满意度：超出极限送达时间直接否决
-                if arrival_times[order.id] > order.max_arrival_time:
-                    return False, OMEGA, None
+                # 送达时间超出估算上限时同样只计入惩罚，不阻断车辆匹配。
+                late_arrival_time = max(0.0, arrival_times[order.request_id] - order.max_arrival_time)
+                passenger_cost += late_arrival_time * SLA_LATE_PENALTY
             
         # 乘客体验：强制挂载老乘客被绕路的代价(真实的延误时间)
         for order in on_board_orders:
             for step in route:
-                if step['type'] == 'D' and step['order'].id == order.id:
+                if step['type'] == 'D' and step['order'].request_id == order.request_id:
                     # 如果有原计划ETA，则仅惩罚真正多出来的老乘客的延误时间
-                    if original_etas and order.id in original_etas:
-                        delay_time = arrival_times[order.id] - original_etas[order.id]
+                    if original_etas and order.request_id in original_etas:
+                        delay_time = arrival_times[order.request_id] - original_etas[order.request_id]
                         if delay_time > 0:
                             passenger_cost += delay_time * GAMMA # 绕行系数2（这里是统计所有订单中，已经上车的老乘客被顺路绕行的额外时间成本）
                             if delay_time > 180.0:
@@ -154,7 +160,9 @@ class CoreDispatcher:
         
         # 2. 满载率 (Load Rate)：这里使用这趟路线服务的总客数占比作为满载率代理
         # (车上原有的 + 这趟新接的) / 最大容量
-        total_pax = len(on_board_orders) + sum(1 for step in route if step['type'] == 'P')
+        total_pax = sum(order.passenger_count for order in on_board_orders) + sum(
+            step['order'].passenger_count for step in route if step['type'] == 'O'
+        )
         load_rate = min(1.0, total_pax / max(1, capacity))
         # 满载率越低（拉着一两座跑），效率越低，惩罚越大
         load_penalty = (1.0 - load_rate) * 800.0
@@ -189,7 +197,7 @@ class CoreDispatcher:
     def _try_insert_order(vehicle, new_order, city_map):
         """【组客内循环】：针对单车的贪婪性全路径缝隙插入探测寻优。
         
-        该方法会尝试将新订单的 P 点和 D 点插入到现有计划路径的所有可能位置，并使用 evaluate_route 评估最优选。
+        该方法会尝试将新订单的 O 点和 D 点插入到现有计划路径的所有可能位置，并使用 evaluate_route 评估最优选。
         
         Args:
             vehicle (Vehicle): 目标评估车辆。
@@ -203,7 +211,7 @@ class CoreDispatcher:
         best_cost = float('inf')
         route = vehicle.planned_route
         n = len(route)
-        p_step = {'type': 'P', 'order': new_order}
+        o_step = {'type': 'O', 'order': new_order}
         d_step = {'type': 'D', 'order': new_order}
         v_state = {
             'time': vehicle.time,
@@ -218,7 +226,7 @@ class CoreDispatcher:
             _, _, orig_etas = CoreDispatcher.evaluate_route(route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
         
         for i in range(n + 1):
-            temp_route = route[:i] + [p_step] + route[i:]
+            temp_route = route[:i] + [o_step] + route[i:]
             for j in range(i + 1, n + 2):
                 test_route = temp_route[:j] + [d_step] + temp_route[j:]
                 
@@ -245,15 +253,15 @@ class CoreDispatcher:
                         
                         # 检查逻辑合规性：不能在接到人之前就送人
                         valid = True
-                        seen_p = set()
-                        on_board_ids = set(o.id for o in vehicle.on_board_orders)
+                        seen_o = set()
+                        on_board_ids = set(o.request_id for o in vehicle.on_board_orders)
                         
                         for step in mut_route:
-                            oid = step['order'].id
-                            if step['type'] == 'P':
-                                seen_p.add(oid)
+                            oid = step['order'].request_id
+                            if step['type'] == 'O':
+                                seen_o.add(oid)
                             else:
-                                if oid not in seen_p and oid not in on_board_ids:
+                                if oid not in seen_o and oid not in on_board_ids:
                                     valid = False
                                     break
                         
@@ -274,6 +282,11 @@ class CoreDispatcher:
                         
         return best_route, best_cost
 
+    # ============================================================
+    # 功能二：订单池匹配与后台调度循环
+    # 相关方法：pool_and_route_planning、process_pool_matching
+    # ============================================================
+
     @staticmethod
     def pool_and_route_planning(fleet, order, city_map):
         """【新流缓冲注池】：所有接驾呼叫全部强制沉降至缓冲池，等待周期性池化打捞。
@@ -286,12 +299,12 @@ class CoreDispatcher:
         Returns:
             bool: 永远返回 False 表示进入池化，切断即时指派避免出现极度绕路。
         """
-        print(f"[Core.Dispatcher] 新订单 [单{order.id}] 注入系统统筹池，等待匹配车辆中...")
+        print(f"[Core.Dispatcher] 新订单 [单{order.request_id}] 注入系统统筹池，等待匹配车辆中...")
         CoreDispatcher.order_pool.append(order)
         return False
 
     @staticmethod
-    def process_pool_matching(fleet, city_map):
+    def process_pool_matching(fleet, city_map, state_lock=None):
         """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法】。
         
         该函数现在会以 5 秒为周期持续运行，实时监控订单池并进行统筹派发。
@@ -310,116 +323,371 @@ class CoreDispatcher:
         """
         print("[Core.Pool] 订单池匹配引擎已启动，每 5 秒进行一轮后悔值统筹调度...")
         
+        lock_context = state_lock if state_lock is not None else nullcontext()
         while True:
-            if not CoreDispatcher.order_pool:
-                print(f"[Core.Pool] 池中暂无订单...")
-                if CoreDispatcher._collect_forecast_orders(fleet):
-                    for v in fleet:
-                        # 无订单时只对真正空闲且未休息的车辆下发热点停靠建议。
-                        if (
-                            len(v.on_board_orders) == 0
-                            and len(v.planned_route) == 0
-                            and not getattr(v, "is_rest_requested", False)
-                            and not getattr(v, "is_resting", False)
-                        ):
-                            CoreDispatcher.idle_parking_scenario(v, city_map, fleet)
-                time.sleep(5)
-                continue
-                
-            print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
-            
-            assign_count = 0
-            # 内部循环：在单次调度周期内尽可能排空订单池
-            while CoreDispatcher.order_pool:
-                best_o_idx = -1
-                max_regret = -1.0
-                global_best_v = None
-                global_best_route = None
-                
-                # 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
-                for i in range(len(CoreDispatcher.order_pool)):
-                    order = CoreDispatcher.order_pool[i]
-                    c1, c2 = float('inf'), float('inf')
-                    v1, r1 = None, None
-                    
-                    for v in fleet:
-                        # ===== 查看车辆容量是否已满 =====
-                        if len(v.on_board_orders) >= v.capacity: 
+            with lock_context:
+                CoreDispatcher.refresh_scheduled_rest_requests(fleet, city_map)
+
+                if not CoreDispatcher.order_pool:
+                    print(f"[Core.Pool] 池中暂无订单...")
+                    if CoreDispatcher._collect_forecast_orders(fleet):
+                        for v in fleet:
+                            # 无订单时只对真正空闲且未休息的车辆下发热点停靠建议。
+                            if (
+                                len(v.on_board_orders) == 0
+                                and len(v.planned_route) == 0
+                                and not getattr(v, "is_rest_requested", False)
+                                and not getattr(v, "is_resting", False)
+                            ):
+                                CoreDispatcher.idle_parking_scenario(v, city_map, fleet)
+
+                if CoreDispatcher.order_pool:
+                    print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
+
+                assign_count = 0
+                # 内部循环：在单次调度周期内尽可能排空订单池
+                while CoreDispatcher.order_pool:
+                    best_o_idx = -1
+                    max_regret = -1.0
+                    global_best_v = None
+                    global_best_route = None
+
+                    # 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
+                    for i in range(len(CoreDispatcher.order_pool)):
+                        order = CoreDispatcher.order_pool[i]
+                        c1, c2 = float('inf'), float('inf')
+                        v1, r1 = None, None
+
+                        for v in fleet:
+                            # ===== 查看车辆容量是否已满 =====
+                            if sum(o.passenger_count for o in v.on_board_orders) >= v.capacity:
+                                continue
+                            # ===== 疲劳驾驶与休息拦截限流 =====
+                            if not CoreDispatcher._vehicle_can_accept_order(v):
+                                continue
+
+                            route, cost = CoreDispatcher._try_insert_order(v, order, city_map)
+                            is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
+
+                            # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
+                            if not is_idle and cost > 30000.0:
+                                cost = float('inf')
+
+                            # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)
+                            if cost < c1:
+                                c2 = c1
+                                c1 = cost
+                                v1 = v
+                                r1 = route
+                            elif cost < c2:
+                                c2 = cost
+
+                        if c1 == float('inf'):
                             continue
-                        # ===== 疲劳驾驶与休息拦截限流 =====
-                        if getattr(v, 'is_rest_requested', False) or getattr(v, 'is_resting', False):
-                            continue
-                            
-                        route, cost = CoreDispatcher._try_insert_order(v, order, city_map)
-                        is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
+
+                        # 计算后悔值：次优成本与最优成本的差额
+                        regret = 1e6 if c2 == float('inf') else (c2 - c1)
+
+                        if regret > max_regret:
+                            max_regret = regret
+                            best_o_idx = i
+                            global_best_v = v1
+                            global_best_route = r1
+
+                    if best_o_idx != -1:
+                        target_o = CoreDispatcher.order_pool.pop(best_o_idx)
+                        # 空车热点只是可中断引导；一旦接到真实订单，必须立即清理。
+                        CoreDispatcher._clear_idle_parking(global_best_v)
+                        global_best_v.planned_route = global_best_route
+                        CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
+                        assign_count += 1
+                        print(f"[Core.Pool] [Match] 后悔值匹配成功：单 {target_o.request_id} 被 {global_best_v.id} 优先划拨！")
+
+                        # ==========================================
+                        # 打印车辆更新后的轨迹点 (途径站点)
+                        # ==========================================
+                        waypoints = []
+                        total_path = []
+                        full_path_node_count = 0
+                        curr_node_id = global_best_v.next_node
+
+                        for step in global_best_route:
+                            o = step['order']
+                            target_node = o.o_node if step['type'] == 'O' else o.d_node
+                            action_name = "接驾" if step['type'] == 'O' else "送驾"
+                            waypoints.append(f"[{action_name}{o.request_id}] {target_node.name} ({target_node.lon:.5f},{target_node.lat:.5f})")
+
+                            # 顺便统计底层 A* 寻路的精细轨迹点总数
+                            dist, path = city_map.get_path(city_map.nodes_map[curr_node_id], target_node)
+                            for nodes in path:
+                                total_path.append([nodes.lon,nodes.lat])
+                            full_path_node_count += len(path)
+                            curr_node_id = target_node.id
+
+                        print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
+                        print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
+                        # print(f"    [明细] 该路线总里程: {total_path} ")
+                    else:
+                        # 池中剩余订单当前均无法匹配
+                        break
                         
-                        # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
-                        if not is_idle and cost > 30000.0:
-                            cost = float('inf')
-                            
-                        # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)
-                        if cost < c1:
-                            c2 = c1
-                            c1 = cost
-                            v1 = v
-                            r1 = route
-                        elif cost < c2:
-                            c2 = cost
-                            
-                    if c1 == float('inf'):
-                        continue
-                        
-                    # 计算后悔值：次优成本与最优成本的差额
-                    regret = 1e6 if c2 == float('inf') else (c2 - c1)
-                    
-                    if regret > max_regret:
-                        max_regret = regret
-                        best_o_idx = i
-                        global_best_v = v1
-                        global_best_route = r1
-                        
-                if best_o_idx != -1:
-                    target_o = CoreDispatcher.order_pool.pop(best_o_idx)
-                    # 空车热点只是可中断引导；一旦接到真实订单，必须立即清理。
-                    CoreDispatcher._clear_idle_parking(global_best_v)
-                    global_best_v.planned_route = global_best_route
-                    CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
-                    assign_count += 1
-                    print(f"[Core.Pool] [Match] 后悔值匹配成功：单 {target_o.id} 被 {global_best_v.id} 优先划拨！")
-                    
-                    # ==========================================
-                    # 打印车辆更新后的轨迹点 (途径站点) 
-                    # ==========================================
-                    waypoints = []
-                    total_path = []
-                    full_path_node_count = 0
-                    curr_node_id = global_best_v.next_node
-                    
-                    for step in global_best_route:
-                        o = step['order']
-                        target_node = o.p_node if step['type'] == 'P' else o.d_node
-                        action_name = "接驾" if step['type'] == 'P' else "送驾"
-                        waypoints.append(f"[{action_name}{o.id}] {target_node.name} ({target_node.lon:.5f},{target_node.lat:.5f})")
-                        
-                        # 顺便统计底层 A* 寻路的精细轨迹点总数
-                        dist, path = city_map.get_path(city_map.nodes_map[curr_node_id], target_node)
-                        for nodes in path:
-                            total_path.append([nodes.lon,nodes.lat])
-                        full_path_node_count += len(path)
-                        curr_node_id = target_node.id
-                        
-                    print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
-                    print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
-                    # print(f"    [明细] 该路线总里程: {total_path} ")
-                else:
-                    # 池中剩余订单当前均无法匹配
-                    break
-                    
-            if assign_count > 0:
-                print(f"[Core.Pool] 本轮调度完毕：成功释放 {assign_count} 个积压订单。")
-            
+                if assign_count > 0:
+                    print(f"[Core.Pool] 本轮调度完毕：成功释放 {assign_count} 个积压订单。")
+
             # 等待 5 秒进行下一轮匹配
             time.sleep(5)
+
+    # ============================================================
+    # 功能三：乘客取消订单与司机休息控制
+    # 相关方法：cancel_order、request_driver_rest、estimate_vehicle_route_finish_time、
+    #          refresh_scheduled_rest_requests
+    # ============================================================
+
+    @staticmethod
+    def _vehicle_can_accept_order(vehicle):
+        """判断车辆当前是否允许继续接收新订单。"""
+        return (
+            not getattr(vehicle, "is_rest_requested", False)
+            and not getattr(vehicle, "is_resting", False)
+            and getattr(vehicle, "rest_status", "operating") == "operating"
+        )
+
+    @staticmethod
+    def _archive_cancelled_order(order, cancel_type="passenger", cancel_time=None):
+        """把取消订单记录归档，避免订单从系统中完全消失。"""
+        order.status = "cancelled"
+        order.cancel_type = cancel_type
+        order.cancel_time = cancel_time or datetime.now().replace(microsecond=0)
+        if all(o.request_id != order.request_id for o in CoreDispatcher.completed_orders_pool):
+            CoreDispatcher.completed_orders_pool.append(order)
+
+    @staticmethod
+    def _start_rest_if_ready(vehicle):
+        """车辆已经停止接单且没有未完成任务时，立即进入休息状态。"""
+        if vehicle.is_rest_requested and not vehicle.on_board_orders and not vehicle.planned_route:
+            vehicle.is_resting = True
+            vehicle.rest_status = "resting"
+            vehicle.rest_started_time = vehicle.time
+            vehicle.rest_timer = 0.0
+            return True
+        return False
+
+    @staticmethod
+    def cancel_order(request_id, fleet, city_map, cancel_time=None):
+        """取消未上车订单，并在已派车时刷新车辆后续轨迹。
+
+        Args:
+            request_id (str): 需要取消的请求 ID。
+            fleet (list[Vehicle]): 当前车队。
+            city_map (CityGraph): 路网对象。
+
+        Returns:
+            dict: 取消结果。status 为 cancelled、rejected 或 not_found。
+        """
+        request_id = str(request_id)
+
+        for index, order in enumerate(CoreDispatcher.order_pool):
+            if str(order.request_id) == request_id:
+                CoreDispatcher.order_pool.pop(index)
+                CoreDispatcher._archive_cancelled_order(order, cancel_time=cancel_time)
+                return {
+                    "status": "cancelled",
+                    "request_id": request_id,
+                    "source": "order_pool",
+                    "message": "订单仍在待匹配池中，已取消。",
+                }
+
+        for vehicle in fleet:
+            if any(str(order.request_id) == request_id for order in vehicle.on_board_orders):
+                return {
+                    "status": "rejected",
+                    "code": "already_on_board",
+                    "request_id": request_id,
+                    "vehicle_id": vehicle.id,
+                    "message": "乘客已上车，乘客端取消订单被拒绝。",
+                }
+
+            matched_steps = [
+                step for step in vehicle.planned_route
+                if str(step["order"].request_id) == request_id
+            ]
+            if not matched_steps:
+                continue
+
+            if not any(step["type"] == "O" for step in matched_steps):
+                return {
+                    "status": "rejected",
+                    "code": "origin_step_missing",
+                    "request_id": request_id,
+                    "vehicle_id": vehicle.id,
+                    "message": "订单已进入上车后的送达阶段，无法按乘客未上车取消处理。",
+                }
+
+            cancelled_order = matched_steps[0]["order"]
+            vehicle.planned_route = [
+                step for step in vehicle.planned_route
+                if str(step["order"].request_id) != request_id
+            ]
+            CoreDispatcher._archive_cancelled_order(cancelled_order, cancel_time=cancel_time)
+            path_result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
+            CoreDispatcher._start_rest_if_ready(vehicle)
+            return {
+                "status": "cancelled",
+                "request_id": request_id,
+                "source": "vehicle_route",
+                "vehicle_id": vehicle.id,
+                "planned_route": [
+                    {
+                        "type": step["type"],
+                        "request_id": step["order"].request_id,
+                    }
+                    for step in vehicle.planned_route
+                ],
+                "planned_route_point": vehicle.planned_route_point,
+                "path_result": path_result,
+                "message": "订单已从车辆计划路径中移除，车辆轨迹已刷新。",
+            }
+
+        for order in CoreDispatcher.completed_orders_pool:
+            if str(order.request_id) == request_id:
+                return {
+                    "status": "rejected",
+                    "code": "already_finished_or_cancelled",
+                    "request_id": request_id,
+                    "message": "订单已结束或已取消，不能重复取消。",
+                }
+
+        return {
+            "status": "not_found",
+            "request_id": request_id,
+            "message": "未找到该订单。",
+        }
+
+    @staticmethod
+    def estimate_vehicle_route_finish_time(vehicle, city_map):
+        """估算车辆完成当前已接路线的仿真时间点。"""
+        current_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if current_node is None:
+            return None
+
+        finish_time = vehicle.time
+        if vehicle.last_node != vehicle.next_node:
+            last_node = city_map.nodes_map.get(vehicle.last_node)
+            edge_dist = None
+            if last_node is not None:
+                edge_dist = last_node.neighbors.get(vehicle.next_node)
+            if edge_dist is not None:
+                finish_time += edge_dist * (1.0 - vehicle.progress) / SPEED_MPS
+
+        for target in CoreDispatcher._planned_route_targets(vehicle):
+            dist, _ = city_map.get_path(current_node, target["node"])
+            if dist == float("inf"):
+                return None
+            finish_time += dist / SPEED_MPS
+            current_node = target["node"]
+
+        return finish_time
+
+    @staticmethod
+    def request_driver_rest(vehicle, city_map, desired_rest_time=None, rest_duration_seconds=None):
+        """处理司机端休息请求，并决定车辆是否立刻停止接新单。
+
+        Args:
+            vehicle (Vehicle): 请求休息的车辆。
+            city_map (CityGraph): 路网对象。
+            desired_rest_time (float | None): 期望休息的仿真时间点；为空表示马上收车。
+            rest_duration_seconds (float | None): 可选休息时长，限制在 15-30 分钟。
+
+        Returns:
+            dict: 车辆休息决策和预计完成时间。
+        """
+        if rest_duration_seconds is not None:
+            vehicle.rest_duration = max(
+                MIN_REST_DURATION_SECONDS,
+                min(MAX_REST_DURATION_SECONDS, float(rest_duration_seconds)),
+            )
+
+        estimated_finish_time = CoreDispatcher.estimate_vehicle_route_finish_time(vehicle, city_map)
+        if vehicle.is_resting:
+            return {
+                "status": "resting",
+                "decision": "already_resting",
+                "estimated_finish_time": estimated_finish_time,
+            }
+
+        if desired_rest_time is None:
+            CoreDispatcher._clear_idle_parking(vehicle)
+            vehicle.desired_rest_time = None
+            vehicle.is_rest_requested = True
+            vehicle.rest_status = "closing"
+            CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
+            CoreDispatcher._start_rest_if_ready(vehicle)
+            return {
+                "status": vehicle.rest_status,
+                "decision": "close_now",
+                "estimated_finish_time": estimated_finish_time,
+            }
+
+        desired_rest_time = float(desired_rest_time)
+        vehicle.desired_rest_time = desired_rest_time
+        threshold_time = desired_rest_time - vehicle.rest_prepare_threshold
+
+        if estimated_finish_time is None or estimated_finish_time >= threshold_time:
+            CoreDispatcher._clear_idle_parking(vehicle)
+            vehicle.is_rest_requested = True
+            vehicle.rest_status = "preparing_closure"
+            CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
+            CoreDispatcher._start_rest_if_ready(vehicle)
+            return {
+                "status": vehicle.rest_status,
+                "decision": "prepare_closure",
+                "estimated_finish_time": estimated_finish_time,
+            }
+
+        if not vehicle.is_rest_requested:
+            vehicle.rest_status = "operating"
+            vehicle.is_resting = False
+        return {
+            "status": vehicle.rest_status,
+            "decision": "keep_operating_until_rest_time",
+            "estimated_finish_time": estimated_finish_time,
+        }
+
+    @staticmethod
+    def refresh_scheduled_rest_requests(fleet, city_map):
+        """周期性检查预约休息车辆，接近休息时间时切换为收车中。"""
+        for vehicle in fleet:
+            if vehicle.is_resting:
+                CoreDispatcher._clear_idle_parking(vehicle)
+                if not vehicle.planned_route:
+                    vehicle.planned_route_point = []
+                continue
+            if vehicle.is_rest_requested:
+                if not vehicle.planned_route:
+                    CoreDispatcher._clear_idle_parking(vehicle)
+                    CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
+                CoreDispatcher._start_rest_if_ready(vehicle)
+                continue
+            if vehicle.desired_rest_time is None:
+                continue
+
+            estimated_finish_time = CoreDispatcher.estimate_vehicle_route_finish_time(vehicle, city_map)
+            threshold_time = vehicle.desired_rest_time - vehicle.rest_prepare_threshold
+            should_close = vehicle.time >= threshold_time
+            if estimated_finish_time is not None and estimated_finish_time >= threshold_time:
+                should_close = True
+
+            if should_close:
+                CoreDispatcher._clear_idle_parking(vehicle)
+                vehicle.is_rest_requested = True
+                vehicle.rest_status = "closing"
+                CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
+                CoreDispatcher._start_rest_if_ready(vehicle)
+
+    # ============================================================
+    # 功能四：车辆 GPS 路网吸附
+    # 相关方法：_project_point_to_segment、_projection_result、_nearest_road_projection
+    # ============================================================
 
     @staticmethod
     def _project_point_to_segment(lon, lat, u_node, v_node):
@@ -574,6 +842,11 @@ class CoreDispatcher:
 
         return best_projection
 
+    # ============================================================
+    # 功能五：订单目标点与轨迹点格式转换
+    # 相关方法：_planned_route_targets、_node_to_path_point
+    # ============================================================
+
     @staticmethod
     def _planned_route_targets(vehicle):
         """按车辆当前订单计划提取后续接送目标点。
@@ -587,10 +860,10 @@ class CoreDispatcher:
         targets = []
         for step in vehicle.planned_route:
             order = step["order"]
-            target_node = order.p_node if step["type"] == "P" else order.d_node
+            target_node = order.o_node if step["type"] == "O" else order.d_node
             targets.append({
                 "type": step["type"],
-                "order_id": order.id,
+                "request_id": order.request_id,
                 "node": target_node,
             })
         return targets
@@ -612,6 +885,12 @@ class CoreDispatcher:
             "name": node.name,
             "zone": node.zone,
         }
+
+    # ============================================================
+    # 功能六：空车停靠预测辅助函数
+    # 相关方法：_clear_idle_parking、_nearest_graph_node、_collect_forecast_orders、
+    #          _select_idle_hotspot、_build_idle_route_from_node
+    # ============================================================
 
     @staticmethod
     def _clear_idle_parking(vehicle):
@@ -662,8 +941,8 @@ class CoreDispatcher:
 
         def add_order(order):
             """按订单 ID 去重后加入预测样本集合。"""
-            order_id = getattr(order, "id", None)
-            key = str(order_id) if order_id is not None else id(order)
+            request_id = getattr(order, "request_id", None)
+            key = str(request_id) if request_id is not None else id(order)
             if key in seen_ids:
                 return
             seen_ids.add(key)
@@ -744,7 +1023,7 @@ class CoreDispatcher:
             "segments": [
                 {
                     "type": "IDLE",
-                    "order_id": None,
+                    "request_id": None,
                     "target_node": CoreDispatcher._node_to_path_point(target_node),
                     "distance": dist,
                     "path": path_points,
@@ -752,6 +1031,11 @@ class CoreDispatcher:
                 }
             ],
         }
+
+    # ============================================================
+    # 功能七：车辆路径重建与前端轨迹元数据刷新
+    # 相关方法：rebuild_vehicle_path_from_node、refresh_vehicle_route_metadata、_projection_to_path_point
+    # ============================================================
 
     @staticmethod
     def rebuild_vehicle_path_from_node(vehicle, city_map, start_node):
@@ -783,7 +1067,7 @@ class CoreDispatcher:
 
             route_segments.append({
                 "type": target["type"],
-                "order_id": target["order_id"],
+                "request_id": target["request_id"],
                 "target_node": CoreDispatcher._node_to_path_point(target["node"]),
                 "distance": dist,
                 "path": segment_points,
@@ -859,6 +1143,13 @@ class CoreDispatcher:
             "is_projection": True,
         }
 
+    # ============================================================
+    # 功能八：GPS 实时路径更新与上下客状态同步
+    # 相关方法：sync_vehicle_route_progress、_route_point_index、
+    #          _apply_reached_route_step、_sync_passed_route_targets、
+    #          rebuild_vehicle_path_from_gps
+    # ============================================================
+
     @staticmethod
     def sync_vehicle_route_progress(vehicle, city_map, current_node):
         """根据车辆到达的路网节点同步上下客状态和剩余计划。
@@ -884,17 +1175,17 @@ class CoreDispatcher:
         while vehicle.planned_route:
             step = vehicle.planned_route[0]
             order = step["order"]
-            target_node = order.p_node if step["type"] == "P" else order.d_node
+            target_node = order.o_node if step["type"] == "O" else order.d_node
             if target_node.id != current_node.id:
                 break
 
-            if step["type"] == "P":
-                if all(o.id != order.id for o in vehicle.on_board_orders):
+            if step["type"] == "O":
+                if all(o.request_id != order.request_id for o in vehicle.on_board_orders):
                     vehicle.on_board_orders.append(order)
                 order.actual_pick_time = order.actual_pick_time or vehicle.time
                 action = "pickup"
             else:
-                vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.id != order.id]
+                vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.request_id != order.request_id]
                 if order not in CoreDispatcher.completed_orders_pool:
                     CoreDispatcher.completed_orders_pool.append(order)
                 action = "dropoff"
@@ -903,7 +1194,7 @@ class CoreDispatcher:
             changed_steps.append({
                 "action": action,
                 "type": step["type"],
-                "order_id": order.id,
+                "request_id": order.request_id,
                 "node": CoreDispatcher._node_to_path_point(target_node),
             })
 
@@ -944,13 +1235,13 @@ class CoreDispatcher:
             当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
         """
         order = step["order"]
-        if step["type"] == "P":
-            if all(o.id != order.id for o in vehicle.on_board_orders):
+        if step["type"] == "O":
+            if all(o.request_id != order.request_id for o in vehicle.on_board_orders):
                 vehicle.on_board_orders.append(order)
             order.actual_pick_time = order.actual_pick_time or vehicle.time
             action = "pickup"
         else:
-            vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.id != order.id]
+            vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.request_id != order.request_id]
             if order not in CoreDispatcher.completed_orders_pool:
                 CoreDispatcher.completed_orders_pool.append(order)
             action = "dropoff"
@@ -958,7 +1249,7 @@ class CoreDispatcher:
         return {
             "action": action,
             "type": step["type"],
-            "order_id": order.id,
+            "request_id": order.request_id,
             "node": CoreDispatcher._node_to_path_point(target_node),
         }
 
@@ -992,7 +1283,7 @@ class CoreDispatcher:
         while vehicle.planned_route:
             step = vehicle.planned_route[0]
             order = step["order"]
-            target_node = order.p_node if step["type"] == "P" else order.d_node
+            target_node = order.o_node if step["type"] == "O" else order.d_node
             target_index = CoreDispatcher._route_point_index(route_points, target_node.id)
             if target_index is None:
                 break
@@ -1072,18 +1363,23 @@ class CoreDispatcher:
         }
         result["snapped_node"] = result["snapped_point"]
         result["changed_steps"] = changed_steps
-        result["on_board_orders"] = [o.id for o in vehicle.on_board_orders]
+        result["on_board_orders"] = [o.request_id for o in vehicle.on_board_orders]
         result["planned_route"] = [
             {
                 "type": step["type"],
-                "order_id": step["order"].id,
+                "request_id": step["order"].request_id,
                 "target_node": CoreDispatcher._node_to_path_point(
-                    step["order"].p_node if step["type"] == "P" else step["order"].d_node
+                    step["order"].o_node if step["type"] == "O" else step["order"].d_node
                 ),
             }
             for step in vehicle.planned_route
         ]
         return result
+
+    # ============================================================
+    # 功能九：空车停靠场景入口
+    # 相关方法：idle_parking_scenario
+    # ============================================================
 
     @staticmethod
     def idle_parking_scenario(vehicle, city_map, fleet=None):
@@ -1193,6 +1489,11 @@ class CoreDispatcher:
             f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
         )
         return True
+
+    # ============================================================
+    # 功能十：停止接单预测预留入口
+    # 相关方法：stop_order_prediction
+    # ============================================================
 
     @staticmethod
     def stop_order_prediction(vehicle):

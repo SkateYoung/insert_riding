@@ -344,13 +344,13 @@
             for (const segment of data.segments || []) {
                 const t = segment.target_node;
                 const p = worldToScreen(t.lon, t.lat);
-                ctx.fillStyle = segment.type === "P" ? "#38bdf8" : "#f97316";
+                ctx.fillStyle = segment.type === "O" ? "#38bdf8" : "#f97316";
                 ctx.beginPath();
                 ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.fillStyle = "#ffffff";
                 ctx.font = "12px Arial";
-                ctx.fillText(`${segment.type}${segment.order_id}`, p.x + 8, p.y - 8);
+                ctx.fillText(`${segment.type}${segment.request_id}`, p.x + 8, p.y - 8);
             }
         }
 
@@ -364,7 +364,7 @@
             const snappedPoint = data.snapped_point || data.snapped_node;
             const changedSteps = (data.changed_steps || []).map(step => {
                 const action = step.action === "pickup" ? "接客" : "送客";
-                return `${action}${step.order_id}`;
+                return `${action}${step.request_id}`;
             }).join("，") || "无";
             summary.textContent = [
                 `车辆：${data.vehicle_id}`,
@@ -529,15 +529,15 @@
 
         /**
          * 轮询车队状态，等待测试订单被后台匹配线程分配给车辆。
-         * @param {string|number} orderId 测试订单 ID。
+         * @param {string|number} requestId 测试订单 ID。
          * @returns {Promise<object|null>} 已分配车辆；超时返回 null。
          */
-        async function waitForAssignedVehicle(orderId) {
+        async function waitForAssignedVehicle(requestId) {
             for (let i = 0; i < 12; i++) {
                 const fleetData = await requestJson("/fleet");
                 const fleet = fleetData.fleet || [];
                 const assigned = fleet.find(vehicle =>
-                    (vehicle.planned_route || []).some(step => String(step.order_id) === String(orderId))
+                    (vehicle.planned_route || []).some(step => String(step.request_id) === String(requestId))
                 ) || fleet.find(vehicle => (vehicle.planned_route || []).length > 0);
 
                 fillVehicles(fleet);
@@ -556,6 +556,24 @@
         }
 
         /**
+         * 将 Date 格式化为后端订单接口要求的 YYYY-MM-DD HH:MM:SS。
+         * @param {Date} date 时间对象。
+         * @returns {string} 本地时间字符串。
+         */
+        function formatDateTime(date) {
+            const pad = value => String(value).padStart(2, "0");
+            return [
+                date.getFullYear(),
+                pad(date.getMonth() + 1),
+                pad(date.getDate())
+            ].join("-") + " " + [
+                pad(date.getHours()),
+                pad(date.getMinutes()),
+                pad(date.getSeconds())
+            ].join(":");
+        }
+
+        /**
          * 创建一条测试订单，并自动选中接到该订单的车辆。
          * @returns {Promise<void>}
          */
@@ -569,27 +587,40 @@
                 return;
             }
 
-            const pickup = poiList[3] || poiList[0];
-            const dropoff = poiList[8] || poiList[poiList.length - 1];
+            const origin = poiList[3] || poiList[0];
+            const destination = poiList[8] || poiList[poiList.length - 1];
+            const now = new Date();
+            const earliest = new Date(now.getTime() + 5 * 60 * 1000);
+            const latest = new Date(now.getTime() + 20 * 60 * 1000);
             summary.textContent = "正在创建测试订单并等待调度分配...";
             const orderData = await requestJson("/order", {
                 method: "POST",
                 body: JSON.stringify({
-                    plon: pickup.lon,
-                    plat: pickup.lat,
-                    dlon: dropoff.lon,
-                    dlat: dropoff.lat
+                    request_id: `REQ-${Date.now()}`,
+                    origin: {
+                        lon: origin.lon,
+                        lat: origin.lat
+                    },
+                    destination: {
+                        lon: destination.lon,
+                        lat: destination.lat
+                    },
+                    expected_pickup_time: {
+                        earliest: formatDateTime(earliest),
+                        latest: formatDateTime(latest)
+                    },
+                    passenger_count: 1
                 })
             });
 
-            const assigned = await waitForAssignedVehicle(orderData.order_id);
+            const assigned = await waitForAssignedVehicle(orderData.request_id);
             if (!assigned) {
-                summary.textContent = `测试订单 ${orderData.order_id} 已创建，但暂未分配到车辆。请稍后点击“加载地图”。`;
+                summary.textContent = `测试订单 ${orderData.request_id} 已创建，但暂未分配到车辆。请稍后点击“加载地图”。`;
                 output.textContent = JSON.stringify(orderData, null, 2);
                 return;
             }
 
-            summary.textContent = `测试订单 ${orderData.order_id} 已分配给 ${assigned.id}，可以开始实时更新。`;
+            summary.textContent = `测试订单 ${orderData.request_id} 已分配给 ${assigned.id}，可以开始实时更新。`;
             output.textContent = JSON.stringify({ order: orderData, vehicle: assigned }, null, 2);
         }
 

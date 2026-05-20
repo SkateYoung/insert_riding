@@ -7,6 +7,11 @@ import json
 class AuxiliaryFunctions:
     """系统的无状态辅助工具类，封装底层物理计算与通信脱水能力。"""
     
+    # ============================================================
+    # 功能一：地理距离计算
+    # 相关方法：haversine_distance
+    # ============================================================
+
     @staticmethod
     def haversine_distance(lon1, lat1, lon2, lat2):
         """通用地球球面距离测算框架（哈弗赛因公式）。
@@ -29,6 +34,11 @@ class AuxiliaryFunctions:
         a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
         c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
         return R * c
+
+    # ============================================================
+    # 功能二：前端可视化数据导出
+    # 相关方法：export_visualization_data
+    # ============================================================
 
     @staticmethod
     def export_visualization_data(city_map, file_path="map_data.js", fleet=None, speed_mps=8.333):

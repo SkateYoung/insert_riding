@@ -11,7 +11,7 @@ o_center_lon, o_center_lat, d_center_lon, d_center_lat, pred_count等字段数�
 注意：
 1. 输出只保留 pred_count > 0 的 OD，预测为 0 的 OD 不输出。
 2. 经纬度中心点使用 insert_riding 路网/POI 的坐标体系，不直接复用 new_hex_precision 的旧坐标。
-3. 订单可以是 Python 对象，也可以是 dict，只要能提供 p_node/d_node 和 req_time。
+3. 订单可以是 Python 对象，也可以是 dict，只要能提供 o_node/d_node 和 req_time。
 """
 
 import math
@@ -40,6 +40,11 @@ except Exception:  # pragma: no cover - fallback keeps the module runnable witho
     h3 = None
 
 
+# ============================================================
+# 功能一：预测模块内部标准订单结构
+# 相关类型：CleanOrder
+# ============================================================
+
 @dataclass(frozen=True)
 class CleanOrder:
     """统一后的干净订单格式。
@@ -61,6 +66,12 @@ class CleanOrder:
     network_dist_m: float | None = None
     travel_time_min: float | None = None
 
+
+# ============================================================
+# 功能二：外部订单输入适配与时间标准化
+# 相关方法：_node_id、_node_lon_lat、_read_order_value、
+#          normalize_request_time、orders_from_insert_riding
+# ============================================================
 
 def _node_id(node: Any) -> str:
     """读取节点 ID，兼容 dict 和对象两种输入。
@@ -142,8 +153,8 @@ def orders_from_insert_riding(
     """把 insert_riding 订单转成 CleanOrder。
 
     支持两类输入：
-    - 后端 Order 对象：order.id/order.req_time/order.p_node/order.d_node
-    - 前端/API dict：id/reqTime/pNode/dNode 或 req_time/p_node/d_node
+    - 后端 Order 对象：order.request_id/order.request_time/order.o_node/order.d_node
+    - 前端/API dict：request_id/request_time/oNode/dNode 或 o_node/d_node
 
     如果传入 city_map，会用真实路网 get_path 计算 network_dist_m；
     如果再传入 speed_mps，会进一步计算 travel_time_min。
@@ -159,27 +170,25 @@ def orders_from_insert_riding(
     """
     clean: list[CleanOrder] = []
     for idx, order in enumerate(orders, 1):
-        request_id = str(_read_order_value(order, "id", default=idx))
-        raw_time = _read_order_value(order, "req_time", key="req_time")
+        request_id = str(_read_order_value(order, "request_id", default=idx))
+        raw_time = _read_order_value(order, "request_time", key="request_time")
         if raw_time is None:
-            raw_time = _read_order_value(order, "request_time", key="request_time")
-        if raw_time is None:
-            raw_time = _read_order_value(order, "reqTime", key="reqTime", default=0.0)
+            raw_time = _read_order_value(order, "req_time", key="req_time", default=0.0)
 
-        p_node = _read_order_value(order, "p_node", key="p_node")
+        o_node = _read_order_value(order, "o_node", key="o_node")
         d_node = _read_order_value(order, "d_node", key="d_node")
-        if p_node is None:
-            p_node = _read_order_value(order, "pNode", key="pNode")
+        if o_node is None:
+            o_node = _read_order_value(order, "oNode", key="oNode")
         if d_node is None:
             d_node = _read_order_value(order, "dNode", key="dNode")
-        if p_node is None or d_node is None:
-            raise ValueError("each order must provide p_node/d_node or pNode/dNode")
+        if o_node is None or d_node is None:
+            raise ValueError("each order must provide o_node/d_node or oNode/dNode")
 
-        o_lon, o_lat = _node_lon_lat(p_node)
+        o_lon, o_lat = _node_lon_lat(o_node)
         d_lon, d_lat = _node_lon_lat(d_node)
         dist = _read_order_value(order, "network_dist_m", key="network_dist_m")
         if dist is None and city_map is not None:
-            dist, _ = city_map.get_path(p_node, d_node)
+            dist, _ = city_map.get_path(o_node, d_node)
         travel_min = None
         if dist is not None and speed_mps and speed_mps > 0:
             travel_min = float(dist) / speed_mps / 60.0
@@ -192,7 +201,7 @@ def orders_from_insert_riding(
                 o_lat=o_lat,
                 d_lon=d_lon,
                 d_lat=d_lat,
-                o_poi_id=_node_id(p_node),
+                o_poi_id=_node_id(o_node),
                 d_poi_id=_node_id(d_node),
                 network_dist_m=None if dist is None else float(dist),
                 travel_time_min=travel_min,
@@ -200,6 +209,11 @@ def orders_from_insert_riding(
         )
     return clean
 
+
+# ============================================================
+# 功能三：OD 网格编码、中心点反查与预测结果地理映射
+# 相关方法：_fallback_cell、_cell_for、_cell_center、build_hex_lookup
+# ============================================================
 
 def _fallback_cell(lon: float, lat: float, cell_m: float = 180.0) -> str:
     """没有 h3 库时的兜底网格。
@@ -299,6 +313,12 @@ def build_hex_lookup(clean_orders: Iterable[CleanOrder], resolution: int = H3_RE
         }
     return lookup
 
+
+# ============================================================
+# 功能四：轻量历史统计 OD 预测
+# 相关方法：_slot_floor、_slot_index、_label_order、_compact_row、
+#          _positive_rows、predict_od_flows
+# ============================================================
 
 def _slot_floor(dt: datetime) -> datetime:
     """归入 15 分钟窗口起点，例如 08:07:23 -> 08:00:00。"""
@@ -447,6 +467,11 @@ def predict_od_flows(
     return rows, lookup
 
 
+# ============================================================
+# 功能五：预测结果导出辅助
+# 相关方法：export_hex_lookup_rows
+# ============================================================
+
 def export_hex_lookup_rows(lookup: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """导出 hex_label 到地图中心坐标的映射表，供可视化或排查使用。
 
@@ -458,6 +483,12 @@ def export_hex_lookup_rows(lookup: dict[str, dict[str, Any]]) -> list[dict[str, 
     """
     return sorted(lookup.values(), key=lambda r: r["hex_label"])
 
+
+# ============================================================
+# 功能六：v6 特征工程、模型预测与评估指标
+# 相关方法：_time_range、_dist_proxy、_build_count_series、_features_for、
+#          _future_sum、_allocate_integer_budget、_mae、_wape、predict_od_flows_v6
+# ============================================================
 
 def _time_range(start: datetime, end: datetime) -> list[datetime]:
     """生成 15 分钟粒度的闭区间时间序列。

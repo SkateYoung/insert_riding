@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """main.py HTTP 接口冒烟测试脚本。
 
 用法：
@@ -15,6 +15,7 @@ import os
 import platform
 import sys
 import time
+from datetime import datetime, timedelta
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,6 +90,10 @@ def run_tests(base_url):
     health = check("健康检查 GET /health", lambda: request_json(base_url, "GET", "/health"))
     assert_true(health.get("status") == "ok", "/health 的 status 应为 ok")
 
+    time_info = check("系统时间 GET /time", lambda: request_json(base_url, "GET", "/time"))
+    assert_true("timestamp" in time_info and "time_text" in time_info, "/time 应返回 timestamp 和 time_text")
+    assert_true(time_info.get("timezone") == "Asia/Shanghai", "/time 应返回 Asia/Shanghai 时区")
+
     if not health.get("initialized"):
         init = check("初始化系统 POST /init", lambda: request_json(base_url, "POST", "/init", {}))
         assert_true(init.get("status") in {"initialized", "already_initialized"}, "/init 返回了非预期状态")
@@ -136,21 +141,43 @@ def run_tests(base_url):
     assert_true(path.get("vehicle_id") == first_vehicle_id, "更新路径接口应返回对应车辆 id")
     assert_true("path" in path and "segments" in path, "更新路径接口应返回 path 和 segments")
 
+    now = datetime.now().replace(microsecond=0)
     order_body = {
-        "plon": p0["lon"],
-        "plat": p0["lat"],
-        "dlon": p1["lon"],
-        "dlat": p1["lat"],
+        "request_id": f"REQ-TEST-{int(time.time() * 1000)}",
+        "origin": {"lon": p0["lon"], "lat": p0["lat"]},
+        "destination": {"lon": p1["lon"], "lat": p1["lat"]},
+        "expected_pickup_time": {
+            "earliest": (now + timedelta(minutes=5)).isoformat(sep=" "),
+            "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+        },
+        "passenger_count": 1,
     }
     order = check("创建订单 POST /order", lambda: request_json(base_url, "POST", "/order", order_body))
     assert_true(order.get("status") == "pooled", "/order 应返回 status=pooled")
-    assert_true("order_id" in order, "/order 应返回 order_id")
+    assert_true("request_id" in order, "/order 应返回 request_id")
+    assert_true("request_time" in order, "/order 应返回后端生成的 request_time")
+
+    cancel_path = "/orders/" + urllib.parse.quote(order_body["request_id"], safe="") + "/cancel"
+    cancel = check("取消未上车订单 POST /orders/<request_id>/cancel", lambda: request_json(base_url, "POST", cancel_path))
+    assert_true(cancel.get("status") == "cancelled", "取消未上车订单应成功")
 
     pool = check("订单池 GET /orders/pool", lambda: request_json(base_url, "GET", "/orders/pool"))
     assert_true("pool_size" in pool and "orders" in pool, "/orders/pool 应返回订单池字段")
 
-    tick = check("推进仿真 POST /tick", lambda: request_json(base_url, "POST", "/tick", {"dt": 0.1}))
-    assert_true(tick.get("dt") == 0.1, "/tick 应回显 dt")
+    rest = check(
+        f"司机请求立即休息 POST /fleet/{first_vehicle_id}/rest",
+        lambda: request_json(
+            base_url,
+            "POST",
+            "/fleet/" + urllib.parse.quote(first_vehicle_id, safe="") + "/rest",
+            {},
+        ),
+    )
+    assert_true(rest.get("decision") == "close_now", "立即休息请求应返回 close_now 决策")
+    assert_true(rest.get("rest_status") in {"closing", "resting"}, "车辆应进入收车中或休息中")
+
+    tick = check("刷新真实时间状态 POST /tick", lambda: request_json(base_url, "POST", "/tick", {"dt": 0.1}))
+    assert_true("system_time" in tick and "dt" in tick, "/tick 应返回系统时间和真实 elapsed dt")
     assert_true(len(tick.get("fleet", [])) > 0, "/tick 应返回车队状态")
 
     try:
