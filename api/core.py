@@ -25,7 +25,7 @@ class CoreDispatcher:
     # ============================================================
 
     @staticmethod
-    def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None, original_etas=None):
+    def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None, original_etas=None, return_details=False):
         """核心评级器：沙盘量化时间线成本（Cost）以评估未来路线质量分数。
         
         该算法引入了由于车辆绕路等问题产生的物理油耗距离分数、乘客空等惩罚分，
@@ -37,12 +37,19 @@ class CoreDispatcher:
             on_board_orders (list): 该车上目前正被关着的已有乘客清单。
             city_map (CityGraph): 可以用于通过 A* 推算空间距离字典的数字路网基站。
             capacity (int, optional): 车辆容量限制。
-            v_zone (int, optional): 本车本命所在的主行政区用于加成跨界拒载权重。
+            v_zone (int, optional): 预留的运营区参数；当前成本函数暂不计算跨区成本。
             original_etas (dict, optional): 插入新订单前老乘客的原计划预计到达时间字典，用于计算拼车真实延误。
+            return_details (bool, optional): 是否额外返回成本明细。
             
         Returns:
-            tuple: (可不可行分支True/False, 最终累计积分成本 float, 推演各订单到达时间字典 dict)。成本分越低代表路线越优。
+            tuple: 默认返回 (可不可行分支True/False, 最终累计积分成本 float, 推演各订单到达时间字典 dict)。
+                   return_details=True 时额外返回成本明细 dict。成本分越低代表路线越优。
         """
+        def _result(is_feasible, cost, arrivals=None, details=None):
+            if return_details:
+                return is_feasible, cost, arrivals, details or {}
+            return is_feasible, cost, arrivals
+
         speed = SPEED_MPS 
         sim_time = vehicle_state['time']
         sim_last_node = vehicle_state['last_node']
@@ -66,7 +73,6 @@ class CoreDispatcher:
         
         pickup_times = {}
         arrival_times = {}
-        cross_zone_penalty = 0.0
         
         for step in route:
             order = step['order']
@@ -75,7 +81,7 @@ class CoreDispatcher:
             dist, path = city_map.get_path(city_map.nodes_map[sim_next_node], target_node)
             
             if dist == float('inf'):
-                return False, float('inf'), None
+                return _result(False, float('inf'), None, {"infeasible_reason": "path_unreachable"})
                 
             if current_load == 0:
                 empty_dist += dist
@@ -85,18 +91,15 @@ class CoreDispatcher:
             sim_time += dist / speed
             sim_next_node = target_node.id
             
-            if target_node.zone != v_zone:
-                cross_zone_penalty += 300.0 
-            
             if step['type'] == 'O':
                 current_load += order.passenger_count
                 if current_load > capacity: 
-                    return False, float('inf'), None 
+                    return _result(False, float('inf'), None, {"infeasible_reason": "capacity_exceeded"})
                 pickup_times[order.request_id] = sim_time
             elif step['type'] == 'D':
                 current_load -= order.passenger_count
                 if current_load < 0:
-                    return False, float('inf'), None
+                    return _result(False, float('inf'), None, {"infeasible_reason": "negative_load"})
                 arrival_times[order.request_id] = sim_time
 
         # ===== 综合多目标成本函数架构 =====
@@ -107,32 +110,45 @@ class CoreDispatcher:
         W_SOCIAL = 0.20     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
         W_FAIRNESS = 0.10   # 平台公平 (企业间订单分配基尼系数)
 
-        # 核心调优参数
-        BETA = 4.0       # 站牌下乘客枯等耗时体验折损
-        GAMMA = 3.0      # 车内乘客被拉着绕路耗时体验折损 
-        SLA_LATE_PENALTY = 1.0 # 时间窗超时惩罚系数；过期订单仍允许继续匹配
-        THETA = 1500.0       # 老客严重绕路的极限防背叛护盾
+        # 成本统一在分钟、公里和比例维度上计算，避免秒和米的原始尺度压制其他指标。
+        SECONDS_PER_MINUTE = 60.0
+        METERS_PER_KM = 1000.0
+        WAIT_COST_PER_MIN = 4.0
+        IN_CAR_COST_PER_MIN = 3.0
+        LATE_PICKUP_COST_PER_MIN = 1.0
+        LATE_ARRIVAL_COST_PER_MIN = 1.0
+        OLD_DELAY_COST_PER_MIN = 3.0
+        SEVERE_OLD_DELAY_PENALTY = 25.0
+        MILEAGE_UTIL_PENALTY_BASE = 30.0
+        LOAD_RATE_PENALTY_BASE = 20.0
+        SOCIAL_DISTANCE_COST_PER_KM = 1.0
         
         # ---------------------------------------------------------
         # 维度 A: 乘客体验成本 (Passenger Cost)
         passenger_cost = 0.0
+        wait_cost = 0.0
+        late_pickup_cost = 0.0
+        in_car_cost = 0.0
+        late_arrival_cost = 0.0
+        old_passenger_delay_cost = 0.0
+        old_passenger_severe_delay_cost = 0.0
         for step in route:
             order = step['order']
             if step['type'] == 'O':
-                wait_time = pickup_times[order.request_id] - order.req_time
-                passenger_cost += wait_time * BETA # 乘客候车时间指标（BETA为候车时间成本系数，wait_time * BETA即是乘客候车时间成本）
+                wait_minutes = max(0.0, pickup_times[order.request_id] - order.req_time) / SECONDS_PER_MINUTE
+                wait_cost += wait_minutes * WAIT_COST_PER_MIN
                 
                 # 时间窗满意度：超出期望上车时间不再一票否决，改为有限惩罚，允许积压订单继续派单。
-                late_pickup_time = max(0.0, pickup_times[order.request_id] - order.max_pickup_time)
-                passenger_cost += late_pickup_time * SLA_LATE_PENALTY
+                late_pickup_minutes = max(0.0, pickup_times[order.request_id] - order.max_pickup_time) / SECONDS_PER_MINUTE
+                late_pickup_cost += late_pickup_minutes * LATE_PICKUP_COST_PER_MIN
             else:
                 start_service_time = pickup_times.get(order.request_id) or order.actual_pick_time or vehicle_state['time']
-                in_car_time = arrival_times[order.request_id] - start_service_time
-                passenger_cost += in_car_time * GAMMA # 绕行系数1（这里是统计所有订单中，乘客会在车上等待的时间成本）   
+                in_car_minutes = max(0.0, arrival_times[order.request_id] - start_service_time) / SECONDS_PER_MINUTE
+                in_car_cost += in_car_minutes * IN_CAR_COST_PER_MIN
                 
                 # 送达时间超出估算上限时同样只计入惩罚，不阻断车辆匹配。
-                late_arrival_time = max(0.0, arrival_times[order.request_id] - order.max_arrival_time)
-                passenger_cost += late_arrival_time * SLA_LATE_PENALTY
+                late_arrival_minutes = max(0.0, arrival_times[order.request_id] - order.max_arrival_time) / SECONDS_PER_MINUTE
+                late_arrival_cost += late_arrival_minutes * LATE_ARRIVAL_COST_PER_MIN
             
         # 乘客体验：强制挂载老乘客被绕路的代价(真实的延误时间)
         for order in on_board_orders:
@@ -142,10 +158,19 @@ class CoreDispatcher:
                     if original_etas and order.request_id in original_etas:
                         delay_time = arrival_times[order.request_id] - original_etas[order.request_id]
                         if delay_time > 0:
-                            passenger_cost += delay_time * GAMMA # 绕行系数2（这里是统计所有订单中，已经上车的老乘客被顺路绕行的额外时间成本）
+                            old_passenger_delay_cost += (delay_time / SECONDS_PER_MINUTE) * OLD_DELAY_COST_PER_MIN
                             if delay_time > 180.0:
-                                passenger_cost += THETA
+                                old_passenger_severe_delay_cost += SEVERE_OLD_DELAY_PENALTY
                     break
+
+        passenger_cost = (
+            wait_cost
+            + late_pickup_cost
+            + in_car_cost
+            + late_arrival_cost
+            + old_passenger_delay_cost
+            + old_passenger_severe_delay_cost
+        )
 
         # ---------------------------------------------------------
         # 维度 B: 企业效益成本 (Enterprise Cost)
@@ -155,8 +180,8 @@ class CoreDispatcher:
         
         # 1. 里程利用率 (Mileage Utilization Rate)：载客里程占比
         mileage_util_rate = loaded_dist / total_sim_dist if total_sim_dist > 0 else 0.0
-        # 利用率越低，空跑越多，惩罚越大 (基数可根据业务放大)
-        mileage_penalty = (1.0 - mileage_util_rate) * 1000.0
+        # 利用率越低，空跑越多，惩罚越大。这里使用低基数，避免企业成本压过乘客体验。
+        mileage_penalty = (1.0 - mileage_util_rate) * MILEAGE_UTIL_PENALTY_BASE
         
         # 2. 满载率 (Load Rate)：这里使用这趟路线服务的总客数占比作为满载率代理
         # (车上原有的 + 这趟新接的) / 最大容量
@@ -164,19 +189,18 @@ class CoreDispatcher:
             step['order'].passenger_count for step in route if step['type'] == 'O'
         )
         load_rate = min(1.0, total_pax / max(1, capacity))
-        # 满载率越低（拉着一两座跑），效率越低，惩罚越大
-        load_penalty = (1.0 - load_rate) * 800.0
+        # 满载率越低（拉着一两座跑），效率越低，惩罚越大。
+        load_penalty = (1.0 - load_rate) * LOAD_RATE_PENALTY_BASE
         
         # 综合企业成本
         enterprise_cost =  mileage_penalty + load_penalty
-        enterprise_cost = 0.0
 
         # ---------------------------------------------------------
         # 维度 C: 社会效益成本 (Social Cost)
-        # 总体路权占用、碳排放总长以及跨区调度的惩罚
+        # 总体路权占用和碳排放使用总里程代理；本轮暂不考虑跨区成本。
         total_dist = empty_dist + loaded_dist
-        social_cost = total_dist * 1.0 + cross_zone_penalty
-        social_cost = 0.0
+        total_km = total_dist / METERS_PER_KM
+        social_cost = total_km * SOCIAL_DISTANCE_COST_PER_KM
         # ---------------------------------------------------------
         # 维度 D: 平台公平成本 (Fairness Cost) 
         # 代理基尼系数：当前车辆负载越大、车上已有订单越多，成本增加。
@@ -191,7 +215,36 @@ class CoreDispatcher:
                 W_SOCIAL * social_cost + 
                 W_FAIRNESS * fairness_cost)
         
-        return True, cost, arrival_times
+        cost_details = {
+            "passenger_cost": passenger_cost,
+            "wait_cost": wait_cost,
+            "late_pickup_cost": late_pickup_cost,
+            "in_car_cost": in_car_cost,
+            "late_arrival_cost": late_arrival_cost,
+            "old_passenger_delay_cost": old_passenger_delay_cost,
+            "old_passenger_severe_delay_cost": old_passenger_severe_delay_cost,
+            "enterprise_cost": enterprise_cost,
+            "mileage_penalty": mileage_penalty,
+            "load_penalty": load_penalty,
+            "social_cost": social_cost,
+            "fairness_cost": fairness_cost,
+            "weighted_passenger_cost": W_PASSENGER * passenger_cost,
+            "weighted_enterprise_cost": W_ENTERPRISE * enterprise_cost,
+            "weighted_social_cost": W_SOCIAL * social_cost,
+            "weighted_fairness_cost": W_FAIRNESS * fairness_cost,
+            "total_cost": cost,
+            "metrics": {
+                "empty_dist_m": empty_dist,
+                "loaded_dist_m": loaded_dist,
+                "total_dist_m": total_dist,
+                "total_dist_km": total_km,
+                "mileage_util_rate": mileage_util_rate,
+                "load_rate": load_rate,
+                "pickup_times": pickup_times,
+                "arrival_times": arrival_times,
+            },
+        }
+        return _result(True, cost, arrival_times, cost_details)
 
     @staticmethod
     def _try_insert_order(vehicle, new_order, city_map):
@@ -207,6 +260,9 @@ class CoreDispatcher:
         Returns:
             tuple: (最优路径 list|None, 最优成本 float)
         """
+        if not CoreDispatcher._vehicle_has_capacity_for_order(vehicle, new_order):
+            return None, float('inf')
+
         best_route = None
         best_cost = float('inf')
         route = vehicle.planned_route
@@ -304,6 +360,70 @@ class CoreDispatcher:
         return False
 
     @staticmethod
+    def _evaluate_vehicle_current_route_cost(vehicle, city_map):
+        """计算车辆当前计划路线的绝对成本，用于订单池内的增量成本比较。"""
+        if not vehicle.planned_route:
+            return 0.0
+
+        v_state = {
+            'time': vehicle.time,
+            'last_node': vehicle.last_node,
+            'next_node': vehicle.next_node,
+            'progress': vehicle.progress
+        }
+        is_feasible, cost, _ = CoreDispatcher.evaluate_route(
+            vehicle.planned_route,
+            v_state,
+            vehicle.on_board_orders,
+            city_map,
+            vehicle.capacity,
+            v_zone=vehicle.op_zone,
+        )
+        return cost if is_feasible else 0.0
+
+    @staticmethod
+    def _vehicle_committed_passenger_count(vehicle):
+        """统计车辆已承诺服务的乘客数。
+
+        已承诺乘客 = 当前已上车乘客 + 已分配但尚未上车的计划接客乘客。
+        这样可以避免车辆还没真正接到人时继续无限接单。
+        """
+        on_board_ids = {order.request_id for order in vehicle.on_board_orders}
+        committed_count = sum(order.passenger_count for order in vehicle.on_board_orders)
+
+        for step in vehicle.planned_route:
+            if step.get("type") != "O":
+                continue
+            order = step["order"]
+            if order.request_id in on_board_ids:
+                continue
+            committed_count += order.passenger_count
+
+        return committed_count
+
+    @staticmethod
+    def _vehicle_has_capacity_for_order(vehicle, order):
+        """判断车辆剩余承诺容量是否足够接收新订单。"""
+        return (
+            CoreDispatcher._vehicle_committed_passenger_count(vehicle)
+            + order.passenger_count
+            <= vehicle.capacity
+        )
+
+    @staticmethod
+    def _calculate_cancel_risk_score(order, current_timestamp):
+        """根据乘客已等待时长计算订单池调度用取消风险分，范围为 0~100。"""
+        req_time = getattr(order, "req_time", current_timestamp)
+        wait_minutes = max(0.0, float(current_timestamp) - float(req_time)) / 60.0
+        if wait_minutes <= 10.0:
+            return 0.0
+        if wait_minutes <= 30.0:
+            return ((wait_minutes - 10.0) / 20.0) * 40.0
+        if wait_minutes <= 60.0:
+            return 40.0 + ((wait_minutes - 30.0) / 30.0) * 40.0
+        return 100.0
+
+    @staticmethod
     def process_pool_matching(fleet, city_map, state_lock=None):
         """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法】。
         
@@ -348,9 +468,15 @@ class CoreDispatcher:
                 # 内部循环：在单次调度周期内尽可能排空订单池
                 while CoreDispatcher.order_pool:
                     best_o_idx = -1
-                    max_regret = -1.0
                     global_best_v = None
                     global_best_route = None
+                    best_priority_score = 0.0
+                    best_cancel_risk_score = 0.0
+                    order_candidates = []
+                    current_timestamp = max(
+                        (getattr(v, "time", 0.0) for v in fleet),
+                        default=time.time(),
+                    ) or time.time()
 
                     # 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
                     for i in range(len(CoreDispatcher.order_pool)):
@@ -359,21 +485,27 @@ class CoreDispatcher:
                         v1, r1 = None, None
 
                         for v in fleet:
-                            # ===== 查看车辆容量是否已满 =====
-                            if sum(o.passenger_count for o in v.on_board_orders) >= v.capacity:
+                            # ===== 查看车辆已承诺容量是否还能接收该订单 =====
+                            if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
                                 continue
                             # ===== 疲劳驾驶与休息拦截限流 =====
                             if not CoreDispatcher._vehicle_can_accept_order(v):
                                 continue
 
-                            route, cost = CoreDispatcher._try_insert_order(v, order, city_map)
+                            original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(v, city_map)
+                            route, absolute_cost = CoreDispatcher._try_insert_order(v, order, city_map)
                             is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
+                            cost = (
+                                absolute_cost - original_cost
+                                if route is not None and absolute_cost != float('inf')
+                                else float('inf')
+                            )
 
                             # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
-                            if not is_idle and cost > 30000.0:
+                            if not is_idle and absolute_cost > 1000.0:
                                 cost = float('inf')
 
-                            # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)
+                            # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)，这里使用增量成本。
                             if cost < c1:
                                 c2 = c1
                                 c1 = cost
@@ -386,13 +518,50 @@ class CoreDispatcher:
                             continue
 
                         # 计算后悔值：次优成本与最优成本的差额
-                        regret = 1e6 if c2 == float('inf') else (c2 - c1)
+                        regret = None if c2 == float('inf') else max(0.0, c2 - c1)
+                        order_candidates.append({
+                            "order_index": i,
+                            "vehicle": v1,
+                            "route": r1,
+                            "regret": regret,
+                            "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
+                        })
 
-                        if regret > max_regret:
-                            max_regret = regret
-                            best_o_idx = i
-                            global_best_v = v1
-                            global_best_route = r1
+                    finite_regrets = [
+                        item["regret"]
+                        for item in order_candidates
+                        if item["regret"] is not None
+                    ]
+                    max_finite_regret = max(finite_regrets, default=0.0)
+
+                    for item in order_candidates:
+                        if item["regret"] is None:
+                            normalized_regret_score = 100.0
+                        elif max_finite_regret > 0.0:
+                            normalized_regret_score = min(100.0, (item["regret"] / max_finite_regret) * 100.0)
+                        else:
+                            normalized_regret_score = 0.0
+
+                        item["normalized_regret_score"] = normalized_regret_score
+                        item["priority_score"] = (
+                            0.6 * item["cancel_risk_score"]
+                            + 0.4 * normalized_regret_score
+                        )
+
+                    if order_candidates:
+                        best_candidate = max(
+                            order_candidates,
+                            key=lambda item: (
+                                item["priority_score"],
+                                item["cancel_risk_score"],
+                                item["normalized_regret_score"],
+                            ),
+                        )
+                        best_o_idx = best_candidate["order_index"]
+                        global_best_v = best_candidate["vehicle"]
+                        global_best_route = best_candidate["route"]
+                        best_priority_score = best_candidate["priority_score"]
+                        best_cancel_risk_score = best_candidate["cancel_risk_score"]
 
                     if best_o_idx != -1:
                         target_o = CoreDispatcher.order_pool.pop(best_o_idx)
@@ -401,7 +570,10 @@ class CoreDispatcher:
                         global_best_v.planned_route = global_best_route
                         CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
                         assign_count += 1
-                        print(f"[Core.Pool] [Match] 后悔值匹配成功：单 {target_o.request_id} 被 {global_best_v.id} 优先划拨！")
+                        print(
+                            f"[Core.Pool] [Match] 订单池优先级匹配成功：单 {target_o.request_id} "
+                            f"被 {global_best_v.id} 优先划拨！风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
+                        )
 
                         # ==========================================
                         # 打印车辆更新后的轨迹点 (途径站点)

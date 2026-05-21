@@ -85,6 +85,22 @@
             margin-top: 12px;
         }
 
+        .order-buttons {
+            grid-template-columns: 1fr;
+        }
+
+        .fleet-info {
+            margin-top: 6px;
+            padding: 8px;
+            min-height: 42px;
+            white-space: pre-wrap;
+            background: #f9fafb;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
         #summary {
             margin-top: 14px;
             padding: 10px;
@@ -119,7 +135,7 @@
     <div class="layout">
         <div class="map-panel">
             <canvas id="mapCanvas"></canvas>
-            <div class="map-tip">滚轮缩放，拖拽平移，点击地图可写入车辆 GPS 坐标。</div>
+            <div class="map-tip">滚轮缩放，拖拽平移，点击地图可写入备用 GPS 坐标。</div>
         </div>
 
         <aside class="side-panel">
@@ -133,23 +149,27 @@
                 <button id="loadBtn">加载地图</button>
             </div>
 
-            <label for="vehicleSelect">车辆</label>
-            <select id="vehicleSelect"></select>
+            <label>车队</label>
+            <div id="fleetInfo" class="fleet-info">未加载车辆。</div>
 
             <label for="poiSelect">快速填入 POI 坐标</label>
             <select id="poiSelect"></select>
 
-            <label for="lonInput">车辆经度 lon</label>
+            <label for="lonInput">备用 GPS 经度 lon</label>
             <input id="lonInput" type="number" step="0.000001" placeholder="例如 113.400432">
 
-            <label for="latInput">车辆纬度 lat</label>
+            <label for="latInput">备用 GPS 纬度 lat</label>
             <input id="latInput" type="number" step="0.000001" placeholder="例如 23.058342">
 
             <div class="button-row">
-                <button id="submitBtn">更新一次路径</button>
-                <button id="realtimeBtn">开始实时更新</button>
+                <button id="submitBtn">更新全部车辆路径</button>
+                <button id="realtimeBtn">开始全部实时更新</button>
             </div>
-            <button id="createOrderBtn">创建测试订单</button>
+            <div class="button-row order-buttons">
+                <button id="createOrderBtn">创建随机订单</button>
+                <button id="create10OrdersBtn">一键增加十个随机订单</button>
+                <button id="create50OrdersBtn">一键增加五十个随机订单</button>
+            </div>
 
             <label for="intervalInput">更新间隔（毫秒）</label>
             <input id="intervalInput" type="number" min="500" step="100" value="2000">
@@ -166,7 +186,7 @@
 
         const canvas = document.getElementById("mapCanvas");
         const ctx = canvas.getContext("2d");
-        const vehicleSelect = document.getElementById("vehicleSelect");
+        const fleetInfo = document.getElementById("fleetInfo");
         const poiSelect = document.getElementById("poiSelect");
         const lonInput = document.getElementById("lonInput");
         const latInput = document.getElementById("latInput");
@@ -176,7 +196,10 @@
         const output = document.getElementById("output");
 
         let roadNetwork = null;
-        let latestPath = null;
+        let fleetList = [];
+        let latestPaths = new Map();
+        let vehicleGps = new Map();
+        let vehicleColors = new Map();
         let scale = 1;
         let offsetX = 0;
         let offsetY = 0;
@@ -304,8 +327,8 @@
                 ctx.fill();
             }
 
-            if (latestPath) {
-                drawUpdatedPath(latestPath);
+            for (const item of latestPaths.values()) {
+                drawUpdatedPath(item.data, item.color);
             }
             ctx.restore();
         }
@@ -313,12 +336,13 @@
         /**
          * 绘制后端返回的车辆轨迹、吸附点和接送目标点。
          * @param {object} data /fleet/<vehicle_id>/path 返回的数据。
+         * @param {string} color 车辆轨迹颜色。
          * @returns {void}
          */
-        function drawUpdatedPath(data) {
+        function drawUpdatedPath(data, color = "#22c55e") {
             const path = data.planned_route_point || data.path || [];
             if (path.length > 0) {
-                ctx.strokeStyle = "#22c55e";
+                ctx.strokeStyle = color;
                 ctx.lineWidth = 4;
                 ctx.beginPath();
                 path.forEach((node, index) => {
@@ -332,7 +356,7 @@
             const snappedPoint = data.snapped_point || data.snapped_node;
             if (snappedPoint) {
                 const p = worldToScreen(snappedPoint.lon, snappedPoint.lat);
-                ctx.fillStyle = "#ef4444";
+                ctx.fillStyle = color;
                 ctx.beginPath();
                 ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
                 ctx.fill();
@@ -355,31 +379,40 @@
         }
 
         /**
-         * 将路径更新结果写入摘要面板，并触发地图重绘。
-         * @param {object} data 路径更新接口返回体。
+         * 将全部车辆路径更新结果写入摘要面板，并触发地图重绘。
+         * @param {Array<object>} results 每辆车的路径更新结果。
          * @returns {void}
          */
-        function showResult(data) {
-            latestPath = data;
-            const snappedPoint = data.snapped_point || data.snapped_node;
-            const changedSteps = (data.changed_steps || []).map(step => {
-                const action = step.action === "pickup" ? "接客" : "送客";
-                return `${action}${step.request_id}`;
-            }).join("，") || "无";
-            summary.textContent = [
-                `车辆：${data.vehicle_id}`,
-                `吸附点：${snappedPoint?.name || snappedPoint?.id || "-"}`,
-                `GPS 到吸附点距离：${Number(snappedPoint?.distance_to_gps || 0).toFixed(2)} 米`,
-                `计划任务数：${data.planned_route_size}`,
-                `总距离：${Number(data.total_distance || 0).toFixed(2)} 米`,
-                `轨迹点数量：${(data.planned_route_point || data.path || []).length}`,
-                `分段数量：${(data.segments || []).length}`,
-                `本次上下客：${changedSteps}`,
-                `车上订单：${(data.on_board_orders || []).join(", ") || "无"}`,
-                `剩余计划：${(data.planned_route || []).length}`,
+        function showBatchResults(results) {
+            const successList = results.filter(item => item.ok);
+            const failList = results.filter(item => !item.ok);
+            const lines = [
+                `本次更新车辆：${successList.length}/${results.length}`,
+                `失败车辆：${failList.length}`,
                 `更新时间：${new Date().toLocaleTimeString()}`
-            ].join("\n");
-            output.textContent = JSON.stringify(data, null, 2);
+            ];
+
+            for (const item of successList) {
+                const data = item.data;
+                const snappedPoint = data.snapped_point || data.snapped_node;
+                const changedSteps = (data.changed_steps || []).map(step => {
+                    const action = step.action === "pickup" ? "接客" : "送客";
+                    return `${action}${step.request_id}`;
+                }).join("，") || "无";
+                lines.push(
+                    `${data.vehicle_id}：任务 ${data.planned_route_size}，轨迹点 ${(data.planned_route_point || data.path || []).length}，上下客 ${changedSteps}`
+                );
+                if (snappedPoint) {
+                    lines.push(`  吸附点：${snappedPoint.name || snappedPoint.id || "-"}，偏差 ${Number(snappedPoint.distance_to_gps || 0).toFixed(2)} 米`);
+                }
+            }
+
+            for (const item of failList) {
+                lines.push(`${item.vehicle_id}：${item.error}`);
+            }
+
+            summary.textContent = lines.join("\n");
+            output.textContent = JSON.stringify(results, null, 2);
             drawMap();
         }
 
@@ -417,12 +450,12 @@
         /**
          * 沿后端返回的规划轨迹推进车辆 GPS，模拟车辆持续行驶。
          * @param {object} data 路径更新接口返回体。
-         * @returns {boolean} 成功写入下一次 GPS 时返回 true。
+         * @returns {{lon: number, lat: number}|null} 下一次请求使用的 GPS；没有可推进轨迹时返回 null。
          */
         function advanceGpsForNextRequest(data) {
             const points = (data.planned_route_point || data.path || [])
                 .filter(point => Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat)));
-            if (points.length < 2) return false;
+            if (points.length < 2) return null;
 
             // 后端返回的第一个点通常是当前吸附点，前端按固定距离沿轨迹推进来模拟 GPS 变化。
             const snappedPoint = data.snapped_point || data.snapped_node || points[0];
@@ -445,9 +478,10 @@
                 current = target;
             }
 
-            lonInput.value = Number(nextPoint.lon).toFixed(6);
-            latInput.value = Number(nextPoint.lat).toFixed(6);
-            return true;
+            return {
+                lon: Number(nextPoint.lon),
+                lat: Number(nextPoint.lat)
+            };
         }
 
         /**
@@ -475,27 +509,32 @@
             const poiData = await requestJson("/pois");
 
             roadNetwork = mapData;
-            fillVehicles(fleetData.fleet || []);
+            updateFleetState(fleetData.fleet || []);
             fillPois(poiData.pois || []);
             fitMapToCanvas();
             drawMap();
-            summary.textContent = `已加载 ${Object.keys(mapData.nodes || {}).length} 个路网点，${mapData.edges.length} 条边，${vehicleSelect.options.length} 辆车。`;
+            summary.textContent = `已加载 ${Object.keys(mapData.nodes || {}).length} 个路网点，${mapData.edges.length} 条边，${fleetList.length} 辆车。`;
         }
 
         /**
-         * 将车辆列表写入下拉框，带任务车辆会在名称中标记。
+         * 缓存车队状态并刷新侧边栏车辆概览。
          * @param {Array<object>} fleet /fleet 接口返回的车辆列表。
          * @returns {void}
          */
-        function fillVehicles(fleet) {
-            vehicleSelect.innerHTML = "";
+        function updateFleetState(fleet) {
+            fleetList = fleet;
+            vehicleColors.clear();
+            const lines = [];
             for (const vehicle of fleet) {
-                const option = document.createElement("option");
-                option.value = vehicle.id;
+                vehicleColors.set(vehicle.id, vehicle.color || "#22c55e");
                 const routeSize = (vehicle.planned_route || []).length;
-                option.textContent = routeSize > 0 ? `${vehicle.id}（有任务）` : vehicle.id;
-                vehicleSelect.appendChild(option);
+                const gps = vehicle.gps || {};
+                if (!vehicleGps.has(vehicle.id) && Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
+                    vehicleGps.set(vehicle.id, { lon: Number(gps.lon), lat: Number(gps.lat) });
+                }
+                lines.push(`${vehicle.id}：${routeSize} 个计划任务，车上 ${vehicle.on_board_count || 0} 人`);
             }
+            fleetInfo.textContent = lines.length ? lines.join("\n") : "未加载车辆。";
         }
 
         /**
@@ -528,34 +567,6 @@
         }
 
         /**
-         * 轮询车队状态，等待测试订单被后台匹配线程分配给车辆。
-         * @param {string|number} requestId 测试订单 ID。
-         * @returns {Promise<object|null>} 已分配车辆；超时返回 null。
-         */
-        async function waitForAssignedVehicle(requestId) {
-            for (let i = 0; i < 12; i++) {
-                const fleetData = await requestJson("/fleet");
-                const fleet = fleetData.fleet || [];
-                const assigned = fleet.find(vehicle =>
-                    (vehicle.planned_route || []).some(step => String(step.request_id) === String(requestId))
-                ) || fleet.find(vehicle => (vehicle.planned_route || []).length > 0);
-
-                fillVehicles(fleet);
-                if (assigned) {
-                    vehicleSelect.value = assigned.id;
-                    const gps = assigned.gps || {};
-                    if (Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
-                        lonInput.value = Number(gps.lon).toFixed(6);
-                        latInput.value = Number(gps.lat).toFixed(6);
-                    }
-                    return assigned;
-                }
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-            return null;
-        }
-
-        /**
          * 将 Date 格式化为后端订单接口要求的 YYYY-MM-DD HH:MM:SS。
          * @param {Date} date 时间对象。
          * @returns {string} 本地时间字符串。
@@ -574,29 +585,51 @@
         }
 
         /**
-         * 创建一条测试订单，并自动选中接到该订单的车辆。
-         * @returns {Promise<void>}
+         * 确保本地已经缓存 POI 列表。
+         * @returns {Promise<boolean>} POI 数量足够时返回 true。
          */
-        async function createTestOrder() {
+        async function ensurePoisLoaded() {
             if (poiList.length < 2) {
                 const poiData = await requestJson("/pois");
                 poiList = poiData.pois || [];
             }
             if (poiList.length < 2) {
-                summary.textContent = "POI 数量不足，无法创建测试订单。";
-                return;
+                summary.textContent = "POI 数量不足，无法创建随机订单。";
+                return false;
             }
+            return true;
+        }
 
-            const origin = poiList[3] || poiList[0];
-            const destination = poiList[8] || poiList[poiList.length - 1];
+        /**
+         * 随机选取一组不同的 OD POI。
+         * @returns {{origin: object, destination: object}} 随机 OD。
+         */
+        function pickRandomOd() {
+            const originIndex = Math.floor(Math.random() * poiList.length);
+            let destinationIndex = Math.floor(Math.random() * poiList.length);
+            while (destinationIndex === originIndex) {
+                destinationIndex = Math.floor(Math.random() * poiList.length);
+            }
+            return {
+                origin: poiList[originIndex],
+                destination: poiList[destinationIndex]
+            };
+        }
+
+        /**
+         * 创建一条随机订单。
+         * @param {number} index 批量创建时的序号。
+         * @returns {Promise<object>} 后端订单创建结果。
+         */
+        async function createRandomOrder(index = 0) {
+            const { origin, destination } = pickRandomOd();
             const now = new Date();
             const earliest = new Date(now.getTime() + 5 * 60 * 1000);
             const latest = new Date(now.getTime() + 20 * 60 * 1000);
-            summary.textContent = "正在创建测试订单并等待调度分配...";
-            const orderData = await requestJson("/order", {
+            return requestJson("/order", {
                 method: "POST",
                 body: JSON.stringify({
-                    request_id: `REQ-${Date.now()}`,
+                    request_id: `REQ-${Date.now()}-${index}-${Math.floor(Math.random() * 100000)}`,
                     origin: {
                         lon: origin.lon,
                         lat: origin.lat
@@ -612,45 +645,124 @@
                     passenger_count: 1
                 })
             });
-
-            const assigned = await waitForAssignedVehicle(orderData.request_id);
-            if (!assigned) {
-                summary.textContent = `测试订单 ${orderData.request_id} 已创建，但暂未分配到车辆。请稍后点击“加载地图”。`;
-                output.textContent = JSON.stringify(orderData, null, 2);
-                return;
-            }
-
-            summary.textContent = `测试订单 ${orderData.request_id} 已分配给 ${assigned.id}，可以开始实时更新。`;
-            output.textContent = JSON.stringify({ order: orderData, vehicle: assigned }, null, 2);
         }
 
         /**
-         * 提交当前 GPS，触发车辆路径更新并推进下一次模拟 GPS。
-         * @returns {Promise<object|null>} 后端路径更新结果；输入不合法时返回 null。
+         * 批量创建随机订单。
+         * @param {number} count 创建数量。
+         * @returns {Promise<void>}
          */
-        async function submitPathUpdate() {
-            const vehicleId = vehicleSelect.value;
+        async function createRandomOrders(count) {
+            if (!await ensurePoisLoaded()) {
+                return;
+            }
+
+            const orders = [];
+            summary.textContent = `正在创建 ${count} 个随机订单...`;
+            for (let i = 0; i < count; i++) {
+                orders.push(await createRandomOrder(i + 1));
+                if ((i + 1) % 10 === 0 || i + 1 === count) {
+                    summary.textContent = `已创建 ${i + 1}/${count} 个随机订单，后台匹配线程会自动调度。`;
+                }
+            }
+
+            const fleetData = await requestJson("/fleet");
+            updateFleetState(fleetData.fleet || []);
+            summary.textContent = `已创建 ${orders.length} 个随机订单。后台调度完成后，点击“更新全部车辆路径”或开启实时更新。`;
+            output.textContent = JSON.stringify(orders, null, 2);
+        }
+
+        /**
+         * 从手动输入框读取备用 GPS。
+         * @returns {{lon: number, lat: number}|null} 合法 GPS 或 null。
+         */
+        function readFallbackGpsFromInputs() {
             const lon = Number(lonInput.value);
             const lat = Number(latInput.value);
-
-            if (!vehicleId) {
-                summary.textContent = "请先选择车辆。";
-                return null;
-            }
             if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
-                summary.textContent = "请填写合法的 lon/lat 数字。";
                 return null;
             }
+            return { lon, lat };
+        }
 
-            const data = await requestJson(`/fleet/${encodeURIComponent(vehicleId)}/path`, {
-                method: "POST",
-                body: JSON.stringify({ lon, lat })
-            });
-            showResult(data);
-            if (!advanceGpsForNextRequest(data)) {
-                summary.textContent += "\n当前车辆没有可推进的规划轨迹，请先创建测试订单或选择有任务车辆。";
+        /**
+         * 获取某辆车下一次路径更新使用的 GPS。
+         * @param {object} vehicle 车辆快照。
+         * @returns {{lon: number, lat: number}|null} GPS 坐标。
+         */
+        function getVehicleGpsForRequest(vehicle) {
+            const cached = vehicleGps.get(vehicle.id);
+            if (cached) {
+                return cached;
             }
-            return data;
+
+            const gps = vehicle.gps || {};
+            if (Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
+                return { lon: Number(gps.lon), lat: Number(gps.lat) };
+            }
+
+            const firstRoutePoint = (vehicle.planned_route_point || [])[0];
+            if (firstRoutePoint && Number.isFinite(Number(firstRoutePoint.lon)) && Number.isFinite(Number(firstRoutePoint.lat))) {
+                return { lon: Number(firstRoutePoint.lon), lat: Number(firstRoutePoint.lat) };
+            }
+
+            const node = roadNetwork?.nodes?.[vehicle.next_node] || roadNetwork?.nodes?.[vehicle.last_node];
+            if (node) {
+                return { lon: Number(node.lon), lat: Number(node.lat) };
+            }
+
+            return readFallbackGpsFromInputs();
+        }
+
+        /**
+         * 更新全部车辆路径，并推进每辆车下一次模拟 GPS。
+         * @returns {Promise<Array<object>>} 每辆车的路径更新结果。
+         */
+        async function submitPathUpdate() {
+            const fleetData = await requestJson("/fleet");
+            updateFleetState(fleetData.fleet || []);
+            if (fleetList.length === 0) {
+                summary.textContent = "当前没有可更新的车辆。";
+                return [];
+            }
+
+            const results = [];
+            for (const vehicle of fleetList) {
+                const gps = getVehicleGpsForRequest(vehicle);
+                if (!gps) {
+                    results.push({
+                        ok: false,
+                        vehicle_id: vehicle.id,
+                        error: "没有可用 GPS，无法更新路径。"
+                    });
+                    continue;
+                }
+
+                try {
+                    const data = await requestJson(`/fleet/${encodeURIComponent(vehicle.id)}/path`, {
+                        method: "POST",
+                        body: JSON.stringify(gps)
+                    });
+                    const color = vehicle.color || vehicleColors.get(vehicle.id) || "#22c55e";
+                    latestPaths.set(vehicle.id, { data, color });
+                    const nextGps = advanceGpsForNextRequest(data);
+                    if (nextGps) {
+                        vehicleGps.set(vehicle.id, nextGps);
+                    } else if (data.gps && Number.isFinite(Number(data.gps.lon)) && Number.isFinite(Number(data.gps.lat))) {
+                        vehicleGps.set(vehicle.id, { lon: Number(data.gps.lon), lat: Number(data.gps.lat) });
+                    }
+                    results.push({ ok: true, vehicle_id: vehicle.id, data });
+                } catch (err) {
+                    results.push({
+                        ok: false,
+                        vehicle_id: vehicle.id,
+                        error: err.message
+                    });
+                }
+            }
+
+            showBatchResults(results);
+            return results;
         }
 
         /**
@@ -737,7 +849,13 @@
             submitPathUpdate().catch(err => summary.textContent = err.message);
         });
         document.getElementById("createOrderBtn").addEventListener("click", () => {
-            createTestOrder().catch(err => summary.textContent = err.message);
+            createRandomOrders(1).catch(err => summary.textContent = err.message);
+        });
+        document.getElementById("create10OrdersBtn").addEventListener("click", () => {
+            createRandomOrders(10).catch(err => summary.textContent = err.message);
+        });
+        document.getElementById("create50OrdersBtn").addEventListener("click", () => {
+            createRandomOrders(50).catch(err => summary.textContent = err.message);
         });
         realtimeBtn.addEventListener("click", toggleRealtime);
         poiSelect.addEventListener("change", fillPoiCoords);
