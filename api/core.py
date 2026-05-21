@@ -220,7 +220,7 @@ class CoreDispatcher:
             'progress': vehicle.progress
         }
         
-        # [新增] 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
+        # 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
         orig_etas = None
         if vehicle.on_board_orders and route:
             _, _, orig_etas = CoreDispatcher.evaluate_route(route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
