@@ -599,11 +599,11 @@ class Vehicle:
         if len(self.on_board_orders) > 0 or len(self.planned_route) > 0:
             self.driving_time += dt
             
-        # 极限工态疲劳触发器 (600s = 10分钟)
-        if self.driving_time > 600.0 and not self.is_rest_requested:
+        # 极限工态疲劳触发器 (7200s = 2小时)
+        if self.driving_time > 7200.0 and not self.is_rest_requested:
             self.is_rest_requested = True
             self.rest_status = "closing"
-            print(f"[Vehicle.Warning] {self.id} 驾驶超限10分钟，已切换为收车中。")
+            print(f"[Vehicle.Warning] {self.id} 驾驶超限2小时，已切换为收车中。")
             
         # 收车预备 -> 正式深睡沉淀 判定：身上再无接驳负债
         if self.is_rest_requested and len(self.on_board_orders) == 0 and len(self.planned_route) == 0:

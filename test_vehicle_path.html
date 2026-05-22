@@ -198,8 +198,8 @@
         let roadNetwork = null;
         let fleetList = [];
         let latestPaths = new Map();
-        let vehicleGps = new Map();
         let vehicleColors = new Map();
+        let simulatedGps = new Map();
         let scale = 1;
         let offsetX = 0;
         let offsetY = 0;
@@ -402,6 +402,12 @@
                 lines.push(
                     `${data.vehicle_id}：任务 ${data.planned_route_size}，轨迹点 ${(data.planned_route_point || data.path || []).length}，上下客 ${changedSteps}`
                 );
+                if (item.gps) {
+                    lines.push(`  本轮 GPS：${item.gps.lon.toFixed(6)}, ${item.gps.lat.toFixed(6)}`);
+                }
+                if (item.next_gps) {
+                    lines.push(`  模拟下一点：${item.next_gps.lon.toFixed(6)}, ${item.next_gps.lat.toFixed(6)}`);
+                }
                 if (snappedPoint) {
                     lines.push(`  吸附点：${snappedPoint.name || snappedPoint.id || "-"}，偏差 ${Number(snappedPoint.distance_to_gps || 0).toFixed(2)} 米`);
                 }
@@ -434,7 +440,7 @@
         }
 
         /**
-         * 按比例在线段上插值，生成下一次模拟 GPS。
+         * 按比例在线段上插值。
          * @param {{lon: number, lat: number}} a 起点。
          * @param {{lon: number, lat: number}} b 终点。
          * @param {number} ratio 插值比例，范围 0~1。
@@ -448,20 +454,19 @@
         }
 
         /**
-         * 沿后端返回的规划轨迹推进车辆 GPS，模拟车辆持续行驶。
+         * 沿后端返回轨迹推进一个很小的距离，生成下一次模拟 GPS。
          * @param {object} data 路径更新接口返回体。
-         * @returns {{lon: number, lat: number}|null} 下一次请求使用的 GPS；没有可推进轨迹时返回 null。
+         * @returns {{lon: number, lat: number}|null} 下一次模拟 GPS。
          */
         function advanceGpsForNextRequest(data) {
             const points = (data.planned_route_point || data.path || [])
                 .filter(point => Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat)));
             if (points.length < 2) return null;
 
-            // 后端返回的第一个点通常是当前吸附点，前端按固定距离沿轨迹推进来模拟 GPS 变化。
             const snappedPoint = data.snapped_point || data.snapped_node || points[0];
             let current = { lon: Number(snappedPoint.lon), lat: Number(snappedPoint.lat) };
-            let remainingDistance = 40;
-            let nextPoint = points[points.length - 1];
+            let remainingDistance = 5;
+            let nextPoint = null;
 
             for (const point of points) {
                 const target = { lon: Number(point.lon), lat: Number(point.lat) };
@@ -478,10 +483,7 @@
                 current = target;
             }
 
-            return {
-                lon: Number(nextPoint.lon),
-                lat: Number(nextPoint.lat)
-            };
+            return nextPoint;
         }
 
         /**
@@ -494,6 +496,7 @@
                 method: "POST",
                 body: JSON.stringify({})
             });
+            simulatedGps.clear();
             summary.textContent = `初始化结果：${data.status}`;
             output.textContent = JSON.stringify(data, null, 2);
         }
@@ -517,7 +520,7 @@
         }
 
         /**
-         * 缓存车队状态并刷新侧边栏车辆概览。
+         * 刷新车队状态并更新侧边栏车辆概览。
          * @param {Array<object>} fleet /fleet 接口返回的车辆列表。
          * @returns {void}
          */
@@ -528,10 +531,6 @@
             for (const vehicle of fleet) {
                 vehicleColors.set(vehicle.id, vehicle.color || "#22c55e");
                 const routeSize = (vehicle.planned_route || []).length;
-                const gps = vehicle.gps || {};
-                if (!vehicleGps.has(vehicle.id) && Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
-                    vehicleGps.set(vehicle.id, { lon: Number(gps.lon), lat: Number(gps.lat) });
-                }
                 lines.push(`${vehicle.id}：${routeSize} 个计划任务，车上 ${vehicle.on_board_count || 0} 人`);
             }
             fleetInfo.textContent = lines.length ? lines.join("\n") : "未加载车辆。";
@@ -667,6 +666,7 @@
             }
 
             const fleetData = await requestJson("/fleet");
+            simulatedGps.clear();
             updateFleetState(fleetData.fleet || []);
             summary.textContent = `已创建 ${orders.length} 个随机订单。后台调度完成后，点击“更新全部车辆路径”或开启实时更新。`;
             output.textContent = JSON.stringify(orders, null, 2);
@@ -691,31 +691,20 @@
          * @returns {{lon: number, lat: number}|null} GPS 坐标。
          */
         function getVehicleGpsForRequest(vehicle) {
-            const cached = vehicleGps.get(vehicle.id);
-            if (cached) {
-                return cached;
+            const simulated = simulatedGps.get(vehicle.id);
+            if (simulated) {
+                return simulated;
             }
 
             const gps = vehicle.gps || {};
             if (Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat))) {
                 return { lon: Number(gps.lon), lat: Number(gps.lat) };
             }
-
-            const firstRoutePoint = (vehicle.planned_route_point || [])[0];
-            if (firstRoutePoint && Number.isFinite(Number(firstRoutePoint.lon)) && Number.isFinite(Number(firstRoutePoint.lat))) {
-                return { lon: Number(firstRoutePoint.lon), lat: Number(firstRoutePoint.lat) };
-            }
-
-            const node = roadNetwork?.nodes?.[vehicle.next_node] || roadNetwork?.nodes?.[vehicle.last_node];
-            if (node) {
-                return { lon: Number(node.lon), lat: Number(node.lat) };
-            }
-
             return readFallbackGpsFromInputs();
         }
 
         /**
-         * 更新全部车辆路径，并推进每辆车下一次模拟 GPS。
+         * 使用每辆车当前 GPS 更新全部车辆路径。
          * @returns {Promise<Array<object>>} 每辆车的路径更新结果。
          */
         async function submitPathUpdate() {
@@ -747,11 +736,11 @@
                     latestPaths.set(vehicle.id, { data, color });
                     const nextGps = advanceGpsForNextRequest(data);
                     if (nextGps) {
-                        vehicleGps.set(vehicle.id, nextGps);
-                    } else if (data.gps && Number.isFinite(Number(data.gps.lon)) && Number.isFinite(Number(data.gps.lat))) {
-                        vehicleGps.set(vehicle.id, { lon: Number(data.gps.lon), lat: Number(data.gps.lat) });
+                        simulatedGps.set(vehicle.id, nextGps);
+                    } else {
+                        simulatedGps.delete(vehicle.id);
                     }
-                    results.push({ ok: true, vehicle_id: vehicle.id, data });
+                    results.push({ ok: true, vehicle_id: vehicle.id, gps, next_gps: nextGps, data });
                 } catch (err) {
                     results.push({
                         ok: false,

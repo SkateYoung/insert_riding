@@ -502,7 +502,7 @@ class CoreDispatcher:
                             )
 
                             # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
-                            if not is_idle and absolute_cost > 1000.0:
+                            if not is_idle and absolute_cost > 100.0:
                                 cost = float('inf')
 
                             # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)，这里使用增量成本。
@@ -578,26 +578,26 @@ class CoreDispatcher:
                         # ==========================================
                         # 打印车辆更新后的轨迹点 (途径站点)
                         # ==========================================
-                        waypoints = []
-                        total_path = []
-                        full_path_node_count = 0
-                        curr_node_id = global_best_v.next_node
+                        # waypoints = []
+                        # total_path = []
+                        # full_path_node_count = 0
+                        # curr_node_id = global_best_v.next_node
 
-                        for step in global_best_route:
-                            o = step['order']
-                            target_node = o.o_node if step['type'] == 'O' else o.d_node
-                            action_name = "接驾" if step['type'] == 'O' else "送驾"
-                            waypoints.append(f"[{action_name}{o.request_id}] {target_node.name} ({target_node.lon:.5f},{target_node.lat:.5f})")
+                        # for step in global_best_route:
+                        #     o = step['order']
+                        #     target_node = o.o_node if step['type'] == 'O' else o.d_node
+                        #     action_name = "接驾" if step['type'] == 'O' else "送驾"
+                        #     waypoints.append(f"[{action_name}{o.request_id}] {target_node.name} ({target_node.lon:.5f},{target_node.lat:.5f})")
 
-                            # 顺便统计底层 A* 寻路的精细轨迹点总数
-                            dist, path = city_map.get_path(city_map.nodes_map[curr_node_id], target_node)
-                            for nodes in path:
-                                total_path.append([nodes.lon,nodes.lat])
-                            full_path_node_count += len(path)
-                            curr_node_id = target_node.id
+                        #     # 顺便统计底层 A* 寻路的精细轨迹点总数
+                        #     dist, path = city_map.get_path(city_map.nodes_map[curr_node_id], target_node)
+                        #     for nodes in path:
+                        #         total_path.append([nodes.lon,nodes.lat])
+                        #     full_path_node_count += len(path)
+                        #     curr_node_id = target_node.id
 
-                        print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
-                        print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
+                        # print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
+                        # print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
                         # print(f"    [明细] 该路线总里程: {total_path} ")
                     else:
                         # 池中剩余订单当前均无法匹配
@@ -1317,9 +1317,8 @@ class CoreDispatcher:
 
     # ============================================================
     # 功能八：GPS 实时路径更新与上下客状态同步
-    # 相关方法：sync_vehicle_route_progress、_route_point_index、
-    #          _apply_reached_route_step、_sync_passed_route_targets、
-    #          rebuild_vehicle_path_from_gps
+    # 相关方法：sync_vehicle_route_progress、_apply_reached_route_step、
+    #          _sync_nearby_route_target、rebuild_vehicle_path_from_gps
     # ============================================================
 
     @staticmethod
@@ -1373,25 +1372,6 @@ class CoreDispatcher:
         return changed_steps
 
     @staticmethod
-    def _route_point_index(route_points, node_id):
-        """查找目标节点在轨迹点列表中的位置。
-
-        Args:
-            route_points (list[dict]): planned_route_point 轨迹点列表。
-            node_id (str): 需要查找的路网节点 ID。
-
-        Returns:
-            int | None: 首次出现的位置；未找到时返回 None。
-
-        Note:
-            当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
-        """
-        for i, point in enumerate(route_points):
-            if point.get("id") == node_id:
-                return i
-        return None
-
-    @staticmethod
     def _apply_reached_route_step(vehicle, step, target_node):
         """应用一个已到达接送点的订单步骤。
 
@@ -1426,49 +1406,37 @@ class CoreDispatcher:
         }
 
     @staticmethod
-    def _sync_passed_route_targets(vehicle, route_points, projection):
-        """GPS 跨过接送目标点时，同步已经经过的上下客步骤。
+    def _sync_nearby_route_target(vehicle, lon, lat, threshold_meters=10.0):
+        """GPS 靠近当前下一步接送点时，完成一个上下客步骤。
 
         Args:
             vehicle (Vehicle): 需要同步上下客状态的车辆。
-            route_points (list[dict]): 本次 GPS 更新前的旧轨迹点列表。
-            projection (dict): 新 GPS 吸附到路段后的投影结果。
+            lon (float): 车辆当前 GPS 经度。
+            lat (float): 车辆当前 GPS 纬度。
+            threshold_meters (float): 触发上下客的距离阈值，单位米。
 
         Returns:
-            list[dict]: 被自动判定为已经完成的 pickup/dropoff 步骤。
-
-        Note:
-            当前用于前端 GPS 模拟越点判断。实际生产系统中，上下客确认通常由司机端或乘客端事件触发。
+            list[dict]: 本次触发的 pickup/dropoff 变更列表。
         """
-        projection_index = None
-        for i in range(len(route_points) - 1):
-            if (
-                route_points[i].get("id") == projection["edge_u"]
-                and route_points[i + 1].get("id") == projection["edge_v"]
-            ):
-                projection_index = i
-                break
-        if projection_index is None:
+        if not vehicle.planned_route:
             return []
 
-        changed_steps = []
-        while vehicle.planned_route:
-            step = vehicle.planned_route[0]
-            order = step["order"]
-            target_node = order.o_node if step["type"] == "O" else order.d_node
-            target_index = CoreDispatcher._route_point_index(route_points, target_node.id)
-            if target_index is None:
-                break
+        step = vehicle.planned_route[0]
+        order = step["order"]
+        target_node = order.o_node if step["type"] == "O" else order.d_node
+        distance_to_target = AuxiliaryFunctions.haversine_distance(
+            lon,
+            lat,
+            target_node.lon,
+            target_node.lat,
+        )
+        if distance_to_target > threshold_meters:
+            return []
 
-            is_passed = target_index <= projection_index
-            is_at_edge_end = target_index == projection_index + 1 and projection["progress"] >= 0.999
-            if not is_passed and not is_at_edge_end:
-                break
-
-            vehicle.planned_route.pop(0)
-            changed_steps.append(CoreDispatcher._apply_reached_route_step(vehicle, step, target_node))
-
-        return changed_steps
+        vehicle.planned_route.pop(0)
+        changed_step = CoreDispatcher._apply_reached_route_step(vehicle, step, target_node)
+        changed_step["distance_to_target"] = distance_to_target
+        return [changed_step]
 
     @staticmethod
     def rebuild_vehicle_path_from_gps(vehicle, city_map, lon, lat):
@@ -1488,18 +1456,14 @@ class CoreDispatcher:
             更新 vehicle.gps、last_node、next_node、progress 和 planned_route_point。
             可能触发 pickup/dropoff，从而修改 on_board_orders、planned_route 和 completed_orders_pool。
         """
-        old_route_points = list(vehicle.planned_route_point)
         # GPS 先吸附到路网边线，避免原始坐标偏移导致车辆脱离道路。
         projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, vehicle)
         if projection is None:
             return None
 
         next_node = projection["next_node"]
-        # 离散 GPS 可能一次跨过接客/送客点，需要先按旧轨迹判断越点。
-        changed_steps = CoreDispatcher._sync_passed_route_targets(vehicle, old_route_points, projection)
-        # 投影接近路段终点时，再按节点到达逻辑推进订单状态。
-        if projection["progress"] >= 0.999:
-            changed_steps.extend(CoreDispatcher.sync_vehicle_route_progress(vehicle, city_map, next_node))
+        # 只在真实 GPS 靠近当前下一步接送点时触发一次上下客，避免 GPS 跳跃导致批量完成订单。
+        changed_steps = CoreDispatcher._sync_nearby_route_target(vehicle, lon, lat)
 
         # 以吸附后的下一节点为起点重建剩余轨迹；真实 GPS 会作为虚拟起点补回结果首位。
         result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, next_node)
