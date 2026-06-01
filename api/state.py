@@ -189,7 +189,7 @@ def _seed_completed_orders(city_map, count=30):
 # 相关方法：init_system
 # ============================================================
 
-def init_system(shp_path="dxc_traffic_shp/dxc_rule.shp"):
+def init_system(shp_path="dxc_traffic_mars_shp/dxc_rule_tran.shp"):
     """加载路网、创建车队、注入测试历史订单并启动后台匹配引擎。
 
     Args:

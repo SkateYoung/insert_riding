@@ -19,6 +19,11 @@ class CoreDispatcher:
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
     completed_orders_pool = []
 
+    # 空车热点预测缓存：避免后台循环每 5 秒重复训练/预测。
+    IDLE_FORECAST_CACHE_SECONDS = 15 * 60
+    IDLE_MIN_HOTSPOT_DISTANCE_METERS = 800.0
+    idle_hotspot_cache = None
+
     # ============================================================
     # 功能一：订单路线成本评估与单车插单寻优
     # 相关方法：evaluate_route、_try_insert_order
@@ -451,15 +456,8 @@ class CoreDispatcher:
                 if not CoreDispatcher.order_pool:
                     print(f"[Core.Pool] 池中暂无订单...")
                     if CoreDispatcher._collect_forecast_orders(fleet):
-                        for v in fleet:
-                            # 无订单时只对真正空闲且未休息的车辆下发热点停靠建议。
-                            if (
-                                len(v.on_board_orders) == 0
-                                and len(v.planned_route) == 0
-                                and not getattr(v, "is_rest_requested", False)
-                                and not getattr(v, "is_resting", False)
-                            ):
-                                CoreDispatcher.idle_parking_scenario(v, city_map, fleet)
+                        # 无订单时对全部真正空闲车辆做一次车队级分散热点分配，避免车辆扎堆。
+                        CoreDispatcher.assign_idle_parking_targets(fleet, city_map)
 
                 if CoreDispatcher.order_pool:
                     print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
@@ -1133,6 +1131,341 @@ class CoreDispatcher:
         return orders
 
     @staticmethod
+    def _forecast_order_signature(orders):
+        """生成预测样本签名，用于判断热点缓存是否仍可复用。"""
+        latest_time = 0.0
+        for order in orders:
+            request_time = getattr(order, "request_time", None)
+            if isinstance(request_time, datetime):
+                order_time = request_time.timestamp()
+            else:
+                order_time = float(getattr(order, "req_time", 0.0) or 0.0)
+            latest_time = max(latest_time, order_time)
+        return len(orders), latest_time
+
+    @staticmethod
+    def _idle_forecast_cache_is_valid(cache, city_map, order_signature, now_ts):
+        """判断空车热点预测缓存是否仍在有效期内。"""
+        return (
+            cache
+            and cache.get("city_map_id") == id(city_map)
+            and cache.get("order_signature") == order_signature
+            and float(cache.get("expires_at", 0.0)) > now_ts
+        )
+
+    @staticmethod
+    def _build_idle_hotspot_candidates(predictions, metrics, city_map):
+        """把预测结果转成可分配的去重热点候选。"""
+        rows = [row for row in predictions if int(row.get("horizon_min", 15)) == 15]
+        if not rows:
+            rows = list(predictions)
+
+        hotspots_by_node = {}
+        for row in rows:
+            try:
+                pred_count = int(row.get("pred_count", 0))
+                target_lon = float(row["o_center_lon"])
+                target_lat = float(row["o_center_lat"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if pred_count <= 0:
+                continue
+
+            target_node, snap_distance = CoreDispatcher._nearest_graph_node(city_map, target_lon, target_lat)
+            if target_node is None:
+                continue
+
+            hotspot = {
+                "row": row,
+                "node": target_node,
+                "node_id": target_node.id,
+                "target_lon": target_lon,
+                "target_lat": target_lat,
+                "pred_count": pred_count,
+                "snap_distance": snap_distance,
+                "metrics": metrics,
+            }
+            current = hotspots_by_node.get(target_node.id)
+            if (
+                current is None
+                or pred_count > current["pred_count"]
+                or (pred_count == current["pred_count"] and snap_distance < current["snap_distance"])
+            ):
+                hotspots_by_node[target_node.id] = hotspot
+
+        return sorted(
+            hotspots_by_node.values(),
+            key=lambda item: (-item["pred_count"], item["snap_distance"], item["node_id"]),
+        )
+
+    @staticmethod
+    def _build_idle_hotspot_cache(orders, order_signature, city_map, now_ts):
+        """刷新未来 15 分钟空车热点预测缓存。"""
+        try:
+            clean_orders = od_forecast_module.orders_from_insert_riding(
+                orders,
+                city_map=city_map,
+                base_datetime=datetime.fromtimestamp(0),
+                speed_mps=SPEED_MPS,
+            )
+        except Exception as exc:
+            print(f"[Core.Planner] 订单预测输入转换失败：{exc}")
+            return None
+        if not clean_orders:
+            return None
+
+        # 沿用现有预测窗口：最近一条历史订单之后的下一个 15 分钟窗口。
+        forecast_time = max(order.request_time for order in clean_orders) + timedelta(minutes=15)
+        predictions = []
+        metrics = []
+        try:
+            predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+                clean_orders,
+                forecast_start_time=forecast_time,
+                horizons_min=(15,),
+                top_k=50,
+            )
+        except Exception as exc:
+            print(f"[Core.Planner] v6 预测失败，降级使用历史统计预测：{exc}")
+
+        if not predictions:
+            predictions, _ = od_forecast_module.predict_od_flows(
+                clean_orders,
+                forecast_time=forecast_time,
+                horizons_min=(15,),
+                top_k=50,
+            )
+
+        hotspots = CoreDispatcher._build_idle_hotspot_candidates(predictions, metrics, city_map)
+        generated_at_text = datetime.fromtimestamp(now_ts).isoformat(sep=" ", timespec="seconds")
+        cache = {
+            "city_map_id": id(city_map),
+            "order_signature": order_signature,
+            "generated_at": now_ts,
+            "generated_at_text": generated_at_text,
+            "expires_at": now_ts + CoreDispatcher.IDLE_FORECAST_CACHE_SECONDS,
+            "forecast_time": forecast_time,
+            "forecast_time_text": forecast_time.isoformat(sep=" ", timespec="seconds"),
+            "hotspots": hotspots,
+            "metrics": metrics,
+        }
+        CoreDispatcher.idle_hotspot_cache = cache
+        print(f"[Core.Planner] 已刷新空车热点预测缓存，候选热点 {len(hotspots)} 个。")
+        return cache
+
+    @staticmethod
+    def _get_idle_hotspot_cache(fleet, city_map):
+        """读取或刷新车队级空车热点预测缓存。"""
+        orders = CoreDispatcher._collect_forecast_orders(fleet)
+        if not orders:
+            return None
+
+        now_ts = time.time()
+        order_signature = CoreDispatcher._forecast_order_signature(orders)
+        cache = CoreDispatcher.idle_hotspot_cache
+        if CoreDispatcher._idle_forecast_cache_is_valid(cache, city_map, order_signature, now_ts):
+            return cache
+
+        return CoreDispatcher._build_idle_hotspot_cache(orders, order_signature, city_map, now_ts)
+
+    @staticmethod
+    def _is_idle_vehicle_available(vehicle):
+        """判断车辆是否可参与空车热点分配。"""
+        return (
+            len(vehicle.on_board_orders) == 0
+            and len(vehicle.planned_route) == 0
+            and CoreDispatcher._vehicle_can_accept_order(vehicle)
+        )
+
+    @staticmethod
+    def _idle_target_cache_time(vehicle):
+        """读取车辆当前空车热点所属的预测缓存时间戳。"""
+        forecast = getattr(vehicle, "idle_forecast", None) or {}
+        return forecast.get("forecast_generated_at")
+
+    @staticmethod
+    def _idle_target_matches_cache(vehicle, cache):
+        """判断车辆当前空车目标是否来自本轮有效预测缓存。"""
+        return (
+            getattr(vehicle, "idle_target", None)
+            and getattr(vehicle, "planned_route_point", None)
+            and CoreDispatcher._idle_target_cache_time(vehicle) == cache.get("generated_at")
+        )
+
+    @staticmethod
+    def _idle_target_node(vehicle, city_map):
+        """读取车辆当前空车热点吸附到的路网节点。"""
+        target = getattr(vehicle, "idle_target", None) or {}
+        node_id = target.get("node_id")
+        return city_map.nodes_map.get(node_id) if node_id else None
+
+    @staticmethod
+    def _rank_idle_hotspots_for_vehicle(vehicle, cache, city_map, assigned_nodes, rejected_node_ids):
+        """按需求优先、分散补偿和车辆距离为单车排序热点候选。"""
+        start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if start_node is None:
+            return []
+
+        assigned_node_ids = {node.id for node in assigned_nodes}
+        ranked = []
+        for hotspot in cache.get("hotspots", []):
+            node = hotspot["node"]
+            if node.id in assigned_node_ids or node.id in rejected_node_ids:
+                continue
+
+            vehicle_distance = AuxiliaryFunctions.haversine_distance(
+                start_node.lon,
+                start_node.lat,
+                node.lon,
+                node.lat,
+            )
+            if assigned_nodes:
+                nearest_assigned_distance = min(
+                    AuxiliaryFunctions.haversine_distance(node.lon, node.lat, assigned.lon, assigned.lat)
+                    for assigned in assigned_nodes
+                )
+            else:
+                nearest_assigned_distance = float("inf")
+
+            is_spaced = (
+                not assigned_nodes
+                or nearest_assigned_distance >= CoreDispatcher.IDLE_MIN_HOTSPOT_DISTANCE_METERS
+            )
+            dispersion_bonus = (
+                100.0
+                if nearest_assigned_distance == float("inf")
+                else min(nearest_assigned_distance, CoreDispatcher.IDLE_MIN_HOTSPOT_DISTANCE_METERS)
+                / CoreDispatcher.IDLE_MIN_HOTSPOT_DISTANCE_METERS
+                * 100.0
+            )
+            score = hotspot["pred_count"] * 1000.0 + dispersion_bonus - vehicle_distance / 1000.0
+            ranked.append((is_spaced, score, hotspot))
+
+        preferred = [item for item in ranked if item[0]]
+        usable = preferred if preferred else ranked
+        return [
+            item[2]
+            for item in sorted(
+                usable,
+                key=lambda item: (item[1], item[2]["pred_count"]),
+                reverse=True,
+            )
+        ]
+
+    @staticmethod
+    def _write_idle_hotspot_to_vehicle(vehicle, city_map, cache, hotspot, assignment_rank):
+        """把一个热点写入车辆，并刷新前端展示轨迹。"""
+        start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
+        if start_node is None:
+            return False
+
+        row = hotspot["row"]
+        target_node = hotspot["node"]
+        vehicle.idle_forecast = {
+            "forecast_start_time": row.get("forecast_start_time"),
+            "forecast_end_time": row.get("forecast_end_time"),
+            "horizon_min": int(row.get("horizon_min", 15)),
+            "pred_count": int(hotspot.get("pred_count", 0)),
+            "metrics": cache.get("metrics", []),
+            "forecast_generated_at": cache.get("generated_at"),
+            "forecast_generated_at_text": cache.get("generated_at_text"),
+            "assignment_rank": assignment_rank,
+            "assigned_hotspot_count": None,
+            "assignment_strategy": "demand_first_dispersion",
+        }
+        vehicle.idle_target = {
+            "lon": hotspot["target_lon"],
+            "lat": hotspot["target_lat"],
+            "node_id": target_node.id,
+            "node_name": target_node.name,
+            "node_lon": target_node.lon,
+            "node_lat": target_node.lat,
+            "snap_distance_to_node": hotspot["snap_distance"],
+        }
+
+        result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, start_node)
+        if result is None:
+            CoreDispatcher._clear_idle_parking(vehicle)
+            return False
+
+        print(
+            f"[Core.Planner] {vehicle.id} 空车前往预测热点 {target_node.name} "
+            f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
+        )
+        return True
+
+    @staticmethod
+    def assign_idle_parking_targets(fleet, city_map, target_vehicle=None):
+        """按车队级预测热点池为空车分散分配停靠目标。
+
+        Args:
+            fleet (list[Vehicle]): 当前车队。
+            city_map (CityGraph): 路网对象。
+            target_vehicle (Vehicle | None): 兼容单车入口；为空时批量处理全部空车。
+
+        Returns:
+            int: 本次新分配成功的车辆数量。
+        """
+        cache = CoreDispatcher._get_idle_hotspot_cache(fleet, city_map)
+        if not cache or not cache.get("hotspots"):
+            return 0
+
+        idle_vehicles = [v for v in fleet if CoreDispatcher._is_idle_vehicle_available(v)]
+        if target_vehicle is not None and target_vehicle not in idle_vehicles:
+            return 0
+
+        assigned_nodes = []
+        vehicles_to_assign = []
+        for vehicle in idle_vehicles:
+            if CoreDispatcher._idle_target_matches_cache(vehicle, cache):
+                node = CoreDispatcher._idle_target_node(vehicle, city_map)
+                if node is not None:
+                    assigned_nodes.append(node)
+                continue
+
+            if target_vehicle is not None and vehicle is not target_vehicle:
+                continue
+
+            if vehicle.idle_target or vehicle.idle_forecast or vehicle.planned_route_point:
+                CoreDispatcher._clear_idle_parking(vehicle)
+                vehicle.planned_route_point = []
+
+            vehicles_to_assign.append(vehicle)
+
+        assigned_count = 0
+        for vehicle in vehicles_to_assign:
+            rejected_node_ids = set()
+            while True:
+                candidates = CoreDispatcher._rank_idle_hotspots_for_vehicle(
+                    vehicle,
+                    cache,
+                    city_map,
+                    assigned_nodes,
+                    rejected_node_ids,
+                )
+                if not candidates:
+                    break
+
+                hotspot = candidates[0]
+                assignment_rank = len(assigned_nodes) + 1
+                if CoreDispatcher._write_idle_hotspot_to_vehicle(vehicle, city_map, cache, hotspot, assignment_rank):
+                    assigned_nodes.append(hotspot["node"])
+                    assigned_count += 1
+                    break
+
+                rejected_node_ids.add(hotspot["node_id"])
+
+        active_count = 0
+        for vehicle in idle_vehicles:
+            if CoreDispatcher._idle_target_matches_cache(vehicle, cache):
+                active_count += 1
+        for vehicle in idle_vehicles:
+            if CoreDispatcher._idle_target_matches_cache(vehicle, cache):
+                vehicle.idle_forecast["assigned_hotspot_count"] = active_count
+
+        return assigned_count
+
+    @staticmethod
     def _select_idle_hotspot(predictions, vehicle, city_map):
         """从预测结果中选择空车应前往的上车热点。
 
@@ -1533,98 +1866,12 @@ class CoreDispatcher:
             成功时写入 vehicle.idle_target、vehicle.idle_forecast 和 planned_route_point。
             不写入 vehicle.planned_route，确保车辆途中接到新订单时可以被真实订单路径覆盖。
         """
-        # 只有完全空闲车辆才允许进入空车停靠场景。
-        if vehicle.on_board_orders or vehicle.planned_route:
-            return False
-        if getattr(vehicle, "is_rest_requested", False) or getattr(vehicle, "is_resting", False):
-            return False
-        if vehicle.idle_target and vehicle.planned_route_point:
-            return True
-
-        print(f"[Core.Planner] {vehicle.id} 空车待命，触发未来 15 分钟订单热点预测...")
-        orders = CoreDispatcher._collect_forecast_orders(fleet)
-        if not orders:
-            print(f"[Core.Planner] {vehicle.id} 当前没有历史订单，无法生成空车停靠预测。")
+        if not CoreDispatcher._is_idle_vehicle_available(vehicle):
             return False
 
-        try:
-            clean_orders = od_forecast_module.orders_from_insert_riding(
-                orders,
-                city_map=city_map,
-                base_datetime=datetime.fromtimestamp(0),
-                speed_mps=SPEED_MPS,
-            )
-        except Exception as exc:
-            print(f"[Core.Planner] 订单预测输入转换失败：{exc}")
-            return False
-        if not clean_orders:
-            return False
-
-        # 预测窗口选择“最近一条历史订单之后的下一个 15 分钟窗口”。
-        forecast_time = max(order.request_time for order in clean_orders) + timedelta(minutes=15)
-        predictions = []
-        metrics = []
-        try:
-            predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
-                clean_orders,
-                forecast_start_time=forecast_time,
-                horizons_min=(15,),
-                top_k=50,
-            )
-        except Exception as exc:
-            print(f"[Core.Planner] v6 预测失败，降级使用历史统计预测：{exc}")
-
-        if not predictions:
-            predictions, _ = od_forecast_module.predict_od_flows(
-                clean_orders,
-                forecast_time=forecast_time,
-                horizons_min=(15,),
-                top_k=50,
-            )
-        if not predictions:
-            print(f"[Core.Planner] {vehicle.id} 没有预测到未来 15 分钟正向订单热点。")
-            return False
-
-        hotspot = CoreDispatcher._select_idle_hotspot(predictions, vehicle, city_map)
-        if hotspot is None:
-            return False
-
-        # 预测输出是经纬度中心点，实际寻路前必须吸附到可达路网节点。
-        target_lon = float(hotspot["o_center_lon"])
-        target_lat = float(hotspot["o_center_lat"])
-        target_node, snap_distance = CoreDispatcher._nearest_graph_node(city_map, target_lon, target_lat)
-        start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
-        if target_node is None or start_node is None:
-            return False
-
-        # idle_forecast/idle_target 会透传给接口，用于解释空车为何去该热点。
-        vehicle.idle_forecast = {
-            "forecast_start_time": hotspot.get("forecast_start_time"),
-            "forecast_end_time": hotspot.get("forecast_end_time"),
-            "horizon_min": int(hotspot.get("horizon_min", 15)),
-            "pred_count": int(hotspot.get("pred_count", 0)),
-            "metrics": metrics,
-        }
-        vehicle.idle_target = {
-            "lon": target_lon,
-            "lat": target_lat,
-            "node_id": target_node.id,
-            "node_name": target_node.name,
-            "node_lon": target_node.lon,
-            "node_lat": target_node.lat,
-            "snap_distance_to_node": snap_distance,
-        }
-
-        result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map, start_node)
-        if result is None:
-            CoreDispatcher._clear_idle_parking(vehicle)
-            return False
-
-        print(
-            f"[Core.Planner] {vehicle.id} 空车前往预测热点 {target_node.name} "
-            f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
-        )
-        return True
+        fleet_scope = fleet or [vehicle]
+        CoreDispatcher.assign_idle_parking_targets(fleet_scope, city_map, target_vehicle=vehicle)
+        return bool(vehicle.idle_target and vehicle.planned_route_point)
 
     # ============================================================
     # 功能十：停止接单预测预留入口

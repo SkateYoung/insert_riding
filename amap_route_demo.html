@@ -1,139 +1,751 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="initial-scale=1.0, user-scalable=no, width=device-width">
-    <title>高德地图 - 算法精细轨迹高亮绘制 Demo</title>
+    <title>高德地图 - 后端轨迹转驾车规划 Demo</title>
     <style>
         html,
         body,
         #container {
             width: 100%;
             height: 100%;
-            margin: 0px;
-            padding: 0px;
-            background-color: #1a1a1a;
+            margin: 0;
+            padding: 0;
         }
 
-        .info-panel {
+        body {
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #111827;
+        }
+
+        .panel {
             position: absolute;
-            top: 20px;
-            left: 20px;
-            background: rgba(20, 20, 20, 0.85);
-            padding: 15px;
+            top: 16px;
+            left: 16px;
+            width: 340px;
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            background: rgba(17, 24, 39, 0.92);
+            color: #e5e7eb;
+            border: 1px solid rgba(148, 163, 184, 0.35);
             border-radius: 8px;
-            color: #00ffcc;
-            font-family: sans-serif;
-            border: 1px solid #333;
-            backdrop-filter: blur(4px);
-            z-index: 999;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+            padding: 14px;
+            z-index: 99;
+        }
+
+        .panel h2 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .field {
+            display: grid;
+            gap: 4px;
+            margin-bottom: 10px;
+        }
+
+        .field label {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid #374151;
+            border-radius: 6px;
+            background: #0f172a;
+            color: #e5e7eb;
+            padding: 8px;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 12px 0;
+        }
+
+        button {
+            border: 0;
+            border-radius: 6px;
+            padding: 9px 10px;
+            color: #ffffff;
+            background: #2563eb;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        button.secondary {
+            background: #475569;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+
+        .status {
+            white-space: pre-wrap;
+            font-size: 12px;
+            line-height: 1.55;
+            color: #cbd5e1;
+            border-top: 1px solid rgba(148, 163, 184, 0.25);
+            padding-top: 10px;
+        }
+
+        .legend {
+            display: grid;
+            gap: 6px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #cbd5e1;
+        }
+
+        .legend span::before {
+            content: "";
+            display: inline-block;
+            width: 22px;
+            height: 3px;
+            margin-right: 8px;
+            vertical-align: middle;
+            border-radius: 999px;
+            background: var(--line-color);
         }
     </style>
-    <!-- 请替换为您自己的高德地图 Key 和安全密钥 (此处使用演示配置) -->
-    <script type="text/javascript">
+    <script>
         window._AMapSecurityConfig = {
-            securityJsCode: '0b80fd2cbff37b5fa47b96173410c6ad', // 如果有的话填这里
-        }
+            securityJsCode: "0b80fd2cbff37b5fa47b96173410c6ad"
+        };
     </script>
-    <script type="text/javascript"
-        src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e"></script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e&plugin=AMap.Driving,AMap.GraspRoad"></script>
 </head>
 
 <body>
     <div id="container"></div>
 
-    <div class="info-panel">
-        <h3>🚕 车辆未来轨迹沙盘推演</h3>
-        <p>底层算法 OSM 路网坐标 -> 自动转换高德火星坐标</p>
-        <p>状态：已成功渲染底层轨迹点</p>
-    </div>
+    <section class="panel">
+        <h2>后端轨迹转高德驾车路线</h2>
+
+        <div class="field">
+            <label for="apiBaseInput">后端地址</label>
+            <input id="apiBaseInput" value="http://127.0.0.1:5000">
+        </div>
+
+        <div class="field">
+            <label for="vehicleSelect">车辆</label>
+            <select id="vehicleSelect"></select>
+        </div>
+
+        <div class="field">
+            <label for="coordTypeInput">后端轨迹坐标类型</label>
+            <select id="coordTypeInput">
+                <option value="none">已是高德坐标，不转换</option>
+                <option value="gps">GPS/WGS84，转高德坐标</option>
+            </select>
+        </div>
+
+        <div class="field">
+            <label for="routeModeInput">展示方式</label>
+            <select id="routeModeInput">
+                <option value="grasproad">高德轨迹纠偏</option>
+                <option value="driving">高德驾车规划</option>
+                <option value="backend">直接绘制后端轨迹</option>
+            </select>
+        </div>
+
+        <div class="actions">
+            <button id="refreshBtn">刷新后端轨迹</button>
+            <button id="loadFleetBtn" class="secondary">重新加载车辆</button>
+        </div>
+
+        <div class="legend">
+            <span style="--line-color:#a855f7;">高德轨迹纠偏结果</span>
+            <span style="--line-color:#22c55e;">高德驾车规划路线</span>
+            <span style="--line-color:#60a5fa;">后端算法原始轨迹</span>
+        </div>
+
+        <div id="status" class="status">等待地图加载...</div>
+    </section>
 
     <script>
-        // 1. 初始化高德地图
-        var map = new AMap.Map('container', {
+        const MAX_CONTROL_POINTS = 80;
+        const MAX_WAYPOINTS_PER_REQUEST = 16;
+        const MAX_GRASP_ROAD_POINTS = 100;
+        const GRASP_ROAD_POINT_INTERVAL_SECONDS = 5;
+
+        const map = new AMap.Map("container", {
             zoom: 14,
-            mapStyle: 'amap://styles/darkblue', // 使用暗黑科幻风格底图，让轨迹更亮眼
-            center: [113.400, 23.050]
+            center: [113.400, 23.050],
+            mapStyle: "amap://styles/normal"
         });
 
-        // 2. 定义手动纠偏偏移量 (如果您发现轨迹整体偏离马路，请微调这两个数值)
-        var lngOffset = 0.0000;
-        var latOffset = -0.000058;
+        const statusEl = document.getElementById("status");
+        const apiBaseInput = document.getElementById("apiBaseInput");
+        const vehicleSelect = document.getElementById("vehicleSelect");
+        const coordTypeInput = document.getElementById("coordTypeInput");
+        const routeModeInput = document.getElementById("routeModeInput");
+        const refreshBtn = document.getElementById("refreshBtn");
+        const loadFleetBtn = document.getElementById("loadFleetBtn");
 
-        // 模拟后端算法直接输出的 [明细] 轨迹数据
-        var rawPath = [
-            [113.38630214753925, 23.05691321275443], [113.38649632620734, 23.0570843545076], [113.38657668931394, 23.05700318935994], [113.3879955595715, 23.05556956504117], [113.38802578144117, 23.05553877637877], [113.38803308671818, 23.055531279090733], [113.38815327325379, 23.055408523671762], [113.38803547413637, 23.055319490662196], [113.388027967771, 23.05531338198329], [113.38792848325843, 23.055233467205042], [113.38782699614114, 23.05514494674946], [113.38772040391633, 23.055048118175087], [113.38759949850214, 23.0549348703643], [113.38750411433833, 23.054837149794167], [113.38741233214982, 23.054730728168522], [113.38730113136594, 23.054590975773596], [113.38714979188399, 23.05437885827321], [113.38707301952073, 23.054253039836436], [113.38699964880563, 23.05411331812603], [113.3869322824777, 23.05396739867017], [113.38685930839692, 23.05377975644906], [113.38681165811747, 23.05363105229435], [113.38677742057784, 23.05350436893226], [113.38674868700242, 23.05336828622433], [113.38673987639301, 23.053322058934857], [113.38672786193412, 23.053259221802087], [113.38671774887447, 23.0531933850128], [113.38670623272176, 23.05309973513581], [113.38669020978982, 23.052962862921124], [113.38668799817474, 23.052820300125568], [113.3866886897189, 23.052687944179123], [113.38669728741274, 23.052547491557462], [113.38669818752649, 23.05253798827004], [113.38671138960315, 23.05240464262788], [113.3867404025374, 23.052234494801677], [113.38675180851985, 23.05218088166311], [113.38678492678508, 23.05203874926901], [113.38682615173988, 23.05189522315627], [113.38687518332983, 23.051753804528605], [113.38692681792547, 23.05162589379446], [113.38694012706182, 23.05159639249373], [113.38699626550061, 23.051471686818946], [113.38704479964687, 23.051378788192277], [113.38707412022987, 23.05132268898892], [113.38714747271204, 23.0511990980028], [113.38724444263887, 23.05104871516779], [113.3873382115094, 23.050927041583552], [113.38744849254243, 23.05079127536675], [113.38754806616387, 23.050681711047], [113.38768466741854, 23.050544965192334], [113.38777703623943, 23.050464106374044], [113.38782086877947, 23.05042582584346], [113.38792134371569, 23.050347574262425], [113.38797788574604, 23.050304201627895], [113.38811648877777, 23.05020617174937], [113.38816502467095, 23.050171896156904], [113.38832694483052, 23.05007408401568], [113.38854570651007, 23.049957807943684], [113.38879959306823, 23.049843958537288], [113.38904186870333, 23.049737400870043], [113.38922219698692, 23.049645900155344], [113.3893748040579, 23.049562380612034], [113.3893886137162, 23.04955508796246], [113.38945716155443, 23.049519124441986], [113.38958414919735, 23.04944588872102], [113.38960246177747, 23.049435297927225], [113.38973164954398, 23.049352158905513], [113.38979689359996, 23.04931018946748], [113.3898966606113, 23.049245935853687], [113.38998501906795, 23.049181173256297], [113.39005306367332, 23.049128600701284], [113.39012100785956, 23.049073826953563], [113.39019125321533, 23.049015453162095], [113.3902769082013, 23.048943784654096], [113.39034274977665, 23.048881705679136], [113.39039568312953, 23.048832722857238], [113.39045632087665, 23.048772040447105], [113.390506852286, 23.04872255546065], [113.39057059150484, 23.048656572732906], [113.39064083444335, 23.048582691086477], [113.39076851097683, 23.04843421788752], [113.39086626869758, 23.04831463545495], [113.39094511418962, 23.04820704458366], [113.39102345882701, 23.04809575153716], [113.39109960144067, 23.04798005484156], [113.3911585337476, 23.047883154094876], [113.3912182659987, 23.047779951064136], [113.39126889299169, 23.047689247001657], [113.39133222619016, 23.04756973919195], [113.39138135117757, 23.047467628995022], [113.39142927494736, 23.047360615786804], [113.39147339612812, 23.047253099694604], [113.39161806478454, 23.0468976451343], [113.39164577793399, 23.046831035221867], [113.39170010315891, 23.046693812854052], [113.39174532540679, 23.046599302590252], [113.39178694680092, 23.046526899317854], [113.3918114592519, 23.046482596646918], [113.39188609842489, 23.046368497277715], [113.39195663555174, 23.046265499741622], [113.39203687847844, 23.046162308294676], [113.39213613198922, 23.046046423559137], [113.39220957171976, 23.045966737200118], [113.39227970986889, 23.04589685269452], [113.39236595700781, 23.045818574763075], [113.39245520573294, 23.04574179910252], [113.39249592796816, 23.04570851085067], [113.39252124174644, 23.04568771807773], [113.39258187487552, 23.04564143679535], [113.39262669925827, 23.0456071505089], [113.39273796012543, 23.04553268876591], [113.39281540224898, 23.04548201560124], [113.39290154919361, 23.045431447660878], [113.39297939165444, 23.045390478402453], [113.39308354806852, 23.045335919272585], [113.39317529760491, 23.045291356417735], [113.39327855322276, 23.04524579979186], [113.39338871252814, 23.04520434866534], [113.39348296287676, 23.04516939031575], [113.39364174762756, 23.045122464817307], [113.39377431780545, 23.045087327983836], [113.39387457063198, 23.045064777010808], [113.39398823019556, 23.045042333448556], [113.39408728208005, 23.045029285003366], [113.3942180499552, 23.04501275276386], [113.3942979913361, 23.045006495500825], [113.39440274513957, 23.044998451182302], [113.3945027963867, 23.04499540594203], [113.39465327294418, 23.044995589587057], [113.39475622515094, 23.045001748877727], [113.39485737614598, 23.04501020774842], [113.3971592424465, 23.042728374578918], [113.39718595450302, 23.04275189669232], [113.39721286659098, 23.042775218780264], [113.39523003949839, 23.044740692209047], [113.39523003949839, 23.044740692209047], [113.39520293123219, 23.04481010760543], [113.39519343005601, 23.04485972383345], [113.39519233279088, 23.04490744370557], [113.39521454725737, 23.044962879244707], [113.39524416465227, 23.045009614948682], [113.39528228560113, 23.04504955218603], [113.39533581339953, 23.045083594929338], [113.39539354159496, 23.045096330619902], [113.39552750711907, 23.045135717139313], [113.39562625501048, 23.045166381148537], [113.3957977377428, 23.045228595208407], [113.39586897200637, 23.045258644040715], [113.39594891017816, 23.0452922985662], [113.39606926746774, 23.045348282448494], [113.39616701394888, 23.0454001528832], [113.39624935288744, 23.04544561267025], [113.3963256891094, 23.045493570342472], [113.39641032889949, 23.045545833619805], [113.396503372799, 23.04561110619361], [113.3965798088782, 23.045669267493885], [113.39666975128131, 23.045741941134608], [113.39674318580089, 23.045803802095996], [113.39684433299107, 23.04588968599137], [113.39693467487949, 23.045968361412], [113.39712606273491, 23.0461401222618], [113.39732605273986, 23.046319488681938], [113.39760917703678, 23.04657362155006], [113.3985152499954, 23.047386544335904], [113.39862309286141, 23.04749793435927], [113.39874184052319, 23.047636439712036], [113.39885218452663, 23.047769538962946], [113.3989313164007, 23.047874713989273], [113.39905116498528, 23.04804663252538], [113.39907947646853, 23.048088761088078], [113.39913770020141, 23.048178821186895], [113.39918521993658, 23.048259373148536], [113.3992414434077, 23.048358436112704], [113.39932547931224, 23.04852253683739], [113.399360294074, 23.04859027837437], [113.39943252453016, 23.04873096444832], [113.39976246207931, 23.04939586433004], [113.39981158222352, 23.0494963240964], [113.39986210322398, 23.04960548795797], [113.39990021995368, 23.049701942096743], [113.39992923316392, 23.049782986526075], [113.39995914793343, 23.049883939737086], [113.39997715736303, 23.049952875242674], [113.40000137098676, 23.050059729018187], [113.40001808259744, 23.050165980019695], [113.40002929208684, 23.050262224904227], [113.40003610126836, 23.050370673543938], [113.40003781001982, 23.050492126052248], [113.4000382122183, 23.050522739277554], [113.4000303180962, 23.050638486160935], [113.40001772253991, 23.050751130151802], [113.40000012531242, 23.050858470201895], [113.39998232651185, 23.050943800758816], [113.39995782662487, 23.051039133336708], [113.39993132540228, 23.051123060339624], [113.39990072340323, 23.051211988068346], [113.39988992235328, 23.051238495759396], [113.39986832024395, 23.0512916111692], [113.39982821572374, 23.051382236311177], [113.39977410860017, 23.051491264462864], [113.399713799226, 23.051594187742516], [113.3996622904975, 23.05167350383195], [113.39963278803519, 23.051756829194588], [113.39961668842273, 23.05182785394112], [113.399607291002, 23.051903783113435], [113.3996099962322, 23.051969212021653], [113.39962540499451, 23.052034645360724], [113.39965091633002, 23.05209698087698], [113.3996871300321, 23.052151316650733], [113.39973144537824, 23.052198251995108], [113.3997875638319, 23.05224529133709], [113.4032667046833, 23.053503161812618], [113.40329630852158, 23.053513872115225], [113.40350043352475, 23.05358304013032], [113.40356624107963, 23.05360416117294], [113.40367345293815, 23.053638495023712], [113.4037861646629, 23.053672429154926], [113.40390207593661, 23.053705162760522], [113.40400778565429, 23.053734992894338], [113.40412019534477, 23.05376592407235], [113.40423290431556, 23.053794953939196], [113.40440881687208, 23.053836998064444], [113.40453842498229, 23.053865228546847], [113.40460822905685, 23.05388104492449], [113.4047215351606, 23.053906570997338], [113.4048239398329, 23.053925092141117], [113.40485914131803, 23.053931399279033], [113.40502284741842, 23.053960431641308], [113.40508964949244, 23.05397164424251], [113.40517135173599, 23.053985359392097], [113.405229953035, 23.053993569385064], [113.40542395614689, 23.05402070138351], [113.4055250569217, 23.05403301663213], [113.40569105705845, 23.054052340322738], [113.40584775576174, 23.05406766033896], [113.40600405309928, 23.054080278102088], [113.40615604918388, 23.05408979317917], [113.40630904398809, 23.054097606584786], [113.40718839177576, 23.054138862246845], [113.40888698385707, 23.05421837363124], [113.40908744987878, 23.054226365994737], [113.40930321089088, 23.054231954504687], [113.40951337030874, 23.054231538831942], [113.4097666182503, 23.054227215716576], [113.40997727210944, 23.054217391665116], [113.41017172730677, 23.054204466069823], [113.41041836760347, 23.054185330021138], [113.41055903192431, 23.054170306497237], [113.41080876586011, 23.054139160656646], [113.41082876040917, 23.054136256691358], [113.41106849352083, 23.05410160783537], [113.41122314864009, 23.05407607360153], [113.4114661753169, 23.054030115162394], [113.41161872762197, 23.053998776070692], [113.41182256181685, 23.053952920517666], [113.41199180540593, 23.05391187171247], [113.41568081859958, 23.05298537550991], [113.4158449321863, 23.052944199203417], [113.41600294769805, 23.052904424530357], [113.41616256108982, 23.052864348002277], [113.4161796560189, 23.052922566446693], [113.41601914324751, 23.05296284351511], [113.41569461566557, 23.0530443958365], [113.41200870396281, 23.053970093382656], [113.41183866078022, 23.054011342545866], [113.41163372710218, 23.0540574985628], [113.41147997528584, 23.05408913808319], [113.41123554918579, 23.05413529697353], [113.41107939458863, 23.054161031599794], [113.41081826744959, 23.054198784822855], [113.41056713399524, 23.054230131029183], [113.41042487013353, 23.05424535487909], [113.41017683023928, 23.054264491149734], [113.40998127534803, 23.054277616983335], [113.4097688219099, 23.05428744123357], [113.4095139743128, 23.054291764499084], [113.40930241516415, 23.054292180274064], [113.40908505442682, 23.054286591851778] // 终点：体育馆南门
-        ];
+        let driving = null;
+        let graspRoad = null;
+        let backendPolyline = null;
+        let amapPolylines = [];
+        let markers = [];
+        let fleetById = new Map();
 
-        // 3. 应用偏移量进行位置校准
-        var calibratedPath = rawPath.map(function (pt) {
-            return [pt[0] + lngOffset, pt[1] + latOffset];
-        });
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
 
-        map.on('complete', function () {
-            // 1. 绘制高亮连线
-            var polyline = new AMap.Polyline({
-                path: calibratedPath,
-                isOutline: true,
-                outlineColor: '#002244',
-                borderWeight: 2,
-                strokeColor: '#00BFFF',
-                strokeOpacity: 1,
-                strokeWeight: 6,
-                strokeStyle: 'solid',
-                lineJoin: 'round',
-                lineCap: 'round',
+        function setBusy(isBusy) {
+            refreshBtn.disabled = isBusy;
+            loadFleetBtn.disabled = isBusy;
+            vehicleSelect.disabled = isBusy;
+        }
+
+        function toNumber(value) {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        function normalizePoint(point) {
+            if (Array.isArray(point)) {
+                const lon = toNumber(point[0]);
+                const lat = toNumber(point[1]);
+                return lon === null || lat === null ? null : { lon, lat };
+            }
+
+            const lon = toNumber(point.lon ?? point.lng ?? point.longitude ?? point.x);
+            const lat = toNumber(point.lat ?? point.latitude ?? point.y);
+            return lon === null || lat === null ? null : { lon, lat };
+        }
+
+        function normalizeRoutePoints(data) {
+            const source = Array.isArray(data)
+                ? data
+                : (data.planned_route_point || data.path || []);
+
+            return source
+                .map(normalizePoint)
+                .filter(Boolean);
+        }
+
+        function asLngLat(point) {
+            return new AMap.LngLat(point.lon, point.lat);
+        }
+
+        function asPath(points) {
+            return points.map(point => [point.lon, point.lat]);
+        }
+
+        function clearOverlays() {
+            if (backendPolyline) {
+                map.remove(backendPolyline);
+                backendPolyline = null;
+            }
+            if (amapPolylines.length) {
+                map.remove(amapPolylines);
+                amapPolylines = [];
+            }
+            if (markers.length) {
+                map.remove(markers);
+                markers = [];
+            }
+        }
+
+        function drawBackendReference(points) {
+            backendPolyline = new AMap.Polyline({
+                path: asPath(points),
+                strokeColor: "#60a5fa",
+                strokeWeight: 4,
+                strokeOpacity: 0.55,
+                strokeStyle: "dashed",
+                lineJoin: "round",
+                lineCap: "round",
+                zIndex: 40
+            });
+            map.add(backendPolyline);
+        }
+
+        function addMarker(point, label, color) {
+            const marker = new AMap.Marker({
+                position: [point.lon, point.lat],
+                offset: new AMap.Pixel(-11, -26),
+                content: [
+                    `<div style="display:grid;place-items:center;width:22px;height:22px;`,
+                    `border-radius:50%;background:${color};color:#fff;border:2px solid #fff;`,
+                    `font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.3);">${label}</div>`
+                ].join("")
+            });
+            markers.push(marker);
+            map.add(marker);
+        }
+
+        function sampleControlPoints(points, maxCount) {
+            if (points.length <= maxCount) {
+                return points.slice();
+            }
+
+            const result = [points[0]];
+            const innerCount = maxCount - 2;
+            for (let i = 1; i <= innerCount; i += 1) {
+                const index = Math.round((i * (points.length - 1)) / (innerCount + 1));
+                result.push(points[index]);
+            }
+            result.push(points[points.length - 1]);
+            return result;
+        }
+
+        function buildDrivingGroups(points) {
+            const controlPoints = sampleControlPoints(points, MAX_CONTROL_POINTS);
+            const groups = [];
+            let startIndex = 0;
+
+            while (startIndex < controlPoints.length - 1) {
+                const endIndex = Math.min(
+                    startIndex + MAX_WAYPOINTS_PER_REQUEST + 1,
+                    controlPoints.length - 1
+                );
+                groups.push(controlPoints.slice(startIndex, endIndex + 1));
+                startIndex = endIndex;
+            }
+
+            return groups;
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function toRadians(degrees) {
+            return degrees * Math.PI / 180;
+        }
+
+        function toDegrees(radians) {
+            return radians * 180 / Math.PI;
+        }
+
+        function distanceMeters(a, b) {
+            const earthRadius = 6371000;
+            const lat1 = toRadians(a.lat);
+            const lat2 = toRadians(b.lat);
+            const dLat = toRadians(b.lat - a.lat);
+            const dLon = toRadians(b.lon - a.lon);
+            const s =
+                Math.sin(dLat / 2) ** 2
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return 2 * earthRadius * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+        }
+
+        function bearingDegrees(a, b) {
+            const lat1 = toRadians(a.lat);
+            const lat2 = toRadians(b.lat);
+            const dLon = toRadians(b.lon - a.lon);
+            const y = Math.sin(dLon) * Math.cos(lat2);
+            const x =
+                Math.cos(lat1) * Math.sin(lat2)
+                - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+            return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+        }
+
+        function convertLngLatToPoint(lnglat) {
+            if (Array.isArray(lnglat)) {
+                return { lon: Number(lnglat[0]), lat: Number(lnglat[1]) };
+            }
+            if (typeof lnglat.getLng === "function" && typeof lnglat.getLat === "function") {
+                return { lon: lnglat.getLng(), lat: lnglat.getLat() };
+            }
+            return { lon: Number(lnglat.lng), lat: Number(lnglat.lat) };
+        }
+
+        function extractDrivingPath(result) {
+            const route = result.routes && result.routes[0];
+            if (!route) {
+                return [];
+            }
+
+            if (Array.isArray(route.path) && route.path.length) {
+                return route.path.map(convertLngLatToPoint);
+            }
+
+            const path = [];
+            for (const step of route.steps || []) {
+                for (const point of step.path || []) {
+                    path.push(convertLngLatToPoint(point));
+                }
+            }
+            return path;
+        }
+
+        function searchDriving(group) {
+            return new Promise((resolve, reject) => {
+                const start = group[0];
+                const end = group[group.length - 1];
+                const waypoints = group.slice(1, -1).map(asLngLat);
+
+                driving.search(
+                    asLngLat(start),
+                    asLngLat(end),
+                    { waypoints },
+                    (status, result) => {
+                        if (status === "complete") {
+                            const path = extractDrivingPath(result);
+                            if (path.length >= 2) {
+                                resolve(path);
+                                return;
+                            }
+                        }
+                        reject(new Error(`高德驾车规划失败：${status}`));
+                    }
+                );
+            });
+        }
+
+        function buildGraspRoadOriginPath(points) {
+            const sampledPoints = sampleControlPoints(points, MAX_GRASP_ROAD_POINTS);
+            const startTimestamp = Math.floor(Date.now() / 1000);
+
+            return sampledPoints.map((point, index) => {
+                const previous = sampledPoints[index - 1] || point;
+                const next = sampledPoints[index + 1] || point;
+                const distanceFromPrevious = index === 0 ? 0 : distanceMeters(previous, point);
+                const speed = index === 0
+                    ? 20
+                    : Math.max(5, Math.min(80, distanceFromPrevious / GRASP_ROAD_POINT_INTERVAL_SECONDS * 3.6));
+                const angle = index < sampledPoints.length - 1
+                    ? bearingDegrees(point, next)
+                    : bearingDegrees(previous, point);
+
+                return {
+                    x: point.lon,
+                    y: point.lat,
+                    ag: angle,
+                    tm: index === 0 ? startTimestamp : index * GRASP_ROAD_POINT_INTERVAL_SECONDS,
+                    sp: speed
+                };
+            });
+        }
+
+        function extractGraspRoadPath(result) {
+            const points = result?.data?.points || result?.points || [];
+            return points
+                .map(normalizePoint)
+                .filter(Boolean);
+        }
+
+        function correctRouteByGraspRoad(points) {
+            return new Promise((resolve, reject) => {
+                if (!graspRoad) {
+                    reject(new Error("高德轨迹纠偏插件未加载"));
+                    return;
+                }
+
+                const originPath = buildGraspRoadOriginPath(points);
+                graspRoad.driving(originPath, (error, result) => {
+                    if (error) {
+                        reject(new Error(`高德轨迹纠偏失败：${error.info || error.message || "未知错误"}`));
+                        return;
+                    }
+
+                    const correctedPath = extractGraspRoadPath(result);
+                    if (correctedPath.length < 2) {
+                        reject(new Error("高德轨迹纠偏未返回有效轨迹"));
+                        return;
+                    }
+
+                    resolve({
+                        path: correctedPath,
+                        inputCount: originPath.length,
+                        distance: result.distance
+                    });
+                });
+            });
+        }
+
+        function drawAmapDrivingSegments(segmentPaths) {
+            amapPolylines = segmentPaths.map(path => new AMap.Polyline({
+                path: asPath(path),
+                strokeColor: "#22c55e",
+                strokeWeight: 7,
+                strokeOpacity: 0.9,
+                lineJoin: "round",
+                lineCap: "round",
                 showDir: true,
-                dirColor: '#ffffff',
-                zIndex: 50
+                zIndex: 60
+            }));
+            map.add(amapPolylines);
+        }
+
+        function drawGraspRoadRoute(path) {
+            const correctedLine = new AMap.Polyline({
+                path: asPath(path),
+                strokeColor: "#a855f7",
+                strokeWeight: 7,
+                strokeOpacity: 0.92,
+                lineJoin: "round",
+                lineCap: "round",
+                showDir: true,
+                zIndex: 70
+            });
+            amapPolylines = [correctedLine];
+            map.add(correctedLine);
+        }
+
+        function drawFallbackRoute(points) {
+            const fallback = new AMap.Polyline({
+                path: asPath(points),
+                strokeColor: "#f97316",
+                strokeWeight: 6,
+                strokeOpacity: 0.85,
+                lineJoin: "round",
+                lineCap: "round",
+                showDir: true,
+                zIndex: 65
+            });
+            amapPolylines = [fallback];
+            map.add(fallback);
+        }
+
+        function fitRouteView() {
+            const overlays = [
+                backendPolyline,
+                ...amapPolylines,
+                ...markers
+            ].filter(Boolean);
+            if (overlays.length) {
+                map.setFitView(overlays, false, [60, 60, 60, 380]);
+            }
+        }
+
+        async function convertPointsIfNeeded(points) {
+            const coordType = coordTypeInput.value;
+            if (coordType === "none") {
+                return points;
+            }
+
+            const converted = [];
+            for (let i = 0; i < points.length; i += 40) {
+                const chunk = points.slice(i, i + 40);
+                const locations = await new Promise((resolve, reject) => {
+                    AMap.convertFrom(asPath(chunk), coordType, (status, result) => {
+                        if (status === "complete" && result.info === "ok") {
+                            resolve(result.locations.map(convertLngLatToPoint));
+                        } else {
+                            reject(new Error("坐标转换失败"));
+                        }
+                    });
+                });
+                converted.push(...locations);
+            }
+            return converted;
+        }
+
+        async function renderRouteByAmap(rawPoints, title) {
+            const validPoints = normalizeRoutePoints(rawPoints);
+            if (validPoints.length < 2) {
+                throw new Error("轨迹点不足，无法绘制路线");
+            }
+
+            setBusy(true);
+            clearOverlays();
+
+            const points = await convertPointsIfNeeded(validPoints);
+            drawBackendReference(points);
+            addMarker(points[0], "起", "#2563eb");
+            addMarker(points[points.length - 1], "终", "#dc2626");
+
+            try {
+                if (routeModeInput.value === "backend") {
+                    drawFallbackRoute(points);
+                    fitRouteView();
+                    setStatus([
+                        title,
+                        `后端轨迹点：${validPoints.length}`,
+                        "当前为直接绘制后端原始轨迹。"
+                    ].join("\n"));
+                    return;
+                }
+
+                if (routeModeInput.value === "grasproad") {
+                    setStatus(`${title}\n正在调用高德官方轨迹纠偏服务...`);
+                    const corrected = await correctRouteByGraspRoad(points);
+                    drawGraspRoadRoute(corrected.path);
+                    fitRouteView();
+                    setStatus([
+                        title,
+                        `后端轨迹点：${validPoints.length}`,
+                        `纠偏输入点：${corrected.inputCount}`,
+                        `纠偏返回点：${corrected.path.length}`,
+                        corrected.distance ? `纠偏里程：${Number(corrected.distance).toFixed(0)} 米` : null,
+                        "紫色路线为高德 GraspRoad 轨迹纠偏结果，蓝色虚线为后端原始轨迹参考。"
+                    ].filter(Boolean).join("\n"));
+                    return;
+                }
+
+                const groups = buildDrivingGroups(points);
+                const segmentPaths = [];
+                for (let i = 0; i < groups.length; i += 1) {
+                    setStatus(`${title}\n正在调用高德驾车规划：第 ${i + 1}/${groups.length} 段...`);
+                    segmentPaths.push(await searchDriving(groups[i]));
+                    await sleep(120);
+                }
+                drawAmapDrivingSegments(segmentPaths);
+                fitRouteView();
+                setStatus([
+                    title,
+                    `后端轨迹点：${validPoints.length}`,
+                    `高德控制点：${sampleControlPoints(points, MAX_CONTROL_POINTS).length}`,
+                    `高德规划分段：${groups.length}`,
+                    "绿色路线为高德驾车规划结果，蓝色虚线为后端原始轨迹参考。"
+                ].join("\n"));
+            } catch (error) {
+                drawFallbackRoute(points);
+                fitRouteView();
+                setStatus([
+                    title,
+                    error.message,
+                    "已回退为直接绘制后端原始轨迹。"
+                ].join("\n"));
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        function getApiBase() {
+            const apiBase = apiBaseInput.value.trim().replace(/\/$/, "");
+            if (!apiBase) {
+                throw new Error("请填写后端地址");
+            }
+            return apiBase;
+        }
+
+        function getSelectedVehicle() {
+            const vehicleId = vehicleSelect.value;
+            const vehicle = fleetById.get(vehicleId);
+            if (!vehicle) {
+                throw new Error("请先加载车辆列表");
+            }
+
+            const gps = vehicle.gps || {};
+            const lon = toNumber(gps.lon);
+            const lat = toNumber(gps.lat);
+            if (lon === null || lat === null) {
+                throw new Error(`车辆 ${vehicleId} 暂无后端 GPS，无法请求路径更新`);
+            }
+
+            return { vehicle, lon, lat };
+        }
+
+        function fillVehicleSelect(fleet) {
+            fleetById = new Map();
+            vehicleSelect.innerHTML = "";
+
+            for (const vehicle of fleet) {
+                fleetById.set(vehicle.id, vehicle);
+                const option = document.createElement("option");
+                const gps = vehicle.gps || {};
+                const hasGps = Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
+                option.value = vehicle.id;
+                option.textContent = `${vehicle.id}${hasGps ? "" : "（无 GPS）"}`;
+                vehicleSelect.appendChild(option);
+            }
+        }
+
+        async function loadFleetFromBackend() {
+            const apiBase = getApiBase();
+            setStatus("正在从后端加载车辆列表...");
+
+            const response = await fetch(`${apiBase}/fleet`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `车队接口请求失败：${response.status}`);
+            }
+
+            const fleet = data.fleet || [];
+            fillVehicleSelect(fleet);
+            if (!fleet.length) {
+                throw new Error("后端未返回车辆，请先初始化系统");
+            }
+
+            setStatus(`已加载 ${fleet.length} 辆车。请选择车辆后刷新后端轨迹。`);
+            return fleet;
+        }
+
+        async function requestBackendPath() {
+            const apiBase = getApiBase();
+            const { vehicle, lon, lat } = getSelectedVehicle();
+
+            setStatus(`正在请求车辆 ${vehicle.id} 的后端路径更新接口...`);
+            const response = await fetch(`${apiBase}/fleet/${encodeURIComponent(vehicle.id)}/path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lon, lat })
             });
 
-            map.add(polyline);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `接口请求失败：${response.status}`);
+            }
 
-            // 2. 定义关键业务点 (同步应用偏移)
-            var vehicleStart = calibratedPath[0];
-            var pickupPos = [113.39523 + lngOffset, 23.04474 + latOffset];
-            var dropoffPos = calibratedPath[calibratedPath.length - 1];
+            await renderRouteByAmap(data, `车辆 ${vehicle.id} 路径更新成功\n后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`);
+        }
 
-            // 3. 绘制精简版业务标记 Marker
-            // 车辆当前位置
-            new AMap.Marker({
-                position: vehicleStart,
-                content: '<div style="width:12px; height:12px; background:#fff; border:2px solid #333; border-radius:50%; box-shadow:0 0 5px #fff;"></div>',
-                offset: new AMap.Pixel(-6, -6),
-                map: map,
-                title: '车辆当前位置'
+        async function loadFleetAndRenderFirstAvailable() {
+            const fleet = await loadFleetFromBackend();
+            const firstVehicleWithGps = fleet.find(vehicle => {
+                const gps = vehicle.gps || {};
+                return Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
             });
 
-            // 乘客上车点 P
-            new AMap.Marker({
-                position: pickupPos,
-                content: '<div style="display:flex; flex-direction:column; align-items:center;">' +
-                    '<div style="width:14px; height:14px; background:#ff3366; border:2px solid #fff; border-radius:50%; box-shadow:0 0 8px #ff3366;"></div>' +
-                    '<div style="color:#ff3366; font-size:11px; font-weight:bold; text-shadow:0 0 2px #000;">P</div>' +
-                    '</div>',
-                offset: new AMap.Pixel(-7, -7),
-                map: map,
-                title: '上车点'
-            });
+            if (!firstVehicleWithGps) {
+                setStatus(`已加载 ${fleet.length} 辆车，但没有车辆带有后端 GPS。`);
+                return;
+            }
 
-            // 乘客下车点 D
-            new AMap.Marker({
-                position: dropoffPos,
-                content: '<div style="display:flex; flex-direction:column; align-items:center;">' +
-                    '<div style="width:14px; height:14px; background:#00cc66; border:2px solid #fff; border-radius:50%; box-shadow:0 0 8px #00cc66;"></div>' +
-                    '<div style="color:#00cc66; font-size:11px; font-weight:bold; text-shadow:0 0 2px #000;">D</div>' +
-                    '</div>',
-                offset: new AMap.Pixel(-7, -7),
-                map: map,
-                title: '下车点'
-            });
+            vehicleSelect.value = firstVehicleWithGps.id;
+            await requestBackendPath();
+        }
 
-            map.setFitView();
-            console.log("✅ 校准后轨迹绘制成功，当前偏移量：", lngOffset, latOffset);
+        map.on("complete", () => {
+            AMap.plugin(["AMap.Driving", "AMap.GraspRoad"], async () => {
+                driving = new AMap.Driving({
+                    policy: AMap.DrivingPolicy.LEAST_TIME,
+                    extensions: "base",
+                    showTraffic: false
+                });
+                graspRoad = new AMap.GraspRoad();
+                await loadFleetAndRenderFirstAvailable();
+            });
+        });
+
+        refreshBtn.addEventListener("click", () => {
+            requestBackendPath().catch(error => {
+                setBusy(false);
+                setStatus(error.message);
+            });
+        });
+
+        loadFleetBtn.addEventListener("click", () => {
+            loadFleetAndRenderFirstAvailable().catch(error => {
+                setBusy(false);
+                setStatus(error.message);
+            });
         });
     </script>
 </body>
