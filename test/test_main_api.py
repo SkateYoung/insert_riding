@@ -138,8 +138,20 @@ def run_tests(base_url):
             path_body,
         ),
     )
-    assert_true(path.get("vehicle_id") == first_vehicle_id, "更新路径接口应返回对应车辆 id")
-    assert_true("path" in path and "segments" in path, "更新路径接口应返回 path 和 segments")
+    assert_true(path.get("vehicle", {}).get("id") == first_vehicle_id, "更新路径接口应返回对应车辆 id")
+    assert_true(isinstance(path.get("gps"), dict), "更新路径接口应返回 gps")
+    assert_true(isinstance(path.get("snap"), dict), "更新路径接口应返回 snap")
+    assert_true(isinstance(path.get("snap", {}).get("point"), dict), "更新路径接口应返回 snap.point")
+    assert_true(isinstance(path.get("route"), dict), "更新路径接口应返回 route")
+    assert_true(isinstance(path.get("route", {}).get("points"), list), "更新路径接口应返回 route.points")
+    assert_true(isinstance(path.get("route", {}).get("segments"), list), "更新路径接口应返回 route.segments")
+    assert_true(isinstance(path.get("events"), list), "更新路径接口应返回 events")
+    assert_true(isinstance(path.get("orders"), dict), "更新路径接口应返回 orders")
+    assert_true(path.get("path") == path.get("route", {}).get("points"), "兼容字段 path 应等于 route.points")
+    assert_true(isinstance(path.get("snapped_point"), dict), "兼容字段 snapped_point 应存在")
+    assert_true("planned_route_point" not in path, "更新路径接口不应再返回 planned_route_point")
+    assert_true("snapped_node" not in path, "更新路径接口不应再返回 snapped_node")
+    assert_true("segments" not in path, "更新路径接口不应再返回顶层 segments")
 
     now = datetime.now().replace(microsecond=0)
     order_body = {

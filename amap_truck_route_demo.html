@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>高德货车路径规划重构 Demo</title>
+    <style>
+        html,
+        body,
+        #container {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #f5f7fb;
+        }
+
+        .panel {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            z-index: 10;
+            width: 370px;
+            max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            box-sizing: border-box;
+            padding: 16px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.96);
+            box-shadow: 0 12px 34px rgba(15, 23, 42, 0.22);
+        }
+
+        h1 {
+            margin: 0 0 14px;
+            font-size: 18px;
+            line-height: 1.3;
+            color: #111827;
+        }
+
+        .field {
+            display: grid;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        label {
+            font-size: 13px;
+            color: #374151;
+        }
+
+        input,
+        select,
+        button {
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 34px;
+            border-radius: 6px;
+            font: inherit;
+        }
+
+        input,
+        select {
+            padding: 6px 9px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #111827;
+        }
+
+        button {
+            border: 0;
+            padding: 8px 10px;
+            background: #ea580c;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        button.secondary {
+            background: #2563eb;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin: 14px 0;
+        }
+
+        .legend {
+            display: grid;
+            gap: 8px;
+            margin: 12px 0;
+            font-size: 13px;
+            color: #374151;
+        }
+
+        .legend span::before {
+            content: "";
+            display: inline-block;
+            width: 24px;
+            height: 4px;
+            margin-right: 8px;
+            vertical-align: middle;
+            border-radius: 999px;
+            background: var(--line-color);
+        }
+
+        .status {
+            min-height: 120px;
+            white-space: pre-wrap;
+            border-radius: 6px;
+            padding: 10px;
+            background: #111827;
+            color: #d1d5db;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+    </style>
+    <script>
+        window._AMapSecurityConfig = {
+            securityJsCode: "0b80fd2cbff37b5fa47b96173410c6ad"
+        };
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e&plugin=AMap.TruckDriving,AMap.Driving"></script>
+</head>
+<body>
+    <div id="container"></div>
+
+    <section class="panel">
+        <h1>货车路径规划重构算法轨迹</h1>
+
+        <div class="field">
+            <label for="apiBaseInput">后端地址</label>
+            <input id="apiBaseInput" value="http://127.0.0.1:5000">
+        </div>
+
+        <div class="field">
+            <label for="vehicleSelect">车辆</label>
+            <select id="vehicleSelect"></select>
+        </div>
+
+        <div class="field">
+            <label for="coordTypeInput">后端轨迹坐标类型</label>
+            <select id="coordTypeInput">
+                <option value="none">已是高德坐标，不转换</option>
+                <option value="gps">GPS/WGS84，转高德坐标</option>
+                <option value="baidu">百度坐标，转高德坐标</option>
+            </select>
+        </div>
+
+        <div class="grid">
+            <div class="field">
+                <label for="truckSizeInput">车型大小</label>
+                <select id="truckSizeInput">
+                    <option value="1">1 微型</option>
+                    <option value="2" selected>2 轻型</option>
+                    <option value="3">3 中型</option>
+                    <option value="4">4 重型</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="truckPolicyInput">规划策略</label>
+                <select id="truckPolicyInput">
+                    <option value="1" selected>1 躲避拥堵</option>
+                    <option value="2">2 不走高速</option>
+                    <option value="3">3 避免收费</option>
+                    <option value="8">8 高速优先</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="truckHeightInput">高度 m</label>
+                <input id="truckHeightInput" type="number" step="0.1" value="3.8">
+            </div>
+            <div class="field">
+                <label for="truckWidthInput">宽度 m</label>
+                <input id="truckWidthInput" type="number" step="0.1" value="2.5">
+            </div>
+            <div class="field">
+                <label for="truckLoadInput">总重 t</label>
+                <input id="truckLoadInput" type="number" step="0.1" value="8">
+            </div>
+            <div class="field">
+                <label for="maxControlsInput">最多控制点</label>
+                <input id="maxControlsInput" type="number" min="18" max="180" step="1" value="100">
+            </div>
+            <div class="field">
+                <label for="fallbackModeInput">货车失败处理</label>
+                <select id="fallbackModeInput">
+                    <option value="driving" selected>普通驾车兜底</option>
+                    <option value="stop">停止并显示错误</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button id="loadFleetBtn" class="secondary">加载车辆</button>
+            <button id="renderBtn">重构货车路线</button>
+        </div>
+
+        <div class="legend">
+            <span style="--line-color:#60a5fa;">后端算法轨迹</span>
+            <span style="--line-color:#ea580c;">高德货车重构路线</span>
+            <span style="--line-color:#64748b;">普通驾车兜底路线</span>
+            <span style="--line-color:#16a34a;">控制点</span>
+        </div>
+
+        <div id="status" class="status">等待地图加载...</div>
+    </section>
+
+    <script>
+        const MAX_WAYPOINTS_PER_REQUEST = 14;
+        const MIN_CONTROL_DISTANCE_METERS = 260;
+        const TURN_ANGLE_THRESHOLD_DEGREES = 28;
+        const TRUCK_REQUEST_DELAY_MS = 160;
+
+        const map = new AMap.Map("container", {
+            center: [113.2644, 23.1291],
+            zoom: 12,
+            resizeEnable: true,
+            mapStyle: "amap://styles/normal"
+        });
+
+        const apiBaseInput = document.getElementById("apiBaseInput");
+        const vehicleSelect = document.getElementById("vehicleSelect");
+        const coordTypeInput = document.getElementById("coordTypeInput");
+        const truckSizeInput = document.getElementById("truckSizeInput");
+        const truckPolicyInput = document.getElementById("truckPolicyInput");
+        const truckHeightInput = document.getElementById("truckHeightInput");
+        const truckWidthInput = document.getElementById("truckWidthInput");
+        const truckLoadInput = document.getElementById("truckLoadInput");
+        const maxControlsInput = document.getElementById("maxControlsInput");
+        const fallbackModeInput = document.getElementById("fallbackModeInput");
+        const loadFleetBtn = document.getElementById("loadFleetBtn");
+        const renderBtn = document.getElementById("renderBtn");
+        const statusEl = document.getElementById("status");
+
+        let truckDriving = null;
+        let fallbackDriving = null;
+        let fleetById = new Map();
+        let backendPolyline = null;
+        let routePolylines = [];
+        let markers = [];
+        let controlMarkers = [];
+
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
+
+        function setBusy(isBusy) {
+            loadFleetBtn.disabled = isBusy;
+            renderBtn.disabled = isBusy;
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function toNumber(value) {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        function normalizePoint(point) {
+            if (Array.isArray(point)) {
+                const lon = toNumber(point[0]);
+                const lat = toNumber(point[1]);
+                return lon === null || lat === null ? null : { lon, lat };
+            }
+
+            const lon = toNumber(point.lon ?? point.lng ?? point.longitude ?? point.x);
+            const lat = toNumber(point.lat ?? point.latitude ?? point.y);
+            return lon === null || lat === null ? null : { lon, lat };
+        }
+
+        function normalizeRoutePoints(data) {
+            const source = Array.isArray(data)
+                ? data
+                : (data.route?.points || data.planned_route_point || data.path || []);
+
+            return source.map(normalizePoint).filter(Boolean);
+        }
+
+        function asArrayPath(points) {
+            return points.map(point => [point.lon, point.lat]);
+        }
+
+        function asLngLatArray(point) {
+            return [point.lon, point.lat];
+        }
+
+        function convertLngLatToPoint(lnglat) {
+            if (Array.isArray(lnglat)) {
+                return { lon: Number(lnglat[0]), lat: Number(lnglat[1]) };
+            }
+            if (lnglat && typeof lnglat.getLng === "function" && typeof lnglat.getLat === "function") {
+                return { lon: lnglat.getLng(), lat: lnglat.getLat() };
+            }
+            return { lon: Number(lnglat.lng), lat: Number(lnglat.lat) };
+        }
+
+        function parsePolyline(polyline) {
+            if (!polyline || typeof polyline !== "string") {
+                return [];
+            }
+
+            return polyline
+                .split(";")
+                .map(pair => {
+                    const [lon, lat] = pair.split(",").map(Number);
+                    return Number.isFinite(lon) && Number.isFinite(lat) ? { lon, lat } : null;
+                })
+                .filter(Boolean);
+        }
+
+        function clearOverlays() {
+            const overlays = [
+                backendPolyline,
+                ...routePolylines,
+                ...markers,
+                ...controlMarkers
+            ].filter(Boolean);
+
+            if (overlays.length) {
+                map.remove(overlays);
+            }
+
+            backendPolyline = null;
+            routePolylines = [];
+            markers = [];
+            controlMarkers = [];
+        }
+
+        function drawBackendReference(points) {
+            backendPolyline = new AMap.Polyline({
+                path: asArrayPath(points),
+                strokeColor: "#60a5fa",
+                strokeWeight: 4,
+                strokeOpacity: 0.55,
+                strokeStyle: "dashed",
+                lineJoin: "round",
+                lineCap: "round",
+                zIndex: 40
+            });
+            map.add(backendPolyline);
+        }
+
+        function drawRouteSegments(segmentResults) {
+            routePolylines = segmentResults.map(segment => new AMap.Polyline({
+                path: asArrayPath(segment.path),
+                strokeColor: segment.mode === "truck" ? "#ea580c" : "#64748b",
+                strokeWeight: 7,
+                strokeOpacity: 0.9,
+                lineJoin: "round",
+                lineCap: "round",
+                showDir: true,
+                zIndex: 70
+            }));
+            map.add(routePolylines);
+        }
+
+        function addEndpointMarker(point, label, color) {
+            const marker = new AMap.Marker({
+                position: asLngLatArray(point),
+                offset: new AMap.Pixel(-12, -28),
+                content: [
+                    `<div style="display:grid;place-items:center;width:24px;height:24px;`,
+                    `border-radius:50%;background:${color};color:#fff;border:2px solid #fff;`,
+                    `font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.3);">${label}</div>`
+                ].join("")
+            });
+            markers.push(marker);
+            map.add(marker);
+        }
+
+        function drawControlMarkers(points) {
+            controlMarkers = points.map((point, index) => new AMap.CircleMarker({
+                center: asLngLatArray(point),
+                radius: index === 0 || index === points.length - 1 ? 5 : 3,
+                strokeColor: "#ffffff",
+                strokeWeight: 1,
+                fillColor: "#16a34a",
+                fillOpacity: 0.9,
+                zIndex: 85
+            }));
+            map.add(controlMarkers);
+        }
+
+        function fitRouteView() {
+            const overlays = [
+                backendPolyline,
+                ...routePolylines,
+                ...markers
+            ].filter(Boolean);
+
+            if (overlays.length) {
+                map.setFitView(overlays, false, [60, 60, 60, 410]);
+            }
+        }
+
+        function toRadians(degrees) {
+            return degrees * Math.PI / 180;
+        }
+
+        function toDegrees(radians) {
+            return radians * 180 / Math.PI;
+        }
+
+        function distanceMeters(a, b) {
+            const earthRadius = 6371008.8;
+            const lat1 = toRadians(a.lat);
+            const lat2 = toRadians(b.lat);
+            const dLat = toRadians(b.lat - a.lat);
+            const dLon = toRadians(b.lon - a.lon);
+            const h = Math.sin(dLat / 2) ** 2
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return 2 * earthRadius * Math.asin(Math.sqrt(h));
+        }
+
+        function dedupeNearbyPoints(points, minDistanceMeters) {
+            const result = [];
+            for (const point of points) {
+                const previous = result[result.length - 1];
+                if (!previous || distanceMeters(previous, point) >= minDistanceMeters) {
+                    result.push(point);
+                }
+            }
+            return result;
+        }
+
+        function bearingDegrees(a, b) {
+            const lat1 = toRadians(a.lat);
+            const lat2 = toRadians(b.lat);
+            const dLon = toRadians(b.lon - a.lon);
+            const y = Math.sin(dLon) * Math.cos(lat2);
+            const x = Math.cos(lat1) * Math.sin(lat2)
+                - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+            return (toDegrees(Math.atan2(y, x)) + 360) % 360;
+        }
+
+        function angleDeltaDegrees(a, b) {
+            const delta = Math.abs(a - b) % 360;
+            return delta > 180 ? 360 - delta : delta;
+        }
+
+        function collectControlPoints(points, maxCount) {
+            if (points.length <= 2) {
+                return points.slice();
+            }
+
+            const scored = [
+                { index: 0, score: Number.POSITIVE_INFINITY },
+                { index: points.length - 1, score: Number.POSITIVE_INFINITY }
+            ];
+            let distanceFromLastAnchor = 0;
+
+            for (let i = 1; i < points.length - 1; i += 1) {
+                const prev = points[i - 1];
+                const current = points[i];
+                const next = points[i + 1];
+                const turn = angleDeltaDegrees(
+                    bearingDegrees(prev, current),
+                    bearingDegrees(current, next)
+                );
+
+                distanceFromLastAnchor += distanceMeters(prev, current);
+                if (turn >= TURN_ANGLE_THRESHOLD_DEGREES || distanceFromLastAnchor >= MIN_CONTROL_DISTANCE_METERS) {
+                    scored.push({
+                        index: i,
+                        score: turn + distanceFromLastAnchor / 100
+                    });
+                    distanceFromLastAnchor = 0;
+                }
+            }
+
+            const byIndex = new Map();
+            for (const item of scored.sort((a, b) => b.score - a.score).slice(0, maxCount)) {
+                byIndex.set(item.index, item);
+            }
+
+            return [...byIndex.keys()]
+                .sort((a, b) => a - b)
+                .map(index => points[index]);
+        }
+
+        function buildTruckGroups(controlPoints) {
+            const groups = [];
+            let startIndex = 0;
+
+            while (startIndex < controlPoints.length - 1) {
+                const endIndex = Math.min(
+                    startIndex + MAX_WAYPOINTS_PER_REQUEST + 1,
+                    controlPoints.length - 1
+                );
+                groups.push(controlPoints.slice(startIndex, endIndex + 1));
+                startIndex = endIndex;
+            }
+
+            return groups;
+        }
+
+        async function convertPointsIfNeeded(points) {
+            const coordType = coordTypeInput.value;
+            if (coordType === "none") {
+                return points;
+            }
+
+            const converted = [];
+            for (let i = 0; i < points.length; i += 40) {
+                const chunk = points.slice(i, i + 40);
+                const locations = await new Promise((resolve, reject) => {
+                    AMap.convertFrom(asArrayPath(chunk), coordType, (status, result) => {
+                        if (status === "complete" && result.info === "ok") {
+                            resolve(result.locations.map(convertLngLatToPoint));
+                            return;
+                        }
+                        reject(new Error(`坐标转换失败：${status}`));
+                    });
+                });
+                converted.push(...locations);
+            }
+            return converted;
+        }
+
+        function createTruckDriving() {
+            if (!AMap.TruckDriving) {
+                throw new Error("AMap.TruckDriving 插件未加载，请检查高德 JS API key 是否开通相关能力");
+            }
+
+            return new AMap.TruckDriving({
+                policy: Number(truckPolicyInput.value),
+                size: Number(truckSizeInput.value),
+                height: Number(truckHeightInput.value),
+                width: Number(truckWidthInput.value),
+                load: Number(truckLoadInput.value),
+                extensions: "all",
+                showTraffic: false
+            });
+        }
+
+        function createFallbackDriving() {
+            if (!AMap.Driving) {
+                throw new Error("AMap.Driving 插件未加载，无法执行普通驾车兜底");
+            }
+
+            return new AMap.Driving({
+                policy: AMap.DrivingPolicy.LEAST_TIME,
+                extensions: "base",
+                showTraffic: false
+            });
+        }
+
+        function extractTruckPath(result) {
+            const route = result?.routes?.[0] || result?.route?.paths?.[0] || result?.paths?.[0];
+            if (!route) {
+                return [];
+            }
+
+            if (Array.isArray(route.path) && route.path.length) {
+                return route.path.map(convertLngLatToPoint);
+            }
+
+            const path = [];
+            for (const step of route.steps || []) {
+                if (Array.isArray(step.path)) {
+                    path.push(...step.path.map(convertLngLatToPoint));
+                } else if (typeof step.polyline === "string") {
+                    path.push(...parsePolyline(step.polyline));
+                }
+            }
+            return path;
+        }
+
+        function extractDrivingPath(result) {
+            const route = result?.routes?.[0];
+            if (!route) {
+                return [];
+            }
+
+            if (Array.isArray(route.path) && route.path.length) {
+                return route.path.map(convertLngLatToPoint);
+            }
+
+            const path = [];
+            for (const step of route.steps || []) {
+                for (const point of step.path || []) {
+                    path.push(convertLngLatToPoint(point));
+                }
+            }
+            return path;
+        }
+
+        function describeRouteError(status, result) {
+            if (typeof result === "string") {
+                if (result === "error") {
+                    return "高德仅返回 error。当前仓库里的高德 key 调用货车 Web API 返回 INSUFFICIENT_PRIVILEGES/10012，通常是货车路径规划权限未开通。";
+                }
+                return result;
+            }
+
+            if (!result || typeof result !== "object") {
+                return status || "未知错误";
+            }
+
+            const parts = [
+                result.info,
+                result.message,
+                result.errmsg,
+                result.infocode ? `infocode=${result.infocode}` : null,
+                result.errcode ? `errcode=${result.errcode}` : null
+            ].filter(Boolean);
+
+            return parts.length ? parts.join("；") : JSON.stringify(result);
+        }
+
+        function searchTruck(group) {
+            return new Promise((resolve, reject) => {
+                const path = group.map(point => ({ lnglat: asLngLatArray(point) }));
+                truckDriving.search(path, (status, result) => {
+                    if (status === "complete") {
+                        const routePath = extractTruckPath(result);
+                        if (routePath.length >= 2) {
+                            resolve({
+                                mode: "truck",
+                                path: routePath
+                            });
+                            return;
+                        }
+                    }
+
+                    const reason = describeRouteError(status, result);
+                    reject(new Error(`货车路径规划失败：${reason}`));
+                });
+            });
+        }
+
+        function searchDrivingFallback(group) {
+            return new Promise((resolve, reject) => {
+                if (!fallbackDriving) {
+                    fallbackDriving = createFallbackDriving();
+                }
+
+                const start = group[0];
+                const end = group[group.length - 1];
+                const waypoints = group.slice(1, -1).map(point => new AMap.LngLat(point.lon, point.lat));
+                fallbackDriving.search(
+                    new AMap.LngLat(start.lon, start.lat),
+                    new AMap.LngLat(end.lon, end.lat),
+                    { waypoints },
+                    (status, result) => {
+                        if (status === "complete") {
+                            const path = extractDrivingPath(result);
+                            if (path.length >= 2) {
+                                resolve({
+                                    mode: "driving",
+                                    path
+                                });
+                                return;
+                            }
+                        }
+
+                        reject(new Error(`普通驾车兜底也失败：${describeRouteError(status, result)}`));
+                    }
+                );
+            });
+        }
+
+        async function searchTruckWithOptionalFallback(group) {
+            try {
+                return await searchTruck(group);
+            } catch (error) {
+                if (fallbackModeInput.value !== "driving") {
+                    throw error;
+                }
+
+                console.warn(error.message);
+                const fallback = await searchDrivingFallback(group);
+                fallback.fallbackReason = error.message;
+                return fallback;
+            }
+        }
+
+        function getApiBase() {
+            const apiBase = apiBaseInput.value.trim().replace(/\/$/, "");
+            if (!apiBase) {
+                throw new Error("请填写后端地址");
+            }
+            return apiBase;
+        }
+
+        function fillVehicleSelect(fleet) {
+            fleetById = new Map();
+            vehicleSelect.innerHTML = "";
+
+            for (const vehicle of fleet) {
+                fleetById.set(vehicle.id, vehicle);
+                const option = document.createElement("option");
+                const gps = vehicle.gps || {};
+                const hasGps = Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
+                option.value = vehicle.id;
+                option.textContent = `${vehicle.id}${hasGps ? "" : "（无 GPS）"}`;
+                vehicleSelect.appendChild(option);
+            }
+        }
+
+        async function loadFleetFromBackend() {
+            const apiBase = getApiBase();
+            setBusy(true);
+            setStatus("正在从后端加载车辆列表...");
+
+            try {
+                const response = await fetch(`${apiBase}/fleet`);
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || `车队接口请求失败：${response.status}`);
+                }
+
+                const fleet = data.fleet || [];
+                fillVehicleSelect(fleet);
+                if (!fleet.length) {
+                    throw new Error("后端未返回车辆，请先初始化系统");
+                }
+
+                const firstVehicleWithGps = fleet.find(vehicle => {
+                    const gps = vehicle.gps || {};
+                    return Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
+                });
+                if (firstVehicleWithGps) {
+                    vehicleSelect.value = firstVehicleWithGps.id;
+                }
+
+                setStatus(`已加载 ${fleet.length} 辆车。请选择车辆后点击“重构货车路线”。`);
+            } catch (error) {
+                setStatus(error.message);
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        function getSelectedVehicle() {
+            const vehicleId = vehicleSelect.value;
+            const vehicle = fleetById.get(vehicleId);
+            if (!vehicle) {
+                throw new Error("请先加载车辆列表");
+            }
+
+            const gps = vehicle.gps || {};
+            const lon = toNumber(gps.lon);
+            const lat = toNumber(gps.lat);
+            if (lon === null || lat === null) {
+                throw new Error(`车辆 ${vehicleId} 暂无后端 GPS，无法请求路径更新`);
+            }
+
+            return { vehicle, lon, lat };
+        }
+
+        async function requestBackendPath() {
+            const apiBase = getApiBase();
+            const { vehicle, lon, lat } = getSelectedVehicle();
+
+            setStatus(`正在请求车辆 ${vehicle.id} 的后端算法路线...`);
+            const response = await fetch(`${apiBase}/fleet/${encodeURIComponent(vehicle.id)}/path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lon, lat })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `路径接口请求失败：${response.status}`);
+            }
+
+            return { data, vehicle, lon, lat };
+        }
+
+        async function renderTruckRoute() {
+            setBusy(true);
+            clearOverlays();
+
+            try {
+                if (!truckDriving) {
+                    truckDriving = createTruckDriving();
+                }
+
+                const { data, vehicle, lon, lat } = await requestBackendPath();
+                const rawPoints = normalizeRoutePoints(data);
+                if (rawPoints.length < 2) {
+                    throw new Error("后端算法轨迹点不足，无法规划");
+                }
+
+                const points = dedupeNearbyPoints(await convertPointsIfNeeded(rawPoints), 3);
+                if (points.length < 2) {
+                    throw new Error("去重后的轨迹点不足，无法规划");
+                }
+
+                drawBackendReference(points);
+                addEndpointMarker(points[0], "起", "#2563eb");
+                addEndpointMarker(points[points.length - 1], "终", "#dc2626");
+
+                const maxControlCount = Math.max(18, Number(maxControlsInput.value) || 100);
+                const controlPoints = collectControlPoints(points, maxControlCount);
+                const groups = buildTruckGroups(controlPoints);
+                drawControlMarkers(controlPoints);
+
+                const segmentResults = [];
+                const fallbackReasons = [];
+                for (let i = 0; i < groups.length; i += 1) {
+                    setStatus([
+                        `车辆 ${vehicle.id} 后端路线已获取`,
+                        `后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`,
+                        `后端轨迹点：${rawPoints.length}`,
+                        `高德控制点：${controlPoints.length}`,
+                        `货车规划分段：${i + 1}/${groups.length}`,
+                        "正在调用 AMap.TruckDriving..."
+                    ].join("\n"));
+
+                    const segment = await searchTruckWithOptionalFallback(groups[i]);
+                    if (segment.fallbackReason) {
+                        fallbackReasons.push(segment.fallbackReason);
+                    }
+                    segmentResults.push(segment);
+                    await sleep(TRUCK_REQUEST_DELAY_MS);
+                }
+
+                drawRouteSegments(segmentResults);
+                fitRouteView();
+                const truckSegmentCount = segmentResults.filter(segment => segment.mode === "truck").length;
+                const fallbackSegmentCount = segmentResults.length - truckSegmentCount;
+                setStatus([
+                    `车辆 ${vehicle.id} 货车路线重构完成`,
+                    `后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`,
+                    `后端轨迹点：${rawPoints.length}`,
+                    `高德控制点：${controlPoints.length}`,
+                    `货车规划分段：${groups.length}`,
+                    `货车成功分段：${truckSegmentCount}`,
+                    `普通驾车兜底分段：${fallbackSegmentCount}`,
+                    `高德返回轨迹点：${segmentResults.reduce((sum, segment) => sum + segment.path.length, 0)}`,
+                    fallbackReasons.length ? `兜底原因：${fallbackReasons[0]}` : null,
+                    "蓝色虚线为后端算法轨迹，橙色实线为货车路径规划结果，灰色实线为普通驾车兜底结果。"
+                ].filter(Boolean).join("\n"));
+            } catch (error) {
+                fitRouteView();
+                setStatus([
+                    error.message,
+                    "我已用仓库里的两个高德 key 直接测试 v4/direction/truck，均返回 INSUFFICIENT_PRIVILEGES/10012。要真正得到货车路线，需要在高德控制台开通货车路径规划/物流服务权限，或换成已开通该能力的 key。"
+                ].join("\n"));
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        map.on("complete", () => {
+            AMap.plugin(["AMap.TruckDriving", "AMap.Driving"], () => {
+                try {
+                    truckDriving = createTruckDriving();
+                    fallbackDriving = createFallbackDriving();
+                    setStatus("地图与 AMap.TruckDriving 已加载。点击“加载车辆”开始。");
+                } catch (error) {
+                    setStatus(error.message);
+                }
+            });
+        });
+
+        loadFleetBtn.addEventListener("click", loadFleetFromBackend);
+        renderBtn.addEventListener("click", renderTruckRoute);
+
+        for (const input of [
+            truckSizeInput,
+            truckPolicyInput,
+            truckHeightInput,
+            truckWidthInput,
+            truckLoadInput
+        ]) {
+            input.addEventListener("change", () => {
+                try {
+                    truckDriving = createTruckDriving();
+                } catch (error) {
+                    setStatus(error.message);
+                }
+            });
+        }
+    </script>
+</body>
+</html>

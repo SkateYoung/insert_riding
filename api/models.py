@@ -416,6 +416,14 @@ class Order:
         
         # 核心追加：真实接人时间点（记录于物理仿真抵达接客点瞬间），用于后续成本推演防 NaN
         self.actual_pick_time = None
+        # ETA 展示字段：由后台高德分段 ETA 刷新任务写入，不参与派单成本计算。
+        self.estimated_arrival_time = None
+        self.estimated_dropoff_time = None
+        self.estimated_arrival_eta_seconds = None
+        self.estimated_dropoff_eta_seconds = None
+        self.eta_updated_at = None
+        self.eta_status = None
+        self.eta_error = None
         
         # ------ 新增用于落库统计的模板字段 ------
         self.stats_date = datetime.today().strftime("%Y-%m-%d")
@@ -468,6 +476,13 @@ class Order:
             "期望最晚上车时间": self.expected_pickup_latest,
             "应答时间": self.answer_time,
             "上客时间": self.actual_pick_time,
+            "预计到达时间": self.estimated_arrival_time,
+            "预计送达时间": self.estimated_dropoff_time,
+            "预计到达ETA(秒)": self.estimated_arrival_eta_seconds,
+            "预计送达ETA(秒)": self.estimated_dropoff_eta_seconds,
+            "ETA更新时间": self.eta_updated_at,
+            "ETA状态": self.eta_status,
+            "ETA错误": self.eta_error,
             "完单时间": self.completion_time,
             "取消类型": self.cancel_type,
             "取消时间": self.cancel_time,
@@ -526,6 +541,18 @@ class Vehicle:
         self.planned_route = []
         # 前端绘制使用的路网轨迹点，既可表示订单路径，也可表示空车停靠路径。
         self.planned_route_point = []
+        # 高德纠偏后的整条轨迹和分段轨迹；后台纠偏线程异步写入。
+        self.planned_route_grasped_point = []
+        self.planned_route_segment_grasped_point = []
+        self.planned_route_segment_raw_point = []
+        self.planned_route_grasp_status = None
+        self.planned_route_grasp_error = None
+        self.planned_route_grasp_route_version = None
+        # 空车前往热点的 ETA 展示字段，和乘客订单 ETA 分开维护。
+        self.idle_target_eta_seconds = None
+        self.idle_target_eta_time = None
+        self.idle_target_eta_status = None
+        self.idle_target_eta_error = None
         # 车辆最新 GPS，经纬度来自前端模拟或实时定位接口。
         self.gps = {"lon": None, "lat": None}
         # 空车停靠目标和预测解释信息；它们不是订单任务，可被新订单直接覆盖。

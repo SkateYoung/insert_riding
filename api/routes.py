@@ -93,6 +93,15 @@ def _vehicle_to_dict(v):
         "gps": v.gps,
         "idle_target": v.idle_target,
         "idle_forecast": v.idle_forecast,
+        "idle_target_eta_seconds": getattr(v, "idle_target_eta_seconds", None),
+        "idle_target_eta_time": getattr(v, "idle_target_eta_time", None),
+        "idle_target_eta_time_text": (
+            state.format_timestamp(v.idle_target_eta_time)
+            if getattr(v, "idle_target_eta_time", None) is not None
+            else None
+        ),
+        "idle_target_eta_status": getattr(v, "idle_target_eta_status", None),
+        "idle_target_eta_error": getattr(v, "idle_target_eta_error", None),
         "planned_route": [
             {
                 "type": s["type"],
@@ -106,6 +115,11 @@ def _vehicle_to_dict(v):
             for s in v.planned_route
         ],
         "planned_route_point": v.planned_route_point,
+        "planned_route_grasped_point": getattr(v, "planned_route_grasped_point", []),
+        "planned_route_segment_grasped_point": getattr(v, "planned_route_segment_grasped_point", []),
+        "planned_route_grasp_status": getattr(v, "planned_route_grasp_status", None),
+        "planned_route_grasp_error": getattr(v, "planned_route_grasp_error", None),
+        "planned_route_grasp_route_version": getattr(v, "planned_route_grasp_route_version", None),
         "last_node": v.last_node,
         "next_node": v.next_node,
         "progress": v.progress,
@@ -134,6 +148,173 @@ def _vehicle_to_dict(v):
             else None
         ),
         "can_accept_order": CoreDispatcher._vehicle_can_accept_order(v),
+    }
+
+
+def _path_segment_to_dict(segment):
+    """将内部路径分段转成路径更新接口的精简分段结构。"""
+    item = {
+        "type": segment.get("type"),
+        "request_id": segment.get("request_id"),
+        "target": segment.get("target_node"),
+        "distance": segment.get("distance"),
+        "points": segment.get("path", []),
+    }
+    if "forecast" in segment:
+        item["forecast"] = segment["forecast"]
+    return item
+
+
+def _path_result_to_response(vehicle, path_result):
+    """组装 /fleet/<vehicle_id>/path 的对外响应结构。
+
+    CoreDispatcher 返回的是内部计算结构；HTTP 层在这里统一压缩命名、
+    去掉重复字段，并保留少量过渡期兼容字段。
+    """
+    route_points = path_result.get("path", [])
+    snapped_point = path_result.get("snapped_point") or {}
+    snap_edge = snapped_point.get("edge") or {}
+    snap_point = {
+        "id": snapped_point.get("id"),
+        "lon": snapped_point.get("lon"),
+        "lat": snapped_point.get("lat"),
+        "name": snapped_point.get("name"),
+        "zone": snapped_point.get("zone"),
+        "edge_u": snap_edge.get("u"),
+        "edge_v": snap_edge.get("v"),
+        "progress": snapped_point.get("progress"),
+        "is_projection": True,
+    }
+
+    return {
+        "vehicle": {
+            "id": vehicle.id,
+        },
+        "gps": path_result.get("gps"),
+        "snap": {
+            "point": snap_point,
+            "edge": snap_edge,
+            "progress": snapped_point.get("progress"),
+            "distance_to_gps": snapped_point.get("distance_to_gps"),
+            "source": snapped_point.get("snap_source"),
+            "next_node": snapped_point.get("next_node"),
+        },
+        "route": {
+            "points": route_points,
+            "distance": path_result.get("total_distance", 0.0),
+            "planned_step_count": path_result.get("planned_route_size", 0),
+            "segments": [
+                _path_segment_to_dict(segment)
+                for segment in path_result.get("segments", [])
+            ],
+        },
+        "events": path_result.get("changed_steps", []),
+        "orders": {
+            "on_board": path_result.get("on_board_orders", []),
+            "remaining": path_result.get("planned_route", []),
+        },
+        # "path": route_points,
+        "snapped_point": snapped_point,
+    }
+
+
+def _format_optional_timestamp(timestamp_value):
+    """将可选时间戳转成展示文本。"""
+    if timestamp_value is None:
+        return None
+    try:
+        return state.format_timestamp(timestamp_value)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _order_node_to_dict(node):
+    """将订单起终点节点转成乘客端返回结构。"""
+    return {
+        "name": node.name if node else None,
+        "lon": node.lon if node else None,
+        "lat": node.lat if node else None,
+    }
+
+
+def _find_order_eta_context(request_id):
+    """从订单池、车辆任务和归档池中查找乘客订单上下文。"""
+    request_id = str(request_id)
+
+    for order in CoreDispatcher.order_pool:
+        if str(order.request_id) == request_id:
+            return order, "matching", None
+
+    for vehicle in state.fleet or []:
+        for order in vehicle.on_board_orders:
+            if str(order.request_id) == request_id:
+                return order, "riding", vehicle
+
+        matched_steps = [
+            step
+            for step in vehicle.planned_route
+            if str(step["order"].request_id) == request_id
+        ]
+        if matched_steps:
+            order = matched_steps[0]["order"]
+            has_pickup_step = any(step["type"] == "O" for step in matched_steps)
+            return order, "waiting" if has_pickup_step else "riding", vehicle
+
+    for order in CoreDispatcher.completed_orders_pool:
+        if str(order.request_id) == request_id:
+            status = getattr(order, "status", None) or "completed"
+            return order, status, None
+
+    return None, None, None
+
+
+def _order_eta_response(order, order_status, vehicle):
+    """组装乘客端订单 ETA 响应。"""
+    estimated_arrival_time = (
+        getattr(order, "estimated_arrival_time", None)
+        if getattr(order, "estimated_arrival_time", None) is not None
+        else getattr(order, "actual_pick_time", None)
+    )
+    estimated_dropoff_time = (
+        getattr(order, "estimated_dropoff_time", None)
+        if getattr(order, "estimated_dropoff_time", None) is not None
+        else getattr(order, "completion_time", None)
+    )
+    eta_status = getattr(order, "eta_status", None)
+    if eta_status is None:
+        if order_status == "matching":
+            eta_status = "not_assigned"
+        elif order_status in {"completed", "cancelled"}:
+            eta_status = order_status
+        else:
+            eta_status = "pending"
+
+    return {
+        "request_id": str(order.request_id),
+        "status": order_status,
+        "vehicle": (
+            {
+                "id": vehicle.id,
+                "plate_no": vehicle.plate_no,
+            }
+            if vehicle is not None
+            else None
+        ),
+        "origin": _order_node_to_dict(order.o_node),
+        "destination": _order_node_to_dict(order.d_node),
+        "eta": {
+            "provider": "amap",
+            "status": eta_status,
+            "updated_at": getattr(order, "eta_updated_at", None),
+            "updated_at_text": _format_optional_timestamp(getattr(order, "eta_updated_at", None)),
+            "estimated_arrival_time": estimated_arrival_time,
+            "estimated_arrival_time_text": _format_optional_timestamp(estimated_arrival_time),
+            "estimated_arrival_eta_seconds": getattr(order, "estimated_arrival_eta_seconds", None),
+            "estimated_dropoff_time": estimated_dropoff_time,
+            "estimated_dropoff_time_text": _format_optional_timestamp(estimated_dropoff_time),
+            "estimated_dropoff_eta_seconds": getattr(order, "estimated_dropoff_eta_seconds", None),
+            "error": getattr(order, "eta_error", None),
+        },
     }
 
 
@@ -312,6 +493,22 @@ def get_order_pool():
         })
 
 
+@bp.route("/orders/<request_id>/eta", methods=["GET"])
+def get_order_eta(request_id):
+    """乘客端按订单号查询预计接驾到达和预计送达时间。"""
+    if not state.system_initialized:
+        return jsonify({"error": "系统未初始化"}), 400
+
+    with state.state_lock:
+        order, order_status, vehicle = _find_order_eta_context(request_id)
+        if order is None:
+            return jsonify({
+                "error": "订单未找到",
+                "request_id": str(request_id),
+            }), 404
+        return jsonify(_order_eta_response(order, order_status, vehicle))
+
+
 @bp.route("/orders/<request_id>/cancel", methods=["POST"])
 def cancel_order(request_id):
     """乘客端取消未上车订单。
@@ -391,7 +588,7 @@ def update_vehicle_path(vehicle_id):
             lat/latitude (float): 车辆当前 GPS 纬度。
 
     Returns:
-        JSON: 吸附点、更新后的 planned_route_point、上下客变更和车辆订单状态。
+        JSON: 车辆 GPS、路网吸附、后续轨迹、上下客事件和订单状态。
     """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
@@ -417,14 +614,17 @@ def update_vehicle_path(vehicle_id):
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
-        path_result = CoreDispatcher.rebuild_vehicle_path_from_gps(target_vehicle, state.city, lon, lat)
+        path_result = CoreDispatcher.rebuild_vehicle_path_from_gps(
+            target_vehicle,
+            state.city,
+            lon,
+            lat,
+            current_timestamp=state.now_timestamp(),
+        )
     if path_result is None:
         return jsonify({"error": "当前订单计划中存在不可达路段"}), 409
 
-    return jsonify({
-        "vehicle_id": target_vehicle.id,
-        **path_result,
-    })
+    return jsonify(_path_result_to_response(target_vehicle, path_result))
 
 
 @bp.route("/fleet/<vehicle_id>/rest", methods=["POST"])

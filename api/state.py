@@ -14,13 +14,14 @@ from .core import CoreDispatcher
 
 # ============================================================
 # 功能一：Flask 进程内共享运行状态与统一业务时间
-# 相关变量：city、fleet、matching_thread、clock_thread、system_initialized
+# 相关变量：city、fleet、matching_thread、clock_thread、eta_thread、route_grasp_thread、system_initialized
 # ============================================================
 
 city = None
 fleet = None
 matching_thread = None
 clock_thread = None
+eta_thread = None
 system_initialized = False
 state_lock = threading.RLock()
 
@@ -28,6 +29,7 @@ TIMEZONE_NAME = "Asia/Shanghai"
 BUSINESS_TIMEZONE = timezone(timedelta(hours=8), TIMEZONE_NAME)
 TIME_MODE = "real_time"
 CLOCK_INTERVAL_SECONDS = 1.0
+ETA_REFRESH_INTERVAL_SECONDS = CoreDispatcher.ETA_REFRESH_INTERVAL_SECONDS
 clock_last_timestamp = None
 clock_last_dt = 0.0
 clock_tick_count = 0
@@ -80,6 +82,24 @@ def current_time():
         "clock_running": clock_thread is not None and clock_thread.is_alive(),
         "clock_last_dt": clock_last_dt,
         "clock_tick_count": clock_tick_count,
+        "eta_refresh_interval_seconds": ETA_REFRESH_INTERVAL_SECONDS,
+        "eta_thread_running": eta_thread is not None and eta_thread.is_alive(),
+        "eta_last_refresh_timestamp": CoreDispatcher.eta_last_refresh_timestamp,
+        "eta_last_refresh_time_text": (
+            format_timestamp(CoreDispatcher.eta_last_refresh_timestamp)
+            if CoreDispatcher.eta_last_refresh_timestamp is not None
+            else None
+        ),
+        "route_grasp_mode": "on_route_update_async",
+        "route_grasp_async_enabled": CoreDispatcher.route_grasp_auto_submit_enabled,
+        "route_grasp_inflight_count": CoreDispatcher.route_grasp_inflight_count(),
+        "route_grasp_thread_running": False,
+        "route_grasp_last_refresh_timestamp": CoreDispatcher.route_grasp_last_refresh_timestamp,
+        "route_grasp_last_refresh_time_text": (
+            format_timestamp(CoreDispatcher.route_grasp_last_refresh_timestamp)
+            if CoreDispatcher.route_grasp_last_refresh_timestamp is not None
+            else None
+        ),
     }
 
 
@@ -104,6 +124,31 @@ def refresh_runtime_state(current_timestamp=None):
         return dt
 
 
+def refresh_order_etas_if_due(current_timestamp=None, force=False, service=None):
+    """委托 CoreDispatcher 刷新订单 ETA；保留为测试和手动触发入口。"""
+    current_timestamp = float(current_timestamp if current_timestamp is not None else now_timestamp())
+    return CoreDispatcher.refresh_order_etas_if_due(
+        fleet,
+        city,
+        state_lock,
+        current_timestamp=current_timestamp,
+        force=force,
+        service=service,
+    )
+
+
+def refresh_route_grasps_if_due(current_timestamp=None, force=False, service=None):
+    """委托 CoreDispatcher 刷新车辆路线纠偏；保留为测试和手动触发入口。"""
+    current_timestamp = float(current_timestamp if current_timestamp is not None else now_timestamp())
+    return CoreDispatcher.refresh_route_grasps_if_due(
+        fleet,
+        state_lock,
+        current_timestamp=current_timestamp,
+        force=force,
+        service=service,
+    )
+
+
 def _clock_loop():
     """后台真实时间时钟线程。"""
     global clock_last_timestamp
@@ -111,7 +156,20 @@ def _clock_loop():
     clock_last_timestamp = now_timestamp()
     while True:
         time.sleep(CLOCK_INTERVAL_SECONDS)
-        refresh_runtime_state()
+        current_timestamp = now_timestamp()
+        refresh_runtime_state(current_timestamp)
+
+
+def _eta_loop():
+    """后台高德 ETA 刷新线程；独立于车辆时钟线程运行。"""
+    while True:
+        time.sleep(ETA_REFRESH_INTERVAL_SECONDS)
+        refresh_order_etas_if_due(now_timestamp(), force=True)
+
+
+def _route_grasp_loop():
+    """后台路线纠偏线程；独立于车辆时钟和订单 ETA 线程运行。"""
+    return None
 
 
 def start_clock_thread():
@@ -129,6 +187,30 @@ def start_clock_thread():
     )
     clock_thread.start()
     return clock_thread
+
+
+def start_eta_thread():
+    """启动后台订单 ETA 刷新线程；已启动时直接复用。"""
+    global eta_thread
+
+    if eta_thread is not None and eta_thread.is_alive():
+        return eta_thread
+
+    eta_thread = threading.Thread(
+        target=_eta_loop,
+        daemon=True,
+        name="OrderEtaRefreshEngine",
+    )
+    eta_thread.start()
+    return eta_thread
+
+
+def start_route_grasp_thread():
+    """启动后台路线纠偏线程；已启动时直接复用。"""
+    # 兼容入口：只启用路线更新触发式异步纠偏，不再启动周期扫描线程。
+    CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+    CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+    return None
 
 
 # ============================================================
@@ -189,7 +271,7 @@ def _seed_completed_orders(city_map, count=30):
 # 相关方法：init_system
 # ============================================================
 
-def init_system(shp_path="dxc_traffic_mars_shp/dxc_rule_tran.shp"):
+def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
     """加载路网、创建车队、注入测试历史订单并启动后台匹配引擎。
 
     Args:
@@ -200,7 +282,7 @@ def init_system(shp_path="dxc_traffic_mars_shp/dxc_rule_tran.shp"):
 
     Side Effects:
         更新模块级 city、fleet、matching_thread、system_initialized。
-        启动一个 daemon 后台线程持续处理订单池匹配和空车停靠预测。
+        启动后台匹配线程、真实时间线程、路线纠偏线程和订单 ETA 刷新线程。
     """
     global city, fleet, matching_thread, system_initialized
 
@@ -226,6 +308,8 @@ def init_system(shp_path="dxc_traffic_mars_shp/dxc_rule_tran.shp"):
         fleet[2].driver_id, fleet[2].driver_no = "700045866645053333", "6800C333"
         fleet[2].vehicle_id, fleet[2].plate_no = "72057594546145555", "粤A00003"
 
+        CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+
         for v in fleet:
             CoreDispatcher.refresh_vehicle_route_metadata(v, city)
 
@@ -241,3 +325,4 @@ def init_system(shp_path="dxc_traffic_mars_shp/dxc_rule_tran.shp"):
     )
     matching_thread.start()
     start_clock_thread()
+    start_eta_thread()

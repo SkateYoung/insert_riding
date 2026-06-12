@@ -177,6 +177,8 @@
             <span style="--line-color:#a855f7;">高德轨迹纠偏结果</span>
             <span style="--line-color:#22c55e;">高德驾车规划路线</span>
             <span style="--line-color:#60a5fa;">后端算法原始轨迹</span>
+            <span style="--line-color:#16a34a;">订单上客点 O</span>
+            <span style="--line-color:#e11d48;">订单下客点 D</span>
         </div>
 
         <div id="status" class="status">等待地图加载...</div>
@@ -239,7 +241,7 @@
         function normalizeRoutePoints(data) {
             const source = Array.isArray(data)
                 ? data
-                : (data.planned_route_point || data.path || []);
+                : (data.route?.points || data.planned_route_point || data.path || []);
 
             return source
                 .map(normalizePoint)
@@ -295,6 +297,42 @@
             });
             markers.push(marker);
             map.add(marker);
+        }
+
+        function addOdMarker(segment, index) {
+            if (!segment.target) {
+                return;
+            }
+
+            const isOrigin = segment.type === "O";
+            const label = isOrigin ? "O" : "D";
+            const color = isOrigin ? "#16a34a" : "#e11d48";
+            const title = [
+                isOrigin ? "上客点" : "下客点",
+                segment.requestId ? `订单 ${segment.requestId}` : null,
+                segment.targetName || null
+            ].filter(Boolean).join(" - ");
+            const marker = new AMap.Marker({
+                position: [segment.target.lon, segment.target.lat],
+                offset: new AMap.Pixel(-12, -28),
+                title,
+                content: [
+                    `<div style="position:relative;width:24px;height:42px;">`,
+                    `<div style="display:grid;place-items:center;width:24px;height:24px;`,
+                    `border-radius:50%;background:${color};color:#fff;border:2px solid #fff;`,
+                    `font-size:12px;font-weight:800;box-shadow:0 2px 10px rgba(0,0,0,.35);">${label}</div>`,
+                    `<div style="position:absolute;transform:translate(-50%,2px);left:50%;top:26px;`,
+                    `background:rgba(15,23,42,.86);color:#fff;border-radius:4px;padding:1px 4px;`,
+                    `font-size:10px;line-height:14px;white-space:nowrap;">${index + 1}</div>`,
+                    `</div>`
+                ].join("")
+            });
+            markers.push(marker);
+            map.add(marker);
+        }
+
+        function drawOdMarkers(orderSegments) {
+            orderSegments.forEach((segment, index) => addOdMarker(segment, index));
         }
 
         function sampleControlPoints(points, maxCount) {
@@ -478,6 +516,153 @@
             });
         }
 
+        function isOrderSegment(segment) {
+            return segment
+                && (segment.type === "O" || segment.type === "D")
+                && segment.request_id !== undefined
+                && segment.request_id !== null;
+        }
+
+        function appendPointIfDifferent(path, point) {
+            if (!point) {
+                return;
+            }
+            const last = path[path.length - 1];
+            if (!last || distanceMeters(last, point) > 1) {
+                path.push(point);
+            }
+        }
+
+        function prependPointIfDifferent(path, point) {
+            if (!point) {
+                return;
+            }
+            const first = path[0];
+            if (!first || distanceMeters(first, point) > 1) {
+                path.unshift(point);
+            }
+        }
+
+        function extractOrderSegments(rawData) {
+            const rawSegments = Array.isArray(rawData?.route?.segments)
+                ? rawData.route.segments
+                : (Array.isArray(rawData?.segments) ? rawData.segments : []);
+            const routePoints = normalizeRoutePoints(rawData);
+            const currentPoint = routePoints[0] || null;
+
+            const orderSegments = rawSegments
+                .filter(isOrderSegment)
+                .map((segment, index) => {
+                    const targetSource = segment.target || segment.target_node;
+                    const target = normalizePoint(targetSource);
+                    const path = normalizeRoutePoints(segment.points || segment.path || []);
+                    appendPointIfDifferent(path, target);
+                    return {
+                        index,
+                        type: segment.type,
+                        requestId: segment.request_id,
+                        targetName: targetSource?.name || "",
+                        target,
+                        path
+                    };
+                })
+                .filter(segment => segment.target && segment.path.length >= 2);
+
+            if (orderSegments.length) {
+                prependPointIfDifferent(orderSegments[0].path, currentPoint);
+            }
+
+            return orderSegments;
+        }
+
+        async function convertOrderSegmentsIfNeeded(orderSegments) {
+            const convertedSegments = [];
+            for (const segment of orderSegments) {
+                const path = await convertPointsIfNeeded(segment.path);
+                if (path.length < 2) {
+                    continue;
+                }
+                convertedSegments.push({
+                    ...segment,
+                    path,
+                    target: path[path.length - 1]
+                });
+            }
+            return convertedSegments;
+        }
+
+        function appendMergedPath(mergedPath, path) {
+            if (!path.length) {
+                return;
+            }
+            if (!mergedPath.length) {
+                mergedPath.push(...path);
+                return;
+            }
+
+            const last = mergedPath[mergedPath.length - 1];
+            const first = path[0];
+            if (distanceMeters(last, first) <= 2) {
+                mergedPath.push(...path.slice(1));
+            } else {
+                mergedPath.push(...path);
+            }
+        }
+
+        async function correctOrderSegmentsByGraspRoad(orderSegments, onProgress) {
+            const mergedPath = [];
+            const segmentResults = [];
+            let inputCount = 0;
+            let distance = 0;
+
+            for (let i = 0; i < orderSegments.length; i += 1) {
+                const segment = orderSegments[i];
+                if (onProgress) {
+                    onProgress(segment, i, orderSegments.length);
+                }
+
+                try {
+                    const corrected = await correctRouteByGraspRoad(segment.path);
+                    appendMergedPath(mergedPath, corrected.path);
+                    inputCount += corrected.inputCount;
+                    distance += Number(corrected.distance) || 0;
+                    segmentResults.push({
+                        ...segment,
+                        correctedCount: corrected.path.length,
+                        inputCount: corrected.inputCount,
+                        distance: corrected.distance,
+                        fallback: false
+                    });
+                } catch (error) {
+                    const fallbackInputCount = Math.min(segment.path.length, MAX_GRASP_ROAD_POINTS);
+                    appendMergedPath(mergedPath, segment.path);
+                    inputCount += fallbackInputCount;
+                    segmentResults.push({
+                        ...segment,
+                        correctedCount: segment.path.length,
+                        inputCount: fallbackInputCount,
+                        distance: null,
+                        fallback: true,
+                        error: error.message
+                    });
+                }
+
+                await sleep(120);
+            }
+
+            if (mergedPath.length < 2) {
+                throw new Error("分段纠偏未生成有效轨迹");
+            }
+
+            return {
+                path: mergedPath,
+                segments: segmentResults,
+                inputCount,
+                distance,
+                fallbackCount: segmentResults.filter(segment => segment.fallback).length
+            };
+        }
+
         function drawAmapDrivingSegments(segmentPaths) {
             amapPolylines = segmentPaths.map(path => new AMap.Polyline({
                 path: asPath(path),
@@ -569,6 +754,8 @@
             drawBackendReference(points);
             addMarker(points[0], "起", "#2563eb");
             addMarker(points[points.length - 1], "终", "#dc2626");
+            const orderSegments = await convertOrderSegmentsIfNeeded(extractOrderSegments(rawPoints));
+            drawOdMarkers(orderSegments);
 
             try {
                 if (routeModeInput.value === "backend") {
@@ -577,23 +764,45 @@
                     setStatus([
                         title,
                         `后端轨迹点：${validPoints.length}`,
+                        orderSegments.length ? `订单OD点：${orderSegments.length}` : null,
                         "当前为直接绘制后端原始轨迹。"
-                    ].join("\n"));
+                    ].filter(Boolean).join("\n"));
                     return;
                 }
 
                 if (routeModeInput.value === "grasproad") {
-                    setStatus(`${title}\n正在调用高德官方轨迹纠偏服务...`);
-                    const corrected = await correctRouteByGraspRoad(points);
+                    let corrected = null;
+                    if (orderSegments.length) {
+                        corrected = await correctOrderSegmentsByGraspRoad(
+                            orderSegments,
+                            (segment, index, total) => {
+                                const actionText = segment.type === "O" ? "上客点" : "下客点";
+                                setStatus([
+                                    title,
+                                    `正在按订单OD分段调用高德轨迹纠偏：第 ${index + 1}/${total} 段`,
+                                    `${actionText}：订单 ${segment.requestId}`,
+                                    segment.targetName ? `目标点：${segment.targetName}` : null
+                                ].filter(Boolean).join("\n"));
+                            }
+                        );
+                    } else {
+                        setStatus(`${title}\n正在调用高德官方轨迹纠偏服务...`);
+                        corrected = await correctRouteByGraspRoad(points);
+                    }
                     drawGraspRoadRoute(corrected.path);
                     fitRouteView();
                     setStatus([
                         title,
                         `后端轨迹点：${validPoints.length}`,
+                        orderSegments.length ? `订单OD点：${orderSegments.length}` : null,
+                        orderSegments.length ? `分段纠偏数：${corrected.segments.length}` : null,
                         `纠偏输入点：${corrected.inputCount}`,
                         `纠偏返回点：${corrected.path.length}`,
                         corrected.distance ? `纠偏里程：${Number(corrected.distance).toFixed(0)} 米` : null,
-                        "紫色路线为高德 GraspRoad 轨迹纠偏结果，蓝色虚线为后端原始轨迹参考。"
+                        corrected.fallbackCount ? `纠偏失败回退分段：${corrected.fallbackCount}` : null,
+                        orderSegments.length
+                            ? "紫色路线为按订单OD分段后的高德 GraspRoad 纠偏合并结果，O/D 点为订单上下客点。"
+                            : "紫色路线为高德 GraspRoad 轨迹纠偏结果，蓝色虚线为后端原始轨迹参考。"
                     ].filter(Boolean).join("\n"));
                     return;
                 }

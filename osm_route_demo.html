@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="initial-scale=1.0, user-scalable=no, width=device-width">
+    <title>OSM 地图 - 后端轨迹展示 Demo</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        html,
+        body,
+        #container {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #111827;
+        }
+
+        .panel {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            width: 340px;
+            max-width: calc(100vw - 32px);
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            background: rgba(17, 24, 39, 0.92);
+            color: #e5e7eb;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+            padding: 14px;
+            z-index: 999;
+            box-sizing: border-box;
+        }
+
+        .panel h2 {
+            margin: 0 0 10px;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .field {
+            display: grid;
+            gap: 4px;
+            margin-bottom: 10px;
+        }
+
+        .field label {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid #374151;
+            border-radius: 6px;
+            background: #0f172a;
+            color: #e5e7eb;
+            padding: 8px;
+            font-size: 13px;
+            outline: none;
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 12px 0;
+        }
+
+        button {
+            border: 0;
+            border-radius: 6px;
+            padding: 9px 10px;
+            color: #ffffff;
+            background: #2563eb;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        button.secondary {
+            background: #475569;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+
+        .status {
+            white-space: pre-wrap;
+            font-size: 12px;
+            line-height: 1.55;
+            color: #cbd5e1;
+            border-top: 1px solid rgba(148, 163, 184, 0.25);
+            padding-top: 10px;
+        }
+
+        .legend {
+            display: grid;
+            gap: 6px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #cbd5e1;
+        }
+
+        .legend span::before {
+            content: "";
+            display: inline-block;
+            width: 22px;
+            height: 3px;
+            margin-right: 8px;
+            vertical-align: middle;
+            border-radius: 999px;
+            background: var(--line-color);
+        }
+
+        .route-marker {
+            display: grid;
+            place-items: center;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            color: #fff;
+            border: 2px solid #fff;
+            font-size: 12px;
+            font-weight: 700;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container"></div>
+
+    <section class="panel">
+        <h2>后端轨迹转 OSM 路线</h2>
+
+        <div class="field">
+            <label for="apiBaseInput">后端地址</label>
+            <input id="apiBaseInput" value="http://127.0.0.1:5000">
+        </div>
+
+        <div class="field">
+            <label for="vehicleSelect">车辆</label>
+            <select id="vehicleSelect"></select>
+        </div>
+
+        <div class="field">
+            <label for="coordTypeInput">后端轨迹坐标类型</label>
+            <select id="coordTypeInput">
+                <option value="gcj02" selected>高德/GCJ-02，转 OSM/WGS84</option>
+                <option value="none">已是 OSM/WGS84，不转换</option>
+                <option value="bd09">百度/BD-09，转 OSM/WGS84</option>
+            </select>
+        </div>
+
+        <div class="field">
+            <label for="routeModeInput">展示方式</label>
+            <select id="routeModeInput">
+                <option value="match">OSRM 轨迹匹配</option>
+                <option value="route">OSRM 驾车规划</option>
+                <option value="backend">直接绘制后端轨迹</option>
+            </select>
+        </div>
+
+        <div class="actions">
+            <button id="refreshBtn">刷新后端轨迹</button>
+            <button id="loadFleetBtn" class="secondary">重新加载车辆</button>
+        </div>
+
+        <div class="legend">
+            <span style="--line-color:#a855f7;">OSRM 轨迹匹配结果</span>
+            <span style="--line-color:#22c55e;">OSRM 驾车规划路线</span>
+            <span style="--line-color:#60a5fa;">后端算法原始轨迹</span>
+        </div>
+
+        <div id="status" class="status">等待地图加载...</div>
+    </section>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const MAX_CONTROL_POINTS = 80;
+        const MAX_OSRM_ROUTE_POINTS_PER_REQUEST = 24;
+        const MAX_OSRM_MATCH_POINTS = 80;
+        const OSRM_DELAY_MS = 160;
+        const OSRM_BASE_URL = "https://router.project-osrm.org";
+
+        const map = L.map("container", {
+            zoomControl: true
+        }).setView([23.050, 113.400], 14);
+
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        const statusEl = document.getElementById("status");
+        const apiBaseInput = document.getElementById("apiBaseInput");
+        const vehicleSelect = document.getElementById("vehicleSelect");
+        const coordTypeInput = document.getElementById("coordTypeInput");
+        const routeModeInput = document.getElementById("routeModeInput");
+        const refreshBtn = document.getElementById("refreshBtn");
+        const loadFleetBtn = document.getElementById("loadFleetBtn");
+
+        let backendPolyline = null;
+        let routeLayers = [];
+        let markers = [];
+        let fleetById = new Map();
+
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
+
+        function setBusy(isBusy) {
+            refreshBtn.disabled = isBusy;
+            loadFleetBtn.disabled = isBusy;
+            vehicleSelect.disabled = isBusy;
+        }
+
+        function toNumber(value) {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        function normalizePoint(point) {
+            if (Array.isArray(point)) {
+                const lon = toNumber(point[0]);
+                const lat = toNumber(point[1]);
+                return lon === null || lat === null ? null : { lon, lat };
+            }
+
+            const lon = toNumber(point.lon ?? point.lng ?? point.longitude ?? point.x);
+            const lat = toNumber(point.lat ?? point.latitude ?? point.y);
+            return lon === null || lat === null ? null : { lon, lat };
+        }
+
+        function normalizeRoutePoints(data) {
+            const source = Array.isArray(data)
+                ? data
+                : (data.route?.points || data.planned_route_point || data.path || []);
+
+            return source
+                .map(normalizePoint)
+                .filter(Boolean);
+        }
+
+        function asLeafletPath(points) {
+            return points.map(point => [point.lat, point.lon]);
+        }
+
+        function asOsrmCoordinates(points) {
+            return points
+                .map(point => `${point.lon.toFixed(6)},${point.lat.toFixed(6)}`)
+                .join(";");
+        }
+
+        function clearOverlays() {
+            if (backendPolyline) {
+                map.removeLayer(backendPolyline);
+                backendPolyline = null;
+            }
+
+            for (const layer of routeLayers) {
+                map.removeLayer(layer);
+            }
+            routeLayers = [];
+
+            for (const marker of markers) {
+                map.removeLayer(marker);
+            }
+            markers = [];
+        }
+
+        function drawBackendReference(points) {
+            backendPolyline = L.polyline(asLeafletPath(points), {
+                color: "#60a5fa",
+                weight: 4,
+                opacity: 0.55,
+                dashArray: "8 8",
+                lineJoin: "round",
+                lineCap: "round"
+            }).addTo(map);
+        }
+
+        function drawRoute(path, color) {
+            const layer = L.polyline(asLeafletPath(path), {
+                color,
+                weight: 7,
+                opacity: 0.9,
+                lineJoin: "round",
+                lineCap: "round"
+            }).addTo(map);
+            routeLayers.push(layer);
+        }
+
+        function drawRouteSegments(segmentPaths, color) {
+            for (const path of segmentPaths) {
+                drawRoute(path, color);
+            }
+        }
+
+        function addMarker(point, label, color) {
+            const marker = L.marker([point.lat, point.lon], {
+                icon: L.divIcon({
+                    className: "",
+                    html: `<div class="route-marker" style="background:${color};">${label}</div>`,
+                    iconSize: [26, 26],
+                    iconAnchor: [13, 26]
+                })
+            }).addTo(map);
+            markers.push(marker);
+        }
+
+        function fitRouteView() {
+            const layers = [
+                backendPolyline,
+                ...routeLayers,
+                ...markers
+            ].filter(Boolean);
+
+            if (!layers.length) {
+                return;
+            }
+
+            const group = L.featureGroup(layers);
+            map.fitBounds(group.getBounds(), {
+                paddingTopLeft: [380, 60],
+                paddingBottomRight: [60, 60],
+                maxZoom: 17
+            });
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function sampleControlPoints(points, maxCount) {
+            if (points.length <= maxCount) {
+                return points.slice();
+            }
+
+            const result = [points[0]];
+            const innerCount = maxCount - 2;
+            for (let i = 1; i <= innerCount; i += 1) {
+                const index = Math.round((i * (points.length - 1)) / (innerCount + 1));
+                result.push(points[index]);
+            }
+            result.push(points[points.length - 1]);
+            return result;
+        }
+
+        function buildRouteGroups(points) {
+            const controlPoints = sampleControlPoints(points, MAX_CONTROL_POINTS);
+            const groups = [];
+            let startIndex = 0;
+
+            while (startIndex < controlPoints.length - 1) {
+                const endIndex = Math.min(
+                    startIndex + MAX_OSRM_ROUTE_POINTS_PER_REQUEST - 1,
+                    controlPoints.length - 1
+                );
+                groups.push(controlPoints.slice(startIndex, endIndex + 1));
+                startIndex = endIndex;
+            }
+
+            return { controlPoints, groups };
+        }
+
+        function parseOsrmGeometry(geometry) {
+            if (!geometry || geometry.type !== "LineString" || !Array.isArray(geometry.coordinates)) {
+                return [];
+            }
+
+            return geometry.coordinates
+                .map(([lon, lat]) => ({ lon: Number(lon), lat: Number(lat) }))
+                .filter(point => Number.isFinite(point.lon) && Number.isFinite(point.lat));
+        }
+
+        async function requestOsrmJson(path, params) {
+            const url = `${OSRM_BASE_URL}${path}?${params.toString()}`;
+            const response = await fetch(url);
+            const data = await response.json().catch(() => ({}));
+
+            if (!response.ok || data.code !== "Ok") {
+                const reason = data.message || data.code || `HTTP ${response.status}`;
+                throw new Error(reason);
+            }
+
+            return data;
+        }
+
+        async function searchOsrmRoute(group) {
+            const params = new URLSearchParams({
+                overview: "full",
+                geometries: "geojson",
+                alternatives: "false",
+                steps: "false"
+            });
+            const coords = asOsrmCoordinates(group);
+            const data = await requestOsrmJson(`/route/v1/driving/${coords}`, params);
+            const route = data.routes && data.routes[0];
+            const path = parseOsrmGeometry(route && route.geometry);
+
+            if (path.length < 2) {
+                throw new Error("OSRM 未返回有效路线");
+            }
+
+            return path;
+        }
+
+        async function searchOsrmMatch(points) {
+            const sampledPoints = sampleControlPoints(points, MAX_OSRM_MATCH_POINTS);
+            const params = new URLSearchParams({
+                overview: "full",
+                geometries: "geojson",
+                steps: "false"
+            });
+            const coords = asOsrmCoordinates(sampledPoints);
+            const data = await requestOsrmJson(`/match/v1/driving/${coords}`, params);
+            const matchings = data.matchings || [];
+            const paths = matchings
+                .map(match => parseOsrmGeometry(match.geometry))
+                .filter(path => path.length >= 2);
+
+            if (!paths.length) {
+                throw new Error("OSRM 未返回有效匹配轨迹");
+            }
+
+            return {
+                inputCount: sampledPoints.length,
+                paths
+            };
+        }
+
+        function outOfChina(lon, lat) {
+            return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
+        }
+
+        function transformLat(x, y) {
+            let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+            ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin(y / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (160.0 * Math.sin(y / 12.0 * Math.PI) + 320 * Math.sin(y * Math.PI / 30.0)) * 2.0 / 3.0;
+            return ret;
+        }
+
+        function transformLon(x, y) {
+            let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+            ret += (20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0 / 3.0;
+            ret += (20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin(x / 3.0 * Math.PI)) * 2.0 / 3.0;
+            ret += (150.0 * Math.sin(x / 12.0 * Math.PI) + 300.0 * Math.sin(x / 30.0 * Math.PI)) * 2.0 / 3.0;
+            return ret;
+        }
+
+        function gcj02ToWgs84(point) {
+            const lon = point.lon;
+            const lat = point.lat;
+            if (outOfChina(lon, lat)) {
+                return { lon, lat };
+            }
+
+            const axis = 6378245.0;
+            const offset = 0.00669342162296594323;
+            let dLat = transformLat(lon - 105.0, lat - 35.0);
+            let dLon = transformLon(lon - 105.0, lat - 35.0);
+            const radLat = lat / 180.0 * Math.PI;
+            let magic = Math.sin(radLat);
+            magic = 1 - offset * magic * magic;
+            const sqrtMagic = Math.sqrt(magic);
+            dLat = (dLat * 180.0) / ((axis * (1 - offset)) / (magic * sqrtMagic) * Math.PI);
+            dLon = (dLon * 180.0) / (axis / sqrtMagic * Math.cos(radLat) * Math.PI);
+            const mgLat = lat + dLat;
+            const mgLon = lon + dLon;
+            return {
+                lon: lon * 2 - mgLon,
+                lat: lat * 2 - mgLat
+            };
+        }
+
+        function bd09ToGcj02(point) {
+            const x = point.lon - 0.0065;
+            const y = point.lat - 0.006;
+            const z = Math.sqrt(x * x + y * y) - 0.00002 * Math.sin(y * Math.PI * 3000.0 / 180.0);
+            const theta = Math.atan2(y, x) - 0.000003 * Math.cos(x * Math.PI * 3000.0 / 180.0);
+            return {
+                lon: z * Math.cos(theta),
+                lat: z * Math.sin(theta)
+            };
+        }
+
+        function convertPointsIfNeeded(points) {
+            const coordType = coordTypeInput.value;
+            if (coordType === "none") {
+                return points;
+            }
+            if (coordType === "gcj02") {
+                return points.map(gcj02ToWgs84);
+            }
+            if (coordType === "bd09") {
+                return points.map(point => gcj02ToWgs84(bd09ToGcj02(point)));
+            }
+            return points;
+        }
+
+        async function renderRouteByOsm(rawPoints, title) {
+            const validPoints = normalizeRoutePoints(rawPoints);
+            if (validPoints.length < 2) {
+                throw new Error("轨迹点不足，无法绘制路线");
+            }
+
+            setBusy(true);
+            clearOverlays();
+
+            const points = convertPointsIfNeeded(validPoints);
+            drawBackendReference(points);
+            addMarker(points[0], "起", "#2563eb");
+            addMarker(points[points.length - 1], "终", "#dc2626");
+
+            try {
+                if (routeModeInput.value === "backend") {
+                    drawRoute(points, "#f97316");
+                    fitRouteView();
+                    setStatus([
+                        title,
+                        `后端轨迹点：${validPoints.length}`,
+                        "当前为直接绘制后端原始轨迹。"
+                    ].join("\n"));
+                    return;
+                }
+
+                if (routeModeInput.value === "match") {
+                    setStatus(`${title}\n正在调用 OSRM 轨迹匹配服务...`);
+                    const matched = await searchOsrmMatch(points);
+                    drawRouteSegments(matched.paths, "#a855f7");
+                    fitRouteView();
+                    setStatus([
+                        title,
+                        `后端轨迹点：${validPoints.length}`,
+                        `匹配输入点：${matched.inputCount}`,
+                        `匹配返回分段：${matched.paths.length}`,
+                        `匹配返回点：${matched.paths.reduce((sum, path) => sum + path.length, 0)}`,
+                        "紫色路线为 OSRM 轨迹匹配结果，蓝色虚线为后端原始轨迹参考。"
+                    ].join("\n"));
+                    return;
+                }
+
+                const { controlPoints, groups } = buildRouteGroups(points);
+                const segmentPaths = [];
+                for (let i = 0; i < groups.length; i += 1) {
+                    setStatus(`${title}\n正在调用 OSRM 驾车规划：第 ${i + 1}/${groups.length} 段...`);
+                    segmentPaths.push(await searchOsrmRoute(groups[i]));
+                    await sleep(OSRM_DELAY_MS);
+                }
+
+                drawRouteSegments(segmentPaths, "#22c55e");
+                fitRouteView();
+                setStatus([
+                    title,
+                    `后端轨迹点：${validPoints.length}`,
+                    `OSRM 控制点：${controlPoints.length}`,
+                    `OSRM 规划分段：${groups.length}`,
+                    "绿色路线为 OSRM 驾车规划结果，蓝色虚线为后端原始轨迹参考。"
+                ].join("\n"));
+            } catch (error) {
+                drawRoute(points, "#f97316");
+                fitRouteView();
+                setStatus([
+                    title,
+                    error.message,
+                    "已回退为直接绘制后端原始轨迹。"
+                ].join("\n"));
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        function getApiBase() {
+            const apiBase = apiBaseInput.value.trim().replace(/\/$/, "");
+            if (!apiBase) {
+                throw new Error("请填写后端地址");
+            }
+            return apiBase;
+        }
+
+        function getSelectedVehicle() {
+            const vehicleId = vehicleSelect.value;
+            const vehicle = fleetById.get(vehicleId);
+            if (!vehicle) {
+                throw new Error("请先加载车辆列表");
+            }
+
+            const gps = vehicle.gps || {};
+            const lon = toNumber(gps.lon);
+            const lat = toNumber(gps.lat);
+            if (lon === null || lat === null) {
+                throw new Error(`车辆 ${vehicleId} 暂无后端 GPS，无法请求路径更新`);
+            }
+
+            return { vehicle, lon, lat };
+        }
+
+        function fillVehicleSelect(fleet) {
+            fleetById = new Map();
+            vehicleSelect.innerHTML = "";
+
+            for (const vehicle of fleet) {
+                fleetById.set(vehicle.id, vehicle);
+                const option = document.createElement("option");
+                const gps = vehicle.gps || {};
+                const hasGps = Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
+                option.value = vehicle.id;
+                option.textContent = `${vehicle.id}${hasGps ? "" : "（无 GPS）"}`;
+                vehicleSelect.appendChild(option);
+            }
+        }
+
+        async function loadFleetFromBackend() {
+            const apiBase = getApiBase();
+            setStatus("正在从后端加载车辆列表...");
+
+            const response = await fetch(`${apiBase}/fleet`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `车队接口请求失败：${response.status}`);
+            }
+
+            const fleet = data.fleet || [];
+            fillVehicleSelect(fleet);
+            if (!fleet.length) {
+                throw new Error("后端未返回车辆，请先初始化系统");
+            }
+
+            setStatus(`已加载 ${fleet.length} 辆车。请选择车辆后刷新后端轨迹。`);
+            return fleet;
+        }
+
+        async function requestBackendPath() {
+            const apiBase = getApiBase();
+            const { vehicle, lon, lat } = getSelectedVehicle();
+
+            setStatus(`正在请求车辆 ${vehicle.id} 的后端路径更新接口...`);
+            const response = await fetch(`${apiBase}/fleet/${encodeURIComponent(vehicle.id)}/path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lon, lat })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `接口请求失败：${response.status}`);
+            }
+
+            await renderRouteByOsm(data, `车辆 ${vehicle.id} 路径更新成功\n后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`);
+        }
+
+        async function loadFleetAndRenderFirstAvailable() {
+            const fleet = await loadFleetFromBackend();
+            const firstVehicleWithGps = fleet.find(vehicle => {
+                const gps = vehicle.gps || {};
+                return Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
+            });
+
+            if (!firstVehicleWithGps) {
+                setStatus(`已加载 ${fleet.length} 辆车，但没有车辆带有后端 GPS。`);
+                return;
+            }
+
+            vehicleSelect.value = firstVehicleWithGps.id;
+            await requestBackendPath();
+        }
+
+        refreshBtn.addEventListener("click", () => {
+            requestBackendPath().catch(error => {
+                setBusy(false);
+                setStatus(error.message);
+            });
+        });
+
+        loadFleetBtn.addEventListener("click", () => {
+            loadFleetAndRenderFirstAvailable().catch(error => {
+                setBusy(false);
+                setStatus(error.message);
+            });
+        });
+
+        setStatus("OSM 地图已加载，正在加载车辆...");
+        loadFleetAndRenderFirstAvailable().catch(error => {
+            setBusy(false);
+            setStatus(error.message);
+        });
+    </script>
+</body>
+
+</html>

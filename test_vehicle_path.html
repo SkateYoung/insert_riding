@@ -339,8 +339,34 @@
          * @param {string} color 车辆轨迹颜色。
          * @returns {void}
          */
+        function getRoutePoints(data) {
+            return data?.route?.points || data?.planned_route_point || data?.path || [];
+        }
+
+        function getRouteSegments(data) {
+            return data?.route?.segments || data?.segments || [];
+        }
+
+        function getSnapPoint(data) {
+            if (data?.snap?.point) {
+                return {
+                    ...data.snap.point,
+                    distance_to_gps: data.snap.distance_to_gps
+                };
+            }
+            return data?.snapped_point || data?.snapped_node || null;
+        }
+
+        function getPathEvents(data) {
+            return data?.events || data?.changed_steps || [];
+        }
+
+        function getPathVehicleId(data) {
+            return data?.vehicle?.id || data?.vehicle_id || "-";
+        }
+
         function drawUpdatedPath(data, color = "#22c55e") {
-            const path = data.planned_route_point || data.path || [];
+            const path = getRoutePoints(data);
             if (path.length > 0) {
                 ctx.strokeStyle = color;
                 ctx.lineWidth = 4;
@@ -353,7 +379,7 @@
                 ctx.stroke();
             }
 
-            const snappedPoint = data.snapped_point || data.snapped_node;
+            const snappedPoint = getSnapPoint(data);
             if (snappedPoint) {
                 const p = worldToScreen(snappedPoint.lon, snappedPoint.lat);
                 ctx.fillStyle = color;
@@ -365,8 +391,9 @@
                 ctx.stroke();
             }
 
-            for (const segment of data.segments || []) {
-                const t = segment.target_node;
+            for (const segment of getRouteSegments(data)) {
+                const t = segment.target || segment.target_node;
+                if (!t) continue;
                 const p = worldToScreen(t.lon, t.lat);
                 ctx.fillStyle = segment.type === "O" ? "#38bdf8" : "#f97316";
                 ctx.beginPath();
@@ -394,13 +421,14 @@
 
             for (const item of successList) {
                 const data = item.data;
-                const snappedPoint = data.snapped_point || data.snapped_node;
-                const changedSteps = (data.changed_steps || []).map(step => {
+                const snappedPoint = getSnapPoint(data);
+                const changedSteps = getPathEvents(data).map(step => {
                     const action = step.action === "pickup" ? "接客" : "送客";
                     return `${action}${step.request_id}`;
                 }).join("，") || "无";
+                const plannedStepCount = data.route?.planned_step_count ?? data.planned_route_size ?? 0;
                 lines.push(
-                    `${data.vehicle_id}：任务 ${data.planned_route_size}，轨迹点 ${(data.planned_route_point || data.path || []).length}，上下客 ${changedSteps}`
+                    `${getPathVehicleId(data)}：任务 ${plannedStepCount}，轨迹点 ${getRoutePoints(data).length}，上下客 ${changedSteps}`
                 );
                 if (item.gps) {
                     lines.push(`  本轮 GPS：${item.gps.lon.toFixed(6)}, ${item.gps.lat.toFixed(6)}`);
@@ -459,11 +487,11 @@
          * @returns {{lon: number, lat: number}|null} 下一次模拟 GPS。
          */
         function advanceGpsForNextRequest(data) {
-            const points = (data.planned_route_point || data.path || [])
+            const points = getRoutePoints(data)
                 .filter(point => Number.isFinite(Number(point.lon)) && Number.isFinite(Number(point.lat)));
             if (points.length < 2) return null;
 
-            const snappedPoint = data.snapped_point || data.snapped_node || points[0];
+            const snappedPoint = getSnapPoint(data) || points[0];
             let current = { lon: Number(snappedPoint.lon), lat: Number(snappedPoint.lat) };
             let remainingDistance = 5;
             let nextPoint = null;

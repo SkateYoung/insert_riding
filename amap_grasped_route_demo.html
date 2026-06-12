@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="initial-scale=1.0, user-scalable=no, width=device-width">
+    <title>高德纠偏路线展示</title>
+    <style>
+        html,
+        body,
+        #container {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: Arial, "Microsoft YaHei", sans-serif;
+            background: #0b1220;
+        }
+
+        .panel {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            z-index: 10;
+            width: 360px;
+            max-height: calc(100vh - 32px);
+            overflow: auto;
+            box-sizing: border-box;
+            padding: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.94);
+            color: #e5e7eb;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
+        }
+
+        .panel h1 {
+            margin: 0 0 12px;
+            font-size: 17px;
+            line-height: 1.3;
+        }
+
+        .field {
+            display: grid;
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+
+        .field label {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        input,
+        select,
+        button {
+            box-sizing: border-box;
+            width: 100%;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        input,
+        select {
+            border: 1px solid #334155;
+            padding: 8px;
+            outline: none;
+            background: #111827;
+            color: #f8fafc;
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 12px 0;
+        }
+
+        button {
+            border: 0;
+            padding: 9px 10px;
+            background: #2563eb;
+            color: #ffffff;
+            cursor: pointer;
+        }
+
+        button.secondary {
+            background: #475569;
+        }
+
+        button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        .legend {
+            display: grid;
+            gap: 7px;
+            margin: 10px 0;
+            font-size: 12px;
+            color: #cbd5e1;
+        }
+
+        .legend span::before {
+            content: "";
+            display: inline-block;
+            width: 26px;
+            height: 4px;
+            margin-right: 8px;
+            vertical-align: middle;
+            border-radius: 999px;
+            background: var(--line-color);
+        }
+
+        .status {
+            border-top: 1px solid rgba(148, 163, 184, 0.25);
+            padding-top: 10px;
+            white-space: pre-wrap;
+            font-size: 12px;
+            line-height: 1.55;
+            color: #d1d5db;
+        }
+    </style>
+    <script>
+        window._AMapSecurityConfig = {
+            securityJsCode: "0b80fd2cbff37b5fa47b96173410c6ad"
+        };
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e&plugin=AMap.Scale,AMap.ToolBar"></script>
+</head>
+
+<body>
+    <div id="container"></div>
+
+    <section class="panel">
+        <h1>高德纠偏路线展示</h1>
+
+        <div class="field">
+            <label for="apiBaseInput">后端地址</label>
+            <input id="apiBaseInput" value="http://127.0.0.1:5000">
+        </div>
+
+        <div class="field">
+            <label for="vehicleSelect">车辆</label>
+            <select id="vehicleSelect"></select>
+        </div>
+
+        <div class="actions">
+            <button id="loadFleetBtn" type="button">加载车队</button>
+            <button id="refreshVehicleBtn" type="button" class="secondary">刷新车辆</button>
+            <button id="updatePathBtn" type="button">触发路径更新</button>
+            <button id="clearBtn" type="button" class="secondary">清空地图</button>
+        </div>
+
+        <div class="legend">
+            <span style="--line-color:#2563eb;">后端原始 A* 路线</span>
+            <span style="--line-color:#a855f7;">后端高德纠偏路线</span>
+            <span style="--line-color:#f97316;">纠偏分段路线</span>
+        </div>
+
+        <div id="status" class="status">等待加载车队。</div>
+    </section>
+
+    <script>
+        const apiBaseInput = document.getElementById("apiBaseInput");
+        const vehicleSelect = document.getElementById("vehicleSelect");
+        const loadFleetBtn = document.getElementById("loadFleetBtn");
+        const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
+        const updatePathBtn = document.getElementById("updatePathBtn");
+        const clearBtn = document.getElementById("clearBtn");
+        const statusEl = document.getElementById("status");
+
+        const map = new AMap.Map("container", {
+            zoom: 14,
+            center: [113.4, 23.05],
+            mapStyle: "amap://styles/normal"
+        });
+        map.addControl(new AMap.Scale());
+        map.addControl(new AMap.ToolBar({ position: "RB" }));
+
+        const fleetById = new Map();
+        let layers = [];
+
+        function setStatus(message) {
+            statusEl.textContent = message;
+        }
+
+        function setBusy(isBusy) {
+            loadFleetBtn.disabled = isBusy;
+            refreshVehicleBtn.disabled = isBusy;
+            updatePathBtn.disabled = isBusy;
+            clearBtn.disabled = isBusy;
+            vehicleSelect.disabled = isBusy;
+        }
+
+        function apiBase() {
+            return apiBaseInput.value.replace(/\/+$/, "");
+        }
+
+        async function fetchJson(url, options) {
+            const response = await fetch(url, options);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `${response.status} ${response.statusText}`);
+            }
+            return data;
+        }
+
+        function toNumber(value) {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : null;
+        }
+
+        function normalizePoint(point) {
+            if (!point) {
+                return null;
+            }
+            if (Array.isArray(point)) {
+                const lon = toNumber(point[0]);
+                const lat = toNumber(point[1]);
+                return lon === null || lat === null ? null : { lon, lat };
+            }
+            const lon = toNumber(point.lon ?? point.lng ?? point.longitude ?? point.x);
+            const lat = toNumber(point.lat ?? point.latitude ?? point.y);
+            if (lon === null || lat === null) {
+                return null;
+            }
+            return {
+                ...point,
+                lon,
+                lat
+            };
+        }
+
+        function normalizePoints(points) {
+            const out = [];
+            for (const item of points || []) {
+                const point = normalizePoint(item);
+                if (!point) {
+                    continue;
+                }
+                const last = out[out.length - 1];
+                if (last && Math.abs(last.lon - point.lon) < 1e-10 && Math.abs(last.lat - point.lat) < 1e-10) {
+                    continue;
+                }
+                out.push(point);
+            }
+            return out;
+        }
+
+        function asLngLat(points) {
+            return points.map(point => [point.lon, point.lat]);
+        }
+
+        function clearMap() {
+            if (layers.length) {
+                map.remove(layers);
+            }
+            layers = [];
+        }
+
+        function addPolyline(points, options) {
+            const normalized = normalizePoints(points);
+            if (normalized.length < 2) {
+                return null;
+            }
+            const polyline = new AMap.Polyline({
+                path: asLngLat(normalized),
+                showDir: true,
+                ...options
+            });
+            layers.push(polyline);
+            map.add(polyline);
+            return polyline;
+        }
+
+        function addMarker(point, label, color) {
+            const normalized = normalizePoint(point);
+            if (!normalized) {
+                return;
+            }
+            const marker = new AMap.Marker({
+                position: [normalized.lon, normalized.lat],
+                offset: new AMap.Pixel(-10, -10),
+                content: `<div style="
+                    width:20px;height:20px;border-radius:50%;
+                    background:${color};color:#fff;font-size:11px;
+                    display:flex;align-items:center;justify-content:center;
+                    border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.28);
+                ">${label}</div>`
+            });
+            layers.push(marker);
+            map.add(marker);
+        }
+
+        function fitVisible(points) {
+            const normalized = normalizePoints(points);
+            if (normalized.length >= 2) {
+                map.setFitView(layers, false, [70, 40, 40, 390]);
+            } else if (normalized.length === 1) {
+                map.setCenter([normalized[0].lon, normalized[0].lat]);
+            }
+        }
+
+        function segmentTarget(segment) {
+            return normalizePoint(segment.target_node || segment.target)
+                || normalizePoint((segment.points || segment.path || [])[Math.max(0, (segment.points || segment.path || []).length - 1)]);
+        }
+
+        function drawVehicle(vehicle, options = {}) {
+            clearMap();
+
+            const vehicleRawPoints = normalizePoints(vehicle.planned_route_point || []);
+            const rawPoints = vehicleRawPoints.length ? vehicleRawPoints : normalizePoints(options.rawPoints || []);
+            const graspedPoints = normalizePoints(vehicle.planned_route_grasped_point || []);
+            const segments = vehicle.planned_route_segment_grasped_point || [];
+
+            addPolyline(rawPoints, {
+                strokeColor: "#2563eb",
+                strokeWeight: 5,
+                strokeOpacity: 0.75,
+                strokeStyle: "dashed",
+                zIndex: 40
+            });
+
+            for (const [index, segment] of segments.entries()) {
+                addPolyline(segment.points || segment.path || [], {
+                    strokeColor: "#f97316",
+                    strokeWeight: 7,
+                    strokeOpacity: 0.42,
+                    zIndex: 45 + index
+                });
+                const target = segmentTarget(segment);
+                if (target) {
+                    addMarker(target, segment.type || index + 1, segment.type === "D" ? "#dc2626" : "#16a34a");
+                }
+            }
+
+            addPolyline(graspedPoints, {
+                strokeColor: "#a855f7",
+                strokeWeight: 6,
+                strokeOpacity: 0.95,
+                zIndex: 80
+            });
+
+            const gps = normalizePoint(vehicle.gps);
+            if (gps) {
+                addMarker(gps, "车", "#2563eb");
+            }
+
+            const fitPoints = graspedPoints.length >= 2 ? graspedPoints : rawPoints;
+            fitVisible(fitPoints);
+
+            const segmentStats = segments.map((segment, index) => {
+                const count = normalizePoints(segment.points || segment.path || []).length;
+                const source = segment.source || "raw";
+                const requestPoints = segment.grasp?.request_points;
+                return `${index + 1}. ${segment.type || "-"} ${segment.request_id || ""} ${source} ${count}点${requestPoints ? ` 输入${requestPoints}点` : ""}`;
+            });
+
+            setStatus([
+                `车辆：${vehicle.id}`,
+                `纠偏状态：${vehicle.planned_route_grasp_status || "none"}`,
+                vehicle.planned_route_grasp_error ? `纠偏错误：${vehicle.planned_route_grasp_error}` : null,
+                `原始路线点：${rawPoints.length}`,
+                `纠偏总路线点：${graspedPoints.length}`,
+                `纠偏分段数：${segments.length}`,
+                segmentStats.length ? `分段：\n${segmentStats.join("\n")}` : null,
+                options.message || null
+            ].filter(Boolean).join("\n"));
+        }
+
+        function selectedVehicleId() {
+            return vehicleSelect.value;
+        }
+
+        async function loadFleet() {
+            setBusy(true);
+            try {
+                const data = await fetchJson(`${apiBase()}/fleet`);
+                const fleet = data.fleet || [];
+                fleetById.clear();
+                vehicleSelect.innerHTML = "";
+                for (const vehicle of fleet) {
+                    fleetById.set(vehicle.id, vehicle);
+                    const option = document.createElement("option");
+                    option.value = vehicle.id;
+                    option.textContent = `${vehicle.id} - ${vehicle.planned_route_grasp_status || "none"}`;
+                    vehicleSelect.appendChild(option);
+                }
+                if (!fleet.length) {
+                    setStatus("车队为空。");
+                    return;
+                }
+                const selected = fleet.find(vehicle => (vehicle.planned_route_grasped_point || []).length >= 2)
+                    || fleet[0];
+                vehicleSelect.value = selected.id;
+                drawVehicle(selected, { message: "车队已加载。" });
+            } catch (error) {
+                setStatus(`加载车队失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function loadSelectedVehicle(message) {
+            const vehicleId = selectedVehicleId();
+            if (!vehicleId) {
+                throw new Error("未选择车辆");
+            }
+            const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            fleetById.set(vehicle.id, vehicle);
+            drawVehicle(vehicle, { message });
+            return vehicle;
+        }
+
+        async function waitForGraspReady(vehicleId, routeVersion) {
+            for (let attempt = 1; attempt <= 12; attempt += 1) {
+                await new Promise(resolve => setTimeout(resolve, 700));
+                const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+                const status = vehicle.planned_route_grasp_status;
+                const versionMatched = !routeVersion || vehicle.planned_route_grasp_route_version === routeVersion;
+                if (versionMatched && (status === "ready" || status === "error" || status === "disabled" || status === "stale")) {
+                    drawVehicle(vehicle, { message: `异步纠偏已返回，轮询次数：${attempt}` });
+                    return vehicle;
+                }
+                drawVehicle(vehicle, { message: `等待异步纠偏返回：${attempt}/12` });
+            }
+            return loadSelectedVehicle("等待超时，请稍后刷新车辆。");
+        }
+
+        async function triggerPathUpdate() {
+            const vehicleId = selectedVehicleId();
+            const current = fleetById.get(vehicleId) || await loadSelectedVehicle();
+            const gps = normalizePoint(current.gps);
+            if (!gps) {
+                throw new Error("当前车辆没有 GPS 坐标");
+            }
+
+            setStatus(`正在提交路径更新：${vehicleId}`);
+            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lon: gps.lon, lat: gps.lat })
+            });
+            const rawPoints = normalizePoints(data.route?.points || data.path || data.planned_route_point || []);
+            const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            drawVehicle(vehicle, {
+                rawPoints,
+                message: `路径更新已提交，等待后端异步纠偏。\n本次路径返回点：${rawPoints.length}`
+            });
+            await waitForGraspReady(vehicleId, vehicle.planned_route_grasp_route_version);
+        }
+
+        loadFleetBtn.addEventListener("click", loadFleet);
+        refreshVehicleBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await loadSelectedVehicle("车辆已刷新。");
+            } catch (error) {
+                setStatus(`刷新车辆失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        updatePathBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await triggerPathUpdate();
+            } catch (error) {
+                setStatus(`触发路径更新失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        clearBtn.addEventListener("click", () => {
+            clearMap();
+            setStatus("地图已清空。");
+        });
+        vehicleSelect.addEventListener("change", async () => {
+            setBusy(true);
+            try {
+                await loadSelectedVehicle("车辆已切换。");
+            } catch (error) {
+                setStatus(`切换车辆失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+
+        loadFleet();
+    </script>
+</body>
+
+</html>

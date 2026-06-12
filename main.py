@@ -72,12 +72,12 @@ if __name__ == "__main__":
     try:
         state.init_system()
         print(f"[系统] 路网加载完成：{len(state.city.nodes_map)} 节点，{len(state.city.pois)} POI")
-        print("[系统] 后台统筹派单引擎与真实时间时钟已在独立线程启动。")
+        print("[系统] 后台统筹派单引擎、真实时间时钟、路线纠偏与订单 ETA 刷新线程已启动。")
     except Exception as e:
         print(f"[警告] 自动初始化失败: {e}")
         print("[提示] 可通过 POST /init 手动初始化")
 
     port = int(os.environ.get("PORT", 5000))
     print(f"\n[OK] Flask API 已就绪: http://localhost:{port}")
-    print("   可用端点: /health /time /init /order /orders/<request_id>/cancel /fleet /fleet/<vehicle_id>/path /fleet/<vehicle_id>/rest /orders/pool /status /tick /export /pois /map/road-network\n")
+    print("   可用端点: /health /time /init /order /orders/<request_id>/eta /orders/<request_id>/cancel /fleet /fleet/<vehicle_id>/path /fleet/<vehicle_id>/rest /orders/pool /status /tick /export /pois /map/road-network\n")
     app.run(host="0.0.0.0", port=port, debug=False)
