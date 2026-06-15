@@ -1616,11 +1616,14 @@ class CoreDispatcher:
 
     @staticmethod
     def _vehicle_grasp_route_version(vehicle):
-        """生成车辆当前展示路线的纠偏版本签名。"""
+        """生成车辆当前计划路线的纠偏版本签名。
+
+        说明:
+            该版本只表达订单/热点路线是否变化，不包含 GPS 所在边和进度。
+            GPS 行进只裁剪既有纠偏路线，不触发新的高德纠偏请求。
+        """
         parts = [
             str(vehicle.id),
-            str(getattr(vehicle, "next_node", "")),
-            f"{float(getattr(vehicle, 'progress', 0.0) or 0.0):.6f}",
         ]
         if getattr(vehicle, "planned_route", None):
             for step in vehicle.planned_route:
@@ -1686,6 +1689,198 @@ class CoreDispatcher:
         vehicle.idle_target_eta_time = None
         vehicle.idle_target_eta_status = None
         vehicle.idle_target_eta_error = None
+
+    @staticmethod
+    def _point_distance_m(a, b):
+        """计算两个轨迹点之间的球面距离。"""
+        return AuxiliaryFunctions.haversine_distance(
+            float(a["lon"]),
+            float(a["lat"]),
+            float(b["lon"]),
+            float(b["lat"]),
+        )
+
+    @staticmethod
+    def _project_point_on_polyline_segment(point, start, end):
+        """把一个点近似投影到经纬度折线段上。
+
+        Args:
+            point (dict): 待投影点，包含 lon/lat。
+            start (dict): 线段起点，包含 lon/lat。
+            end (dict): 线段终点，包含 lon/lat。
+
+        Returns:
+            dict: 投影点、线段进度和距离信息。
+        """
+        ax, ay = float(start["lon"]), float(start["lat"])
+        bx, by = float(end["lon"]), float(end["lat"])
+        px, py = float(point["lon"]), float(point["lat"])
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 0:
+            progress = 0.0
+        else:
+            progress = ((px - ax) * dx + (py - ay) * dy) / length_sq
+            progress = max(0.0, min(1.0, progress))
+        projected = {
+            "lon": ax + dx * progress,
+            "lat": ay + dy * progress,
+        }
+        distance = CoreDispatcher._point_distance_m(point, projected)
+        return {
+            "point": projected,
+            "progress": progress,
+            "distance": distance,
+        }
+
+    @staticmethod
+    def _trim_points_from_position(points, start_point):
+        """从旧纠偏轨迹中裁出车辆当前位置之后的剩余轨迹。
+
+        Args:
+            points (list[dict]): 旧的已纠偏分段轨迹。
+            start_point (dict): 新 GPS 投影点，会作为裁剪后轨迹首点。
+
+        Returns:
+            list[dict]: 以 start_point 开头、逐渐驶向原目标点的剩余轨迹。
+        """
+        normalized = [copy.deepcopy(p) for p in points or [] if p.get("lon") is not None and p.get("lat") is not None]
+        if len(normalized) < 2:
+            return []
+
+        best = None
+        for index in range(len(normalized) - 1):
+            projection = CoreDispatcher._project_point_on_polyline_segment(
+                start_point,
+                normalized[index],
+                normalized[index + 1],
+            )
+            if best is None or projection["distance"] < best["distance"]:
+                best = {
+                    **projection,
+                    "index": index,
+                }
+
+        if best is None:
+            return []
+
+        snapped_start = copy.deepcopy(start_point)
+        snapped_start["lon"] = best["point"]["lon"]
+        snapped_start["lat"] = best["point"]["lat"]
+        snapped_start["is_grasp_projection"] = True
+        snapped_start["distance_to_gps"] = best["distance"]
+
+        trimmed = [snapped_start]
+        next_index = best["index"] + 1
+        if best["progress"] >= 0.98:
+            next_index += 1
+        trimmed.extend(copy.deepcopy(normalized[next_index:]))
+        if len(trimmed) == 1:
+            trimmed.append(copy.deepcopy(normalized[-1]))
+        return trimmed
+
+    @staticmethod
+    def _route_segment_key(segment):
+        """生成路线分段匹配键，用于在新旧 O/D/IDLE 分段之间定位同一目标。"""
+        return (
+            segment.get("type"),
+            str(segment.get("request_id")) if segment.get("request_id") is not None else None,
+        )
+
+    @staticmethod
+    def _trim_grasped_segments_to_position(grasped_segments, raw_segments, start_point=None):
+        """按车辆 GPS 在纠偏路线上的投影点裁剪一组已纠偏分段。
+
+        Args:
+            grasped_segments (list[dict]): 已纠偏分段，可能来自车辆当前状态或高德新返回结果。
+            raw_segments (list[dict]): GPS 更新后重新生成的原始剩余分段。
+            start_point (dict | None): 车辆真实 GPS 点；为空时退回 raw segment 起点。
+
+        Returns:
+            list[dict]: 从当前车辆位置开始的已纠偏分段；缺失的分段退回 raw segment。
+        """
+        previous_by_key = {}
+        for segment in grasped_segments or []:
+            previous_by_key.setdefault(CoreDispatcher._route_segment_key(segment), segment)
+
+        trimmed_segments = []
+        for index, raw_segment in enumerate(raw_segments or []):
+            raw_points = copy.deepcopy(raw_segment.get("points") or [])
+            if len(raw_points) < 2:
+                continue
+
+            previous = previous_by_key.get(CoreDispatcher._route_segment_key(raw_segment))
+            previous_points = (previous or {}).get("points") or (previous or {}).get("path") or []
+            if previous is not None:
+                if index == 0:
+                    points = CoreDispatcher._trim_points_from_position(
+                        previous_points,
+                        start_point or raw_points[0],
+                    )
+                else:
+                    points = copy.deepcopy(previous_points)
+            else:
+                points = []
+
+            if len(points) < 2:
+                points = raw_points
+                source = "raw_trim_fallback"
+                grasp_meta = {"ok": False, "error": "trim_fallback"}
+            else:
+                source = f"{previous.get('source', 'grasproad')}_trimmed" if previous is not None else "raw_trim_fallback"
+                grasp_meta = copy.deepcopy((previous or {}).get("grasp") or {})
+                grasp_meta["trimmed_from_previous"] = previous is not None
+
+            segment = copy.deepcopy(raw_segment)
+            segment["points"] = points
+            segment["source"] = source
+            segment["grasp"] = grasp_meta
+            trimmed_segments.append(segment)
+        return trimmed_segments
+
+    @staticmethod
+    def _trim_vehicle_grasped_route_from_result(vehicle, result, start_point=None):
+        """GPS 更新时只裁剪既有纠偏路线，不重新请求高德。
+
+        Args:
+            vehicle (Vehicle): GPS 刚更新的车辆。
+            result (dict): 本次 GPS 更新后的原始剩余路径结果。
+            start_point (dict | None): 车辆真实 GPS 点；用于吸附到既有纠偏路线。
+
+        Returns:
+            bool: 成功更新 raw segments 或裁剪纠偏路线返回 True。
+
+        Side Effects:
+            更新 planned_route_segment_raw_point，并在已有纠偏路线时同步缩短
+            planned_route_segment_grasped_point/planned_route_grasped_point。
+        """
+        raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
+        if not raw_segments:
+            CoreDispatcher._clear_route_grasp_state(vehicle)
+            return False
+
+        vehicle.planned_route_segment_raw_point = raw_segments
+        if getattr(vehicle, "planned_route_grasp_route_version", None) is None:
+            vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(vehicle)
+
+        grasped_segments = getattr(vehicle, "planned_route_segment_grasped_point", None) or []
+        if not grasped_segments:
+            return True
+
+        if start_point is None:
+            gps = getattr(vehicle, "gps", {}) or {}
+            if gps.get("lon") is not None and gps.get("lat") is not None:
+                start_point = {"lon": gps["lon"], "lat": gps["lat"], "id": "vehicle_gps"}
+
+        trimmed_segments = CoreDispatcher._trim_grasped_segments_to_position(
+            grasped_segments,
+            raw_segments,
+            start_point=start_point,
+        )
+        if trimmed_segments:
+            vehicle.planned_route_segment_grasped_point = trimmed_segments
+            vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(trimmed_segments)
+        return True
 
     @classmethod
     def configure_route_grasp_async(cls, state_lock=None, enabled=True, max_workers=None):
@@ -2120,7 +2315,16 @@ class CoreDispatcher:
             first_segment["startNodeId"] = projection_point["id"]
         result["planned_route_point"] = result["path"]
         vehicle.planned_route_point = result["planned_route_point"]
-        CoreDispatcher._mark_vehicle_route_grasp_pending(vehicle, result)
+        if changed_steps or not getattr(vehicle, "planned_route_segment_grasped_point", None):
+            # 上下客会改变后续 O/D 队列；没有既有纠偏路线时也需要发起一次高德纠偏。
+            CoreDispatcher._mark_vehicle_route_grasp_pending(vehicle, result)
+        else:
+            # 普通 GPS 前进只裁剪既有纠偏路线，不重新请求高德。
+            CoreDispatcher._trim_vehicle_grasped_route_from_result(
+                vehicle,
+                result,
+                start_point={"lon": lon, "lat": lat, "id": "vehicle_gps"},
+            )
 
         result["gps"] = vehicle.gps
         result.pop("start_node", None)
@@ -2357,8 +2561,21 @@ class CoreDispatcher:
 
         if isinstance(result, dict) and result.get("ok"):
             # 成功结果同时保留分段路线和拼接总路线，分别服务 ETA 和前端展示。
-            target_vehicle.planned_route_segment_grasped_point = copy.deepcopy(result.get("segments") or [])
-            target_vehicle.planned_route_grasped_point = copy.deepcopy(result.get("path") or [])
+            segments = copy.deepcopy(result.get("segments") or [])
+            raw_segments = getattr(target_vehicle, "planned_route_segment_raw_point", None) or []
+            if raw_segments:
+                # 高德请求期间车辆可能继续前进；写回前按最新 GPS 起点裁剪，避免路线重新变长。
+                gps = getattr(target_vehicle, "gps", {}) or {}
+                start_point = None
+                if gps.get("lon") is not None and gps.get("lat") is not None:
+                    start_point = {"lon": gps["lon"], "lat": gps["lat"], "id": "vehicle_gps"}
+                segments = CoreDispatcher._trim_grasped_segments_to_position(
+                    segments,
+                    raw_segments,
+                    start_point=start_point,
+                )
+            target_vehicle.planned_route_segment_grasped_point = segments
+            target_vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(segments)
             target_vehicle.planned_route_grasp_status = "ready"
             target_vehicle.planned_route_grasp_error = None
             return 1

@@ -460,6 +460,74 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(len(self.vehicle.planned_route_segment_grasped_point), 1)
         self.assertGreater(self.vehicle.planned_route_grasped_point[0]["lon"], self.city.a.lon)
 
+    def test_gps_update_trims_existing_grasped_route_without_pending(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(self.vehicle)
+        self.vehicle.planned_route_grasp_status = "ready"
+        self.vehicle.planned_route_segment_grasped_point = [
+            {
+                "type": "O",
+                "request_id": str(order.request_id),
+                "points": [
+                    {"lon": 113.0000, "lat": 23.0000},
+                    {"lon": 113.0005, "lat": 23.0005},
+                    {"lon": 113.0010, "lat": 23.0010},
+                    {"lon": 113.0015, "lat": 23.0015},
+                ],
+                "source": "grasproad",
+                "grasp": {"ok": True},
+            }
+        ]
+        current = {"id": "cur", "lon": 113.00075, "lat": 23.00055}
+        result = {
+            "path": [current, {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat}],
+            "segments": [
+                {
+                    "type": "O",
+                    "request_id": str(order.request_id),
+                    "target_node": {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat},
+                    "distance": 50.0,
+                    "path": [current, {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat}],
+                }
+            ],
+        }
+
+        CoreDispatcher._trim_vehicle_grasped_route_from_result(
+            self.vehicle,
+            result,
+            start_point=current,
+        )
+
+        self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
+        self.assertEqual(self.vehicle.planned_route_grasped_point[0]["id"], "cur")
+        self.assertNotEqual(self.vehicle.planned_route_grasped_point[0]["lat"], current["lat"])
+        self.assertTrue(self.vehicle.planned_route_grasped_point[0]["is_grasp_projection"])
+        self.assertLess(len(self.vehicle.planned_route_grasped_point), 4)
+        self.assertIn("trimmed", self.vehicle.planned_route_segment_grasped_point[0]["source"])
+
+    def test_pending_grasp_route_does_not_build_eta_job(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.gps = {"lon": self.city.a.lon, "lat": self.city.a.lat}
+        self.vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(self.vehicle)
+        self.vehicle.planned_route_grasp_status = "pending"
+        self.vehicle.planned_route_segment_grasped_point = [
+            {
+                "type": "O",
+                "request_id": str(order.request_id),
+                "points": [
+                    {"lon": self.city.a.lon, "lat": self.city.a.lat},
+                    {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                ],
+                "distance": 100.0,
+            }
+        ]
+
+        job = CoreDispatcher._build_vehicle_eta_job(self.vehicle, self.city, 1000.0)
+
+        self.assertIsNone(job)
+
     def test_route_update_auto_submits_async_grasp_when_enabled(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
@@ -500,7 +568,7 @@ class EtaBackgroundTest(unittest.TestCase):
         CoreDispatcher.refresh_vehicle_route_metadata(self.vehicle, self.city)
         job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
         result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), job)
-        self.vehicle.progress = 0.5
+        self.vehicle.planned_route = []
 
         changed = CoreDispatcher._apply_route_grasp_result(job, result, [self.vehicle])
 
