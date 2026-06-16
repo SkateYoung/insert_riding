@@ -7,6 +7,7 @@
 from flask import Blueprint, jsonify, request
 
 from . import state
+from . import persistence
 from .auxiliary import AuxiliaryFunctions
 from .core import CoreDispatcher
 from .models import Order, SPEED_MPS
@@ -333,7 +334,14 @@ def health():
     Returns:
         JSON: status 表示服务状态，initialized 表示系统是否已完成初始化。
     """
-    return jsonify({"status": "ok", "initialized": state.system_initialized})
+    db_status = persistence.status()
+    return jsonify({
+        "status": "ok",
+        "initialized": state.system_initialized,
+        "db_enabled": db_status.get("enabled"),
+        "db_queue_size": db_status.get("queue_size"),
+        "db_last_error": db_status.get("last_error"),
+    })
 
 
 @bp.route("/time", methods=["GET"])
@@ -670,6 +678,7 @@ def request_vehicle_rest(vehicle_id):
             desired_rest_time=desired_rest_time,
             rest_duration_seconds=rest_duration_seconds,
         )
+        persistence.record_rest_request(target_vehicle, result)
         estimated_finish_time = result.get("estimated_finish_time")
         return jsonify({
             "vehicle_id": target_vehicle.id,

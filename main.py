@@ -8,8 +8,41 @@ import subprocess
 import sys
 
 # ============================================================
-# 功能一：启动前依赖检测
-# 相关内容：pyshp 自动安装
+# 功能一：本地数据库持久化默认配置
+# 相关方法：configure_local_database_env
+# ============================================================
+
+def configure_local_database_env():
+    """设置本地开发环境的 MySQL 写库默认参数。
+
+    该函数必须在导入 api.state/api.routes 之前执行，因为 persistence 模块会在
+    首次导入时读取 BUS_DB_* 环境变量。这里使用 setdefault，外部环境变量仍可覆盖。
+
+    Args:
+        None。
+
+    Returns:
+        None。
+    """
+    defaults = {
+        "BUS_DB_ENABLED": "1",
+        "BUS_DB_HOST": "127.0.0.1",
+        "BUS_DB_PORT": "3306",
+        "BUS_DB_USER": "root",
+        "BUS_DB_PASSWORD": "021015",
+        "BUS_DB_NAME": "bus_dispatch_core",
+        "BUS_DB_TENANT_ID": "000000",
+    }
+    for key, value in defaults.items():
+        os.environ.setdefault(key, value)
+
+
+configure_local_database_env()
+
+
+# ============================================================
+# 功能二：启动前依赖检测
+# 相关内容：pyshp、PyMySQL 自动安装
 # ============================================================
 
 try:
@@ -18,6 +51,12 @@ except ImportError:
     print("检测到系统中缺失解析 shp 文件的模块 pyshp，正在为您自动安装...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyshp"])
 
+try:
+    import pymysql  # noqa: F401
+except ImportError:
+    print("检测到系统中缺失写入 MySQL 的模块 PyMySQL，正在为您自动安装...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "PyMySQL"])
+
 from flask import Flask
 
 from api import state
@@ -25,7 +64,7 @@ from api.routes import bp as api_routes
 
 
 # ============================================================
-# 功能二：Flask 应用创建与蓝图注册
+# 功能三：Flask 应用创建与蓝图注册
 # 相关方法：create_app、add_cors_headers
 # ============================================================
 
@@ -63,7 +102,7 @@ app = create_app()
 
 
 # ============================================================
-# 功能三：本地运行启动入口
+# 功能四：本地运行启动入口
 # 相关内容：初始化路网、启动后台线程、监听端口
 # ============================================================
 

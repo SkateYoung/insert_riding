@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timedelta
+from . import persistence
 from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS
 from .auxiliary import AuxiliaryFunctions
 from forecast import od_forecast_module
@@ -382,6 +383,7 @@ class CoreDispatcher:
         """
         print(f"[Core.Dispatcher] 新订单 [单{order.request_id}] 注入系统统筹池，等待匹配车辆中...")
         CoreDispatcher.order_pool.append(order)
+        persistence.record_order_created(order, city_map, status="pooled")
         return False
 
     @staticmethod
@@ -586,7 +588,18 @@ class CoreDispatcher:
                         # 空车热点只是可中断引导；一旦接到真实订单，必须立即清理。
                         CoreDispatcher._clear_idle_parking(global_best_v)
                         global_best_v.planned_route = global_best_route
-                        CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
+                        route_result = CoreDispatcher.refresh_vehicle_route_metadata(global_best_v, city_map)
+                        target_o.status = "waiting_pickup"
+                        persistence.record_dispatch_assignment(
+                            target_o,
+                            global_best_v,
+                            city_map=city_map,
+                            path_result=route_result,
+                            details={
+                                "cancel_risk_score": best_cancel_risk_score,
+                                "priority_score": best_priority_score,
+                            },
+                        )
                         assign_count += 1
                         print(
                             f"[Core.Pool] [Match] 订单池优先级匹配成功：单 {target_o.request_id} "
@@ -650,6 +663,7 @@ class CoreDispatcher:
         order.cancel_time = cancel_time or datetime.now().replace(microsecond=0)
         if all(o.request_id != order.request_id for o in CoreDispatcher.completed_orders_pool):
             CoreDispatcher.completed_orders_pool.append(order)
+        persistence.record_order_snapshot(order, status="cancelled")
 
     @staticmethod
     def _start_rest_if_ready(vehicle):
@@ -721,6 +735,8 @@ class CoreDispatcher:
             CoreDispatcher._archive_cancelled_order(cancelled_order, cancel_time=cancel_time)
             path_result = CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
             CoreDispatcher._start_rest_if_ready(vehicle)
+            persistence.record_vehicle_route(vehicle, path_result=path_result)
+            persistence.record_vehicle_runtime(vehicle)
             return {
                 "status": "cancelled",
                 "request_id": request_id,
@@ -812,6 +828,7 @@ class CoreDispatcher:
             vehicle.rest_status = "closing"
             CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
             CoreDispatcher._start_rest_if_ready(vehicle)
+            persistence.record_vehicle_runtime(vehicle)
             return {
                 "status": vehicle.rest_status,
                 "decision": "close_now",
@@ -828,6 +845,7 @@ class CoreDispatcher:
             vehicle.rest_status = "preparing_closure"
             CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
             CoreDispatcher._start_rest_if_ready(vehicle)
+            persistence.record_vehicle_runtime(vehicle)
             return {
                 "status": vehicle.rest_status,
                 "decision": "prepare_closure",
@@ -1418,6 +1436,9 @@ class CoreDispatcher:
             f"[Core.Planner] {vehicle.id} 空车前往预测热点 {target_node.name} "
             f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
         )
+        persistence.record_hotspot_forecast(vehicle)
+        persistence.record_vehicle_route(vehicle, path_result=result)
+        persistence.record_vehicle_runtime(vehicle)
         return True
 
     @staticmethod
@@ -2029,6 +2050,8 @@ class CoreDispatcher:
             vehicle.idle_target_eta_status = None
             vehicle.idle_target_eta_error = None
         CoreDispatcher._submit_vehicle_route_grasp_async(vehicle)
+        persistence.record_vehicle_route(vehicle, path_result=result)
+        persistence.record_vehicle_runtime(vehicle)
 
     @staticmethod
     def _combine_grasped_segments(segments):
@@ -2152,6 +2175,7 @@ class CoreDispatcher:
                 order.estimated_arrival_time = order.actual_pick_time
                 order.estimated_arrival_eta_seconds = 0
                 action = "pickup"
+                persistence.record_order_snapshot(order, status="riding", vehicle=vehicle)
             else:
                 vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.request_id != order.request_id]
                 order.status = "completed"
@@ -2163,6 +2187,7 @@ class CoreDispatcher:
                 if order not in CoreDispatcher.completed_orders_pool:
                     CoreDispatcher.completed_orders_pool.append(order)
                 action = "dropoff"
+                persistence.record_order_snapshot(order, status="completed", vehicle=vehicle)
 
             vehicle.planned_route.pop(0)
             changed_steps.append({
@@ -2200,6 +2225,7 @@ class CoreDispatcher:
             order.estimated_arrival_time = order.actual_pick_time
             order.estimated_arrival_eta_seconds = 0
             action = "pickup"
+            persistence.record_order_snapshot(order, status="riding", vehicle=vehicle)
         else:
             vehicle.on_board_orders = [o for o in vehicle.on_board_orders if o.request_id != order.request_id]
             order.status = "completed"
@@ -2211,6 +2237,7 @@ class CoreDispatcher:
             if order not in CoreDispatcher.completed_orders_pool:
                 CoreDispatcher.completed_orders_pool.append(order)
             action = "dropoff"
+            persistence.record_order_snapshot(order, status="completed", vehicle=vehicle)
 
         return {
             "action": action,
@@ -2356,6 +2383,11 @@ class CoreDispatcher:
             }
             for step in vehicle.planned_route
         ]
+        persistence.record_path_update(
+            vehicle,
+            result,
+            report_time=current_timestamp if current_timestamp is not None else time.time(),
+        )
         return result
 
     # ============================================================
@@ -2578,12 +2610,14 @@ class CoreDispatcher:
             target_vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(segments)
             target_vehicle.planned_route_grasp_status = "ready"
             target_vehicle.planned_route_grasp_error = None
+            persistence.record_route_grasp(target_vehicle)
             return 1
 
         status = result.get("status", "error") if isinstance(result, dict) else "error"
         reason = result.get("reason", status) if isinstance(result, dict) else status
         target_vehicle.planned_route_grasp_status = status
         target_vehicle.planned_route_grasp_error = reason
+        persistence.record_route_grasp(target_vehicle)
         return 1
 
     @classmethod
@@ -2884,6 +2918,18 @@ class CoreDispatcher:
         return orders
 
     @staticmethod
+    def _order_status_for_persistence(order):
+        """读取订单当前可落库状态；对象未显式设置时根据关键时间推断。"""
+        status = getattr(order, "status", None)
+        if status:
+            return status
+        if getattr(order, "completion_time", None) is not None:
+            return "completed"
+        if getattr(order, "actual_pick_time", None) is not None:
+            return "riding"
+        return "matched"
+
+    @staticmethod
     def _apply_vehicle_eta_result(job, result, updated_at, fleet):
         """校验路线版本并把单车 ETA 结果写回订单。"""
         target_vehicle = None
@@ -2900,6 +2946,7 @@ class CoreDispatcher:
                 reason = (result or {}).get("reason", "eta_error") if isinstance(result, dict) else "eta_error"
                 target_vehicle.idle_target_eta_status = reason
                 target_vehicle.idle_target_eta_error = reason
+                persistence.record_eta_result(target_vehicle)
                 return 1
 
             amap_enabled = bool(result.get("amapEnabled", result.get("enabled", True)))
@@ -2915,6 +2962,7 @@ class CoreDispatcher:
                 target_vehicle.idle_target_eta_time = updated_at + idle_eta
                 target_vehicle.idle_target_eta_status = "ready"
                 target_vehicle.idle_target_eta_error = None
+            persistence.record_eta_result(target_vehicle)
             return 1
 
         current_orders = CoreDispatcher._current_vehicle_orders(target_vehicle)
@@ -2928,6 +2976,7 @@ class CoreDispatcher:
                 order = current_orders.get(str(order_id))
                 if order is not None:
                     CoreDispatcher._mark_order_eta_error(order, reason, message, updated_at)
+                    persistence.record_order_snapshot(order, status=CoreDispatcher._order_status_for_persistence(order), vehicle=target_vehicle)
                     changed += 1
             return changed
 
@@ -2959,7 +3008,13 @@ class CoreDispatcher:
                     str(order_id) in on_board_ids,
                     amap_enabled,
                 )
+            persistence.record_order_snapshot(
+                order,
+                status=CoreDispatcher._order_status_for_persistence(order),
+                vehicle=target_vehicle,
+            )
             changed += 1
+        persistence.record_vehicle_runtime(target_vehicle)
         return changed
 
     @staticmethod

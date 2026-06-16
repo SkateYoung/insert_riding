@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import persistence
 from .models import CityGraph, Order, Vehicle
 from .core import CoreDispatcher
 
@@ -316,6 +317,9 @@ def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
         # 预测模块依赖历史订单样本；这里注入模拟完成订单，不进入实时订单池。
         _seed_completed_orders(city, count=30)
         system_initialized = True
+        persistence.record_initial_state(city, fleet)
+        for completed_order in CoreDispatcher.completed_orders_pool:
+            persistence.record_order_snapshot(completed_order, city_map=city, status="completed")
 
     matching_thread = threading.Thread(
         target=CoreDispatcher.process_pool_matching,

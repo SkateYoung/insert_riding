@@ -1,0 +1,7 @@
+Flask
+h3
+numpy
+PyMySQL
+requests
+pyshp
+scikit-learn
