@@ -460,6 +460,74 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(len(self.vehicle.planned_route_segment_grasped_point), 1)
         self.assertGreater(self.vehicle.planned_route_grasped_point[0]["lon"], self.city.a.lon)
 
+    def test_route_grasp_skips_zero_length_segment_as_ready(self):
+        client = FakeRouteGraspService()
+        point = {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat}
+        job = {
+            "vehicle_id": str(self.vehicle.id),
+            "route_version": "test-version",
+            "segments": [
+                {
+                    "index": 0,
+                    "type": "D",
+                    "request_id": "order-zero",
+                    "target_node": point,
+                    "distance": 0.0,
+                    "aStarDistanceM": 0.0,
+                    "points": [point],
+                }
+            ],
+        }
+
+        result = CoreDispatcher._run_route_grasp_job(client, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result["segments"][0]["source"], "short_segment_skip_grasp")
+        self.assertTrue(result["segments"][0]["grasp"]["skipped"])
+
+    def test_route_grasp_maps_overlapped_stop_to_previous_grasped_point(self):
+        client = FakeRouteGraspService()
+        first_start = {"id": self.city.a.id, "lon": self.city.a.lon, "lat": self.city.a.lat}
+        shared_stop = {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat}
+        job = {
+            "vehicle_id": str(self.vehicle.id),
+            "route_version": "test-overlap",
+            "segments": [
+                {
+                    "index": 0,
+                    "type": "O",
+                    "request_id": "order-a",
+                    "target_node": shared_stop,
+                    "distance": 100.0,
+                    "aStarDistanceM": 100.0,
+                    "startNodeId": self.city.a.id,
+                    "endNodeId": self.city.b.id,
+                    "points": [first_start, shared_stop],
+                },
+                {
+                    "index": 1,
+                    "type": "D",
+                    "request_id": "order-b",
+                    "target_node": shared_stop,
+                    "distance": 0.0,
+                    "aStarDistanceM": 0.0,
+                    "startNodeId": self.city.b.id,
+                    "endNodeId": self.city.b.id,
+                    "points": [shared_stop],
+                },
+            ],
+        }
+
+        result = CoreDispatcher._run_route_grasp_job(client, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result["segments"][1]["source"], "overlap_stop_same_point")
+        self.assertEqual(result["segments"][1]["points"][0], result["segments"][0]["points"][-1])
+        self.assertTrue(result["segments"][1]["grasp"]["overlap_with_previous_stop"])
+
     def test_gps_update_trims_existing_grasped_route_without_pending(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
@@ -527,6 +595,42 @@ class EtaBackgroundTest(unittest.TestCase):
         job = CoreDispatcher._build_vehicle_eta_job(self.vehicle, self.city, 1000.0)
 
         self.assertIsNone(job)
+
+    def test_eta_pipeline_keeps_zero_length_dropoff_segment(self):
+        client = FakeAmapCorrectClient()
+        payload = {
+            "vehicleId": self.vehicle.id,
+            "routeVersion": "route-zero",
+            "vehiclePosition": {"lon": self.city.a.lon, "lat": self.city.a.lat},
+            "segments": [
+                {
+                    "index": 0,
+                    "endStep": {"type": "O", "orderId": "order-zero"},
+                    "points": [
+                        {"lon": self.city.a.lon, "lat": self.city.a.lat},
+                        {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    ],
+                    "aStarDistanceM": 100.0,
+                },
+                {
+                    "index": 1,
+                    "endStep": {"type": "D", "orderId": "order-zero"},
+                    "points": [
+                        {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    ],
+                    "aStarDistanceM": 0.0,
+                },
+            ],
+        }
+
+        result = build_eta_pipeline_from_astar(payload, amap=client)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(client.driving_calls), 1)
+        self.assertEqual(result["segmentCount"], 2)
+        self.assertEqual(result["segments"][1]["chosenSource"], "zero_length_segment")
+        self.assertEqual(result["passengerEtas"][0]["pickupEtaSec"], 120.0)
+        self.assertEqual(result["passengerEtas"][0]["dropoffEtaSec"], 120.0)
 
     def test_route_update_auto_submits_async_grasp_when_enabled(self):
         order = make_order(self.city)

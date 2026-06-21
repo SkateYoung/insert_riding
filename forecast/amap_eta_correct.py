@@ -12,14 +12,17 @@ import asyncio
 import json
 import math
 import os
+import socket
+import ssl
 import threading
 import time
 # 这个只是用来在前端测试的 如果只调用函数的时候 可以不用
 # from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 from urllib.parse import urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -28,6 +31,13 @@ DEFAULT_SPEED_MPS = 16.666666666666668
 MAX_GRASP_POINTS = 500
 MAX_DRIVING_WAYPOINTS = 16
 GRASP_ROAD_POINT_INTERVAL_SECONDS = 5
+DEFAULT_AMAP_HTTP_RETRIES = 3
+DEFAULT_AMAP_HTTP_RETRY_DELAY_SECONDS = 0.4
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - depends on deployment environment.
+    certifi = None
 
 AMAP_TRAFFIC_RANK = {
     "unknown": 0,
@@ -41,6 +51,27 @@ AMAP_TRAFFIC_RANK = {
     "拥堵": 3,
     "严重拥堵": 4,
 }
+
+
+def env_flag(name: str, default: str = "") -> bool:
+    """读取布尔环境变量。"""
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    """读取整数环境变量，格式错误时使用默认值。"""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """读取浮点环境变量，格式错误时使用默认值。"""
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -207,11 +238,17 @@ class AmapEtaCorrectClient:
 
     def __init__(self, api_key: str | None = None, *, timeout_sec: float = 6.0) -> None:
         """初始化高德客户端；支持 AMAP_DISABLE=1 离线禁用。"""
-        if str(os.getenv("AMAP_DISABLE", "")).lower() in {"1", "true", "yes", "on"}:
+        if env_flag("AMAP_DISABLE"):
             self.api_key = ""
         else:
             self.api_key = (api_key or os.getenv("AMAP_API_KEY") or DEFAULT_AMAP_KEY).strip()
         self.timeout_sec = timeout_sec
+        self.retry_count = max(1, env_int("AMAP_HTTP_RETRIES", DEFAULT_AMAP_HTTP_RETRIES))
+        self.retry_delay_sec = max(0.0, env_float("AMAP_HTTP_RETRY_DELAY_SECONDS", DEFAULT_AMAP_HTTP_RETRY_DELAY_SECONDS))
+        self.bypass_proxy = env_flag("AMAP_BYPASS_PROXY", "1")
+        self.ssl_verify = not env_flag("AMAP_SSL_NO_VERIFY")
+        self._ssl_context = self._build_ssl_context()
+        self._opener = self._build_opener()
         self._drive_cache: dict[str, dict[str, Any]] = {}
         self._grasp_cache: dict[str, dict[str, Any]] = {}
 
@@ -296,6 +333,24 @@ class AmapEtaCorrectClient:
                 "sp": round(speed_kmh, 1),
             })
         return out
+
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        """构建高德 HTTPS 请求使用的 SSL 上下文。
+
+        部署机证书链不完整时，优先使用 certifi 证书包；仅当显式设置
+        AMAP_SSL_NO_VERIFY=1 时才关闭证书校验，便于临时诊断网络问题。
+        """
+        if not self.ssl_verify:
+            return ssl._create_unverified_context()
+        cafile = certifi.where() if certifi is not None else None
+        return ssl.create_default_context(cafile=cafile)
+
+    def _build_opener(self):
+        """构建 urllib opener，默认绕过系统代理避免代理截断高德 TLS。"""
+        handlers = [HTTPSHandler(context=self._ssl_context)]
+        if self.bypass_proxy:
+            handlers.insert(0, ProxyHandler({}))
+        return build_opener(*handlers)
 
     def _parse_grasp_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         """解析高德纠偏响应，提取纠偏后的经纬度轨迹。"""
@@ -406,8 +461,29 @@ class AmapEtaCorrectClient:
 
     def _urlopen_json(self, req: Request) -> dict[str, Any]:
         """在线程池中执行的同步 HTTP JSON 请求。"""
-        with urlopen(req, timeout=self.timeout_sec) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        last_error = None
+        for attempt in range(1, self.retry_count + 1):
+            try:
+                with self._opener.open(req, timeout=self.timeout_sec) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except (ssl.SSLError, socket.timeout, TimeoutError, URLError, OSError) as exc:
+                last_error = exc
+                if attempt >= self.retry_count:
+                    break
+                time.sleep(self.retry_delay_sec * attempt)
+        raise RuntimeError(self._format_http_error(last_error))
+
+    def _format_http_error(self, exc: BaseException | None) -> str:
+        """输出带部署诊断信息的高德网络错误。"""
+        if exc is None:
+            return "amap_http_error"
+        return (
+            f"amap_http_error:{exc.__class__.__name__}:{exc};"
+            f"retries={self.retry_count};"
+            f"bypass_proxy={self.bypass_proxy};"
+            f"ssl_verify={self.ssl_verify};"
+            f"certifi={'yes' if certifi is not None else 'no'}"
+        )
 
 
 def normalize_stop_type(raw: Any) -> str:
@@ -497,7 +573,7 @@ def normalize_input_segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if idx == 0 and replace_first:
             raw_points = _with_vehicle_position_start(raw_points, vehicle_position)
-        if len(raw_points) < 2:
+        if not raw_points:
             continue
         end_step = normalize_end_step(src.get("endStep") or src.get("action") or src)
         segments.append({
@@ -705,7 +781,7 @@ async def build_eta_pipeline_from_astar_async(
 
     for idx, src in enumerate(input_segments):
         raw_points = normalize_points(src.get("points") or [])
-        if len(raw_points) < 2:
+        if not raw_points:
             continue
 
         end_step = normalize_end_step(src.get("endStep") or {})
@@ -714,8 +790,13 @@ async def build_eta_pipeline_from_astar_async(
         fallback_dist = float(src.get("aStarDistanceM") or polyline_distance(raw_points))
         fallback_eta = fallback_dist / max(speed_mps, 1.0)
 
-        eta = await client.driving_eta(raw_points)
-        chosen = choose_amap_eta(eta)
+        if len(raw_points) < 2:
+            # 零长度 O/D 分段表示两个停靠点吸附到同一节点；不请求高德，ETA 沿用当前累计值。
+            eta = {"ok": False, "reason": "zero_length_segment", "polyline": raw_points}
+            chosen = {"chosenDurationSec": 0.0, "chosenSource": "zero_length_segment"}
+        else:
+            eta = await client.driving_eta(raw_points)
+            chosen = choose_amap_eta(eta)
         chosen_source = chosen["chosenSource"]
 
         display_points = eta.get("polyline") or raw_points

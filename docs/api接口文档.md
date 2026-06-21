@@ -1,6 +1,6 @@
 # 前端接口对接文档
 
-本文档面向 Web 前端、地图前端、乘客端和司机端调用方，描述当前 Flask 后端暴露的 HTTP JSON 接口。接口定义以 `api/routes.py` 当前实现为准。
+本文档面向前端调用方，描述当前 Flask 后端暴露的 HTTP JSON 接口。接口定义以 `api/routes.py` 当前实现为准。
 
 ## 1. 接入总则
 
@@ -12,7 +12,7 @@
 http://localhost:5000
 ```
 
-生产/联调环境地址由部署方提供，前端应通过环境变量或构建配置注入 `BASE_API_URL`，避免在代码中写死。
+生产/联调环境地址由部署方提供。
 
 ### 1.2 协议约定
 
@@ -86,15 +86,11 @@ Accept: application/json
 | 订单 | GET | `/orders/pool` | 查询待匹配订单池 |
 | 订单 | GET | `/orders/<request_id>/eta` | 乘客端查询订单 ETA |
 | 订单 | POST | `/orders/<request_id>/cancel` | 乘客端取消未上车订单 |
-| 车辆 | GET | `/fleet` | 查询车队列表 |
-| 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车状态 |
+| 车辆 | GET | `/fleet` | 查询车队列表信息 |
+| 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
 | 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并刷新车辆后续路径 |
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
-| 仿真 | POST | `/tick` | 手动推进运行状态 |
-| 系统 | GET | `/status` | 获取系统全量状态 |
-| 地图 | POST | `/export` | 导出前端可视化数据文件 |
-| 地图 | GET | `/pois` | 获取 POI 上下客点 |
-| 地图 | GET | `/map/road-network` | 获取路网节点、边、边界 |
+| 系统 | GET  | `/status`                     | 获取系统全量状态           |
 
 ## 3. 公共数据模型
 
@@ -112,207 +108,393 @@ Accept: application/json
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | string/null | 点 ID |
+| `id` | string/null | 路点 ID |
 | `lon` | number | 经度 |
 | `lat` | number | 纬度 |
 | `name` | string/null | 点名称 |
 | `zone` | string/number/null | 分区 |
 
-### 3.2 Vehicle
+### 3.2 Vehicle车辆信息
 
-由 `/fleet`、`/fleet/<vehicle_id>`、`/tick`、`/status` 返回。
+由 `/fleet`、`/fleet/<vehicle_id>` 返回。（`/fleet`返回整个车队的车辆信息，`/fleet/<vehicle_id>`返回单个车辆信息）
 
 ```json
 {
-  "id": "巴士-绿色01",
-  "color": "#10b981",
-  "zone": "A",
-  "capacity": 10,
-  "driver_id": "700045866645051565",
-  "driver_no": "6800A145",
-  "vehicle_id": "72057594546143661",
-  "plate_no": "粤A00001",
-  "time": 1780800000.0,
-  "time_text": "2026-06-07 12:00:00",
-  "on_board_count": 2,
-  "on_board_orders": ["order_1"],
-  "gps": {
-    "lon": 113.38,
-    "lat": 23.04
-  },
-  "idle_target": null,
-  "idle_forecast": null,
-  "planned_route": [
-    {
-      "type": "O",
-      "request_id": "order_1",
-      "node_name": "上车点"
-    }
-  ],
-  "planned_route_point": [],
-  "last_node": "node_a",
-  "next_node": "node_b",
-  "progress": 0.3,
-  "driving_time": 120.0,
-  "is_resting": false,
-  "is_rest_requested": false,
-  "rest_status": "operating",
-  "rest_status_text": "运营中",
-  "desired_rest_time": null,
-  "desired_rest_time_text": null,
-  "rest_duration": 1200,
-  "rest_duration_minutes": 20,
-  "rest_timer": 0,
-  "rest_started_time": null,
-  "rest_started_time_text": null,
-  "can_accept_order": true
+    "can_accept_order": true,		# 车辆是否可以接单
+    "capacity": 10,					# 车辆目前容量
+    "color": "#10b981",
+    "desired_rest_time": null,		
+    "desired_rest_time_text": null,
+    "driver_id": "700045866645051565",	# 司机id号（后续也可以用身份证号代替）
+    "driver_no": "6800A145",			# 司机工号
+    "driving_time": 0.0,
+    "gps": {						# 车辆上传的GPS信息
+        "lat": 23.058379377458202,
+        "lon": 113.40061589134783
+    },
+    "id": "巴士-绿色01",
+    "idle_forecast": {				# 空车预测热点信息
+        "assigned_hotspot_count": 3,
+        "assignment_rank": 1,
+        "assignment_strategy": "demand_first_dispersion",
+        "forecast_end_time": "2026-06-18 13:30:00",
+        "forecast_generated_at": 1781759533.104466,
+        "forecast_generated_at_text": "2026-06-18 13:12:13",
+        "forecast_start_time": "2026-06-18 13:15:00",
+        "horizon_min": 15,
+        "metrics": [],
+        "pred_count": 1
+    },
+    "idle_target": {				# 空车预测热点位置信息
+        "lat": 23.05579616,
+        "lon": 113.40506673,
+        "node_id": "113.404991_23.055733",
+        "node_lat": 23.055732784329244,
+        "node_lon": 113.40499086804854,
+        "node_name": "普通路点 113.404991_23.055733",
+        "snap_distance_to_node": 10.483536685764294
+    },
+    "idle_target_eta_error": null,
+    "idle_target_eta_seconds": 292.0,
+    "idle_target_eta_status": "ready",
+    "idle_target_eta_time": 1781759843.54087,
+    "idle_target_eta_time_text": "2026-06-18 13:17:23",  # 空车预测ETA时间
+    "is_rest_requested": false,
+    "is_resting": false,
+    "last_node": "113.400616_23.058379",
+    "next_node": "113.400616_23.058379",
+    "on_board_count": 0,   # 车上乘客数量
+    "on_board_orders": [],  # 已经上车的订单
+    "planned_route": [   # 车辆任务简要信息
+        {
+            "node_name": "大学城南门",
+            "request_id": "REQ-1781761465166-1-68790",
+            "type": "O"
+        },
+        {
+            "node_name": "体育馆南门",
+            "request_id": "REQ-1781761465166-1-68790",
+            "type": "D"
+        }
+    ],
+    "planned_route_grasp_error": null,
+    "planned_route_grasp_route_version": "巴士-绿色01|IDLE:113.404991_23.055733:None",
+    "planned_route_grasp_status": "ready",
+    "planned_route_grasped_point": [		# 用于高德导航的路径点（只需要读lat和lon就可以了）
+        {
+            "distance_to_gps": 0.13862600199786357,
+            "id": "vehicle_gps",
+            "is_grasp_projection": true,
+            "lat": 23.058379932233322,
+            "lon": 113.40061467795104
+        },
+        {
+            "lat": 23.057915555555553,
+            "lon": 113.40036388888888
+        } ...
+],
+    "planned_route_point": [ ],  # 这个是算法端原始的路径点，可以不用管
+    "planned_route_segment_grasped_point": [     # 根据车辆OD队列分割的高德导航路径点（只需要看points、request_id、target_node三个参数）
+       {
+            "aStarDistanceM": 2475.389976505058,
+            "distance": 2475.389976505058,
+            "endNodeId": "113.409132_23.060574",
+            "endStep": {
+                "orderId": "REQ-1781761465166-1-68790",
+                "type": "O"
+            },
+            "grasp": {
+                "distance_m": 2448.0,
+                "error": null,
+                "ok": true,
+                "request_points": 94,
+                "trimmed_from_previous": true
+            },
+            "index": 0,
+            "points": [				# 用于高德导航的路径点
+                {
+                    "lat": 23.058379932233322,
+                    "lon": 113.40061467795104
+                } ...
+            ],
+            "request_id": "REQ-1781761465166-1-68790",  # 订单id号
+            "source": "grasproad_trimmed_trimmed",
+            "startNodeId": "113.400616_23.058379|113.400616_23.058379@0.000000",
+            "target_node": {		# 目标点信息（O点或D点）
+                "id": "113.409132_23.060574",
+                "lat": 23.060573669207415,
+                "lon": 113.40913197660784,
+                "name": "大学城南门",
+                "zone": 3
+            },
+            "type": "O"			# 目标类型（O点或D点）
+        },
+       {
+            "aStarDistanceM": 1918.2684276721493,
+            "distance": 1918.2684276721493,
+            "endNodeId": "113.409085_23.054287",
+            "endStep": {
+                "orderId": "REQ-1781761465166-1-68790",
+                "type": "D"
+            },
+            "grasp": {
+                "distance_m": 1902.0,
+                "error": null,
+                "ok": true,
+                "request_points": 62,
+                "trimmed_from_previous": true
+            },
+            "index": 1,
+            "points": [
+                {
+                    "lat": 23.060531993113823,
+                    "lon": 113.40909251228433
+                } ...
+            ],
+            "request_id": "REQ-1781761465166-1-68790",
+            "source": "grasproad_trimmed_trimmed",
+            "startNodeId": "113.409132_23.060574",
+            "target_node": {
+                "id": "113.409085_23.054287",
+                "lat": 23.054286591851778,
+                "lon": 113.40908505442682,
+                "name": "体育馆南门",
+                "zone": 3
+            },
+            "type": "D"
+        }
+    ],
+    "plate_no": "粤A00001",       # 车牌号
+    "progress": 0.0,
+    "rest_duration": 1200,
+    "rest_duration_minutes": 20.0,
+    "rest_started_time": null,
+    "rest_started_time_text": null,   
+    "rest_status": "operating",		  # 车辆状态英文表示
+    "rest_status_text": "运营中",		# 车辆状态中文表示
+    "rest_timer": 0.0,
+    "time": 1781759552.0,
+    "time_text": "2026-06-18 13:12:32",
+    "vehicle_id": "72057594546143661",
+    "zone": 3					# 车辆所在区域
 }
 ```
 
-关键字段说明：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 车辆业务 ID，路径参数使用该值 |
-| `gps` | object | 最近一次车辆 GPS |
-| `planned_route` | array | 后续订单停靠点，`O` 表示上车点，`D` 表示下车点 |
-| `planned_route_point` | array | 前端可绘制的后续轨迹点 |
-| `last_node` / `next_node` | string | 车辆所在路网边端点 |
-| `progress` | number | 在当前边上的进度，范围通常为 0-1 |
-| `rest_status` | string | `operating`、`preparing_closure`、`closing`、`resting` |
-| `can_accept_order` | boolean | 当前是否允许继续接单 |
-
-### 3.3 PathUpdateResponse
+### 3.3 路径更新
 
 由 `/fleet/<vehicle_id>/path` 返回。
 
 ```json
 {
-  "vehicle": {
-    "id": "巴士-绿色01"
-  },
-  "gps": {
-    "lon": 113.38,
-    "lat": 23.04
-  },
-  "snap": {
-    "point": {
-      "id": "u|v@0.123456",
-      "lon": 113.38,
-      "lat": 23.04,
-      "name": "车辆当前位置",
-      "zone": "A",
-      "edge_u": "u",
-      "edge_v": "v",
-      "progress": 0.123456,
-      "is_projection": true
+    "events": [],
+    "gps": {    # 车辆的GPS信息
+        "lat": 23.058200500000055,
+        "lon": 113.3998150000001
     },
-    "edge": {
-      "u": "u",
-      "v": "v"
+    "orders": {	  # 车辆已接的订单
+        "on_board": [], 	# 已上车乘客的订单
+        "remaining": [
+            {				# OD队列
+                "request_id": "REQ-1781761465166-1-68790",
+                "target_node": {
+                    "id": "113.409132_23.060574",
+                    "lat": 23.060573669207415,
+                    "lon": 113.40913197660784,
+                    "name": "大学城南门",
+                    "zone": 3
+                },
+                "type": "O"
+            },
+            {
+                "request_id": "REQ-1781761465166-1-68790",
+                "target_node": {
+                    "id": "113.409085_23.054287",
+                    "lat": 23.054286591851778,
+                    "lon": 113.40908505442682,
+                    "name": "体育馆南门",
+                    "zone": 3
+                },
+                "type": "D"
+            }
+        ]
     },
-    "progress": 0.123456,
-    "distance_to_gps": 4.2,
-    "source": "planned_route",
-    "next_node": {
-      "id": "v",
-      "lon": 113.39,
-      "lat": 23.05,
-      "name": "节点名",
-      "zone": "A"
+    "route": {		# 车辆规划的完整路线	
+        "distance": 4323.3288480945885,
+        "planned_step_count": 2,
+        "points": [
+            {
+                "edge_u": "113.400616_23.058379",
+                "edge_v": "113.400295_23.057820",
+                "id": "113.400616_23.058379|113.400295_23.057820@0.859277",
+                "is_projection": true,
+                "lat": 23.057898922358376,
+                "lon": 113.40033979285639,
+                "name": "车辆当前位置",
+                "progress": 0.8592765969912309,
+                "zone": 3
+            },
+            ...
+            {
+                "id": "113.409085_23.054287",
+                "lat": 23.054286591851778,
+                "lon": 113.40908505442682,
+                "name": "体育馆南门",
+                "zone": 3
+            }
+        ],
+        "segments": [		# 根据OD队列分割后的路线
+            {
+                "distance": 2405.0604204224396,
+                "points": [
+                    {
+                        "edge_u": "113.400616_23.058379",
+                        "edge_v": "113.400295_23.057820",
+                        "id": "113.400616_23.058379|113.400295_23.057820@0.859277",
+                        "is_projection": true,
+                        "lat": 23.057898922358376,
+                        "lon": 113.40033979285639,
+                        "name": "车辆当前位置",
+                        "progress": 0.8592765969912309,
+                        "zone": 3
+                    },
+     		       ...
+                    {
+                        "id": "113.409132_23.060574",
+                        "lat": 23.060573669207415,
+                        "lon": 113.40913197660784,
+                        "name": "大学城南门",
+                        "zone": 3
+                    }
+                ],
+                "request_id": "REQ-1781761465166-1-68790",    # 订单号
+                "target": {
+                    "id": "113.409132_23.060574",
+                    "lat": 23.060573669207415,
+                    "lon": 113.40913197660784,
+                    "name": "大学城南门",
+                    "zone": 3
+                },
+                "type": "O"
+            },
+            {
+                "distance": 1918.2684276721493,
+                "points": [
+                    {
+                        "id": "113.409132_23.060574",
+                        "lat": 23.060573669207415,
+                        "lon": 113.40913197660784,
+                        "name": "大学城南门",
+                        "zone": 3
+                    },
+				  ...
+                    {
+                        "id": "113.409085_23.054287",
+                        "lat": 23.054286591851778,
+                        "lon": 113.40908505442682,
+                        "name": "体育馆南门",
+                        "zone": 3
+                    }
+                ],
+                "request_id": "REQ-1781761465166-1-68790",	 # 订单号
+                "target": {
+                    "id": "113.409085_23.054287",
+                    "lat": 23.054286591851778,
+                    "lon": 113.40908505442682,
+                    "name": "体育馆南门",
+                    "zone": 3
+                },
+                "type": "D"
+            }
+        ]
+    },
+'''  # 这一部分是算法内部所需字段，不需要管
+    "snap": {
+        "distance_to_gps": 63.30390822174122,
+        "edge": {
+            "u": "113.400616_23.058379",
+            "v": "113.400295_23.057820"
+        },
+        "next_node": {
+            "id": "113.400295_23.057820",
+            "lat": 23.057820238408553,
+            "lon": 113.40029457631096,
+            "name": "普通路点 113.400295_23.057820",
+            "zone": 3
+        },
+        "point": {
+            "edge_u": "113.400616_23.058379",
+            "edge_v": "113.400295_23.057820",
+            "id": "113.400616_23.058379|113.400295_23.057820@0.859277",
+            "is_projection": true,
+            "lat": 23.057898922358376,
+            "lon": 113.40033979285639,
+            "name": "车辆当前位置",
+            "progress": 0.8592765969912309,
+            "zone": 3
+        },
+        "progress": 0.8592765969912309,
+        "source": "planned_route"
+    },
+    "snapped_point": {
+        "distance_to_gps": 63.30390822174122,
+        "edge": {
+            "u": "113.400616_23.058379",
+            "v": "113.400295_23.057820"
+        },
+        "id": "113.400616_23.058379|113.400295_23.057820@0.859277",
+        "lat": 23.057898922358376,
+        "lon": 113.40033979285639,
+        "name": "车辆当前位置",
+        "next_node": {
+            "id": "113.400295_23.057820",
+            "lat": 23.057820238408553,
+            "lon": 113.40029457631096,
+            "name": "普通路点 113.400295_23.057820",
+            "zone": 3
+        },
+        "progress": 0.8592765969912309,
+        "snap_source": "planned_route",
+        "zone": 3
+    },
+'''
+    "vehicle": {	# 车辆信息
+        "id": "巴士-绿色01"
     }
-  },
-  "route": {
-    "points": [],
-    "distance": 1234.5,
-    "planned_step_count": 2,
-    "segments": []
-  },
-  "events": [],
-  "orders": {
-    "on_board": ["order_1"],
-    "remaining": []
-  },
-  "path": [],
-  "snapped_point": {}
 }
 ```
 
-说明：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `gps` | object | 前端上报的原始 GPS |
-| `snap` | object | GPS 吸附到路网后的结果 |
-| `route.points` | array | 主轨迹点，前端画线优先使用 |
-| `route.segments` | array | 按 O/D 目标拆分的路径段 |
-| `events` | array | 本次 GPS 上报触发的上车/下车事件 |
-| `orders.on_board` | array | 当前车上订单 ID |
-| `orders.remaining` | array | 剩余计划步骤 |
-| `path` | array | 兼容字段，等于 `route.points` |
-| `snapped_point` | object | 兼容字段 |
-
-`/fleet/<vehicle_id>/path` 不返回订单 ETA。订单 ETA 通过 `/orders/<request_id>/eta` 查询。
-
-### 3.4 RouteSegment
-
-```json
-{
-  "type": "O",
-  "request_id": "order_1",
-  "target": {
-    "id": "node_1",
-    "lon": 113.38,
-    "lat": 23.04,
-    "name": "上车点",
-    "zone": "A"
-  },
-  "distance": 520.4,
-  "points": []
-}
-```
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `type` | string | `O` 上车点，`D` 下车点，`IDLE` 空车停靠 |
-| `request_id` | string/null | 订单 ID；空车停靠时为 null |
-| `target` | Point | 当前分段目标点 |
-| `distance` | number | 分段路网距离，单位米 |
-| `points` | array | 当前分段轨迹点 |
-| `forecast` | object/null | 空车热点预测信息，仅特定场景出现 |
-
-### 3.5 OrderEtaResponse
+### 3.4 订单ETA信息
 
 由 `/orders/<request_id>/eta` 返回。
 
 ```json
 {
-  "request_id": "order_1",
-  "status": "waiting",
-  "vehicle": {
+  "request_id": "order_1",			# 订单ID
+  "status": "waiting",				# 订单状态
+  "vehicle": {						# 车辆信息
     "id": "巴士-绿色01",
     "plate_no": "粤A00001"
   },
-  "origin": {
+  "origin": {						# 订单O点
     "name": "上车点",
     "lon": 113.38,
     "lat": 23.04
   },
-  "destination": {
+  "destination": {					# 订单D点
     "name": "目的地",
     "lon": 113.39,
     "lat": 23.05
   },
   "eta": {
-    "provider": "amap",
+    "provider": "amap",						
     "status": "ready",
-    "updated_at": 1780800000,
-    "updated_at_text": "2026-06-07 12:00:00",
-    "estimated_arrival_time": 1780800300,
-    "estimated_arrival_time_text": "2026-06-07 12:05:00",
+    "updated_at": 1780800000,							# ETA更新时间戳
+    "updated_at_text": "2026-06-07 12:00:00",			# ETA更新时间文本
+    "estimated_arrival_time": 1780800300,				# 车辆的预计到达时间戳
+    "estimated_arrival_time_text": "2026-06-07 12:05:00",	# 订单的预计到达时间文本
     "estimated_arrival_eta_seconds": 300,
-    "estimated_dropoff_time": 1780801500,
-    "estimated_dropoff_time_text": "2026-06-07 12:25:00",
+    "estimated_dropoff_time": 1780801500,                 # 车辆的预计送时间戳
+    "estimated_dropoff_time_text": "2026-06-07 12:25:00",	# 订单的预计送达时间文本
     "estimated_dropoff_eta_seconds": 1500,
     "error": null
   }
@@ -342,15 +524,6 @@ ETA 状态：
 | `pending` | 已派车但 ETA 尚未刷新 | 展示“计算中” |
 | `completed` | 已完成 | 展示实际完成时间 |
 | `cancelled` | 已取消 | 展示取消状态 |
-
-字段语义：
-
-| 字段 | 说明 |
-| --- | --- |
-| `estimated_arrival_time` | 车辆预计到达上车点时间 |
-| `estimated_arrival_eta_seconds` | 从 `updated_at` 到上车点的预计秒数 |
-| `estimated_dropoff_time` | 乘客预计到达目的地时间 |
-| `estimated_dropoff_eta_seconds` | 从 `updated_at` 到目的地的预计秒数 |
 
 ## 4. 接口详情
 
@@ -382,18 +555,24 @@ ETA 状态：
 
 ```json
 {
-  "mode": "real_time",
-  "timezone": "Asia/Shanghai",
-  "timestamp": 1780800000.0,
-  "time_text": "2026-06-07 12:00:00",
-  "clock_interval_seconds": 1.0,
-  "clock_running": true,
-  "clock_last_dt": 1.0,
-  "clock_tick_count": 100,
-  "eta_refresh_interval_seconds": 5.0,
-  "eta_thread_running": true,
-  "eta_last_refresh_timestamp": 1780800000.0,
-  "eta_last_refresh_time_text": "2026-06-07 12:00:00"
+    "clock_interval_seconds": 1.0,
+    "clock_last_dt": 1.0,
+    "clock_running": true,
+    "clock_tick_count": 12871,
+    "eta_last_refresh_time_text": "2026-06-18 16:48:03",  # ETA更新时间文本（每5秒会进行订单的ETA更新）
+    "eta_last_refresh_timestamp": 1781772483.0,		# ETA更新时间戳
+    "eta_refresh_interval_seconds": 5.0,
+    "eta_thread_running": true,
+    "mode": "real_time",
+    "route_grasp_async_enabled": true,
+    "route_grasp_inflight_count": 0,
+    "route_grasp_last_refresh_time_text": "2026-06-18 16:44:53",	# 高德纠偏时间文本
+    "route_grasp_last_refresh_timestamp": 1781772293.058061,		# 高德纠偏时间戳
+    "route_grasp_mode": "on_route_update_async",
+    "route_grasp_thread_running": false,
+    "time_text": "2026-06-18 16:48:05",			# 当前时间文本
+    "timestamp": 1781772485.0,					# 当前时间戳
+    "timezone": "Asia/Shanghai"
 }
 ```
 
@@ -410,7 +589,7 @@ ETA 状态：
 
 ```json
 {
-  "shp_path": "dxc_traffic_shp/dxc_rule.shp"
+  "shp_path": "dxc_traffic_shp/dxc_rule.shp"   # 指定的路网文件
 }
 ```
 
@@ -443,7 +622,7 @@ ETA 状态：
 状态码：
 
 | 状态码 | 场景 |
-| --- | --- |
+| --- | :-- |
 | 200 | 初始化成功或已初始化 |
 | 400 | SHP 文件不存在 |
 | 500 | 初始化异常 |
@@ -490,7 +669,7 @@ ETA 状态：
 
 ```json
 {
-  "status": "pooled",
+  "status": "pooled",   
   "request_id": "order_10001",
   "origin_node": "起点POI",
   "origin_coords": {
@@ -532,8 +711,8 @@ ETA 状态：
 
 ```json
 {
-  "pool_size": 1,
-  "completed_orders_size": 30,
+  "pool_size": 1,   # 订单池中的订单数量
+  "completed_orders_size": 30,  # 已完成订单数
   "orders": [
     {
       "request_id": "order_10001",
@@ -546,15 +725,11 @@ ETA 状态：
       },
       "passenger_count": 2,
       "req_time": 1780800000.0
-    }
+    },
+      ...
   ]
 }
 ```
-
-前端建议：
-
-- 调度大屏可按 3-5 秒轮询。
-- 乘客端不建议直接依赖该接口判断自身订单状态，应使用 `/orders/<request_id>/eta`。
 
 ### 4.6 GET `/orders/<request_id>/eta`
 
@@ -566,7 +741,7 @@ ETA 状态：
 | --- | --- | --- |
 | `request_id` | string | 订单 ID |
 
-成功响应见 `OrderEtaResponse`。
+成功响应：见 `3.4`的`订单ETA信息`。
 
 状态码：
 
@@ -576,9 +751,8 @@ ETA 状态：
 | 400 | 系统未初始化 |
 | 404 | 订单不存在 |
 
-前端建议：
+字段解释：
 
-- 创建订单后每 3-5 秒轮询一次。
 - 如果 `status=matching` 或 `eta.status=not_assigned`，展示“正在匹配车辆”。
 - 如果 `eta.status=loading/pending`，展示“ETA 计算中”。
 - 如果 `eta.status=ready/partial`，展示预计到达和预计送达时间。
@@ -659,7 +833,7 @@ ETA 状态：
 }
 ```
 
-`fleet[]` 元素结构见 `Vehicle`。
+`fleet[]` 元素结构说明见`3.2`的`Vehicle车辆信息`。
 
 前端建议：
 
@@ -676,7 +850,7 @@ ETA 状态：
 | --- | --- | --- |
 | `vehicle_id` | string | 车辆业务 ID，注意 URL 编码中文 |
 
-成功响应：`Vehicle`。
+成功响应：见`3.2`的`Vehicle车辆信息`。
 
 状态码：
 
@@ -706,7 +880,7 @@ ETA 状态：
 | `lon` / `lng` / `longitude` | 任一字段可作为经度 |
 | `lat` / `latitude` | 任一字段可作为纬度 |
 
-成功响应：`PathUpdateResponse`。
+成功响应：见`3.3`的`路径更新`。
 
 状态码：
 
@@ -729,10 +903,12 @@ ETA 状态：
 
 司机端请求休息或预约休息。
 
-请求体，立即收车：
+请求体为空的话，表示立即收车：
 
 ```json
-{}
+{
+    
+}
 ```
 
 请求体，预约休息：
@@ -792,89 +968,9 @@ ETA 状态：
 | 400 | 未初始化或参数格式错误 |
 | 404 | 车辆不存在 |
 
-### 4.12 POST `/tick`
-
-手动刷新运行状态。当前实现忽略请求体里的 `dt`，按后端真实 elapsed seconds 推进。
-
-请求体：
-
-```json
-{
-  "dt": 0.1
-}
-```
-
-响应示例：
-
-```json
-{
-  "dt": 1.0,
-  "system_time": {},
-  "fleet": []
-}
-```
-
-前端建议：
-
-- 正常页面通常不需要调用，后台时钟线程会自动推进。
-- 测试面板或调试工具可手动调用。
-
-### 4.13 GET `/status`
-
-获取系统全量状态快照。
-
-响应示例：
-
-```json
-{
-  "initialized": true,
-  "system_time": {},
-  "nodes_count": 1000,
-  "pois_count": 50,
-  "edges_count": 2000,
-  "fleet": [],
-  "order_pool_size": 1,
-  "completed_orders": 30
-}
-```
-
-前端建议：
-
-- 管理端首页可使用该接口一次性加载系统状态。
-- 高频车辆地图不建议只依赖 `/status`，应按需要调用 `/fleet` 或单车路径接口。
-
-### 4.14 POST `/export`
-
-导出前端可视化数据文件。
-
-请求体：
-
-```json
-{
-  "file_path": "map_data.js"
-}
-```
-
-响应：
-
-```json
-{
-  "status": "ok",
-  "file": "map_data.js"
-}
-```
-
-状态码：
-
-| 状态码 | 场景 |
-| --- | --- |
-| 200 | 导出成功 |
-| 400 | 系统未初始化 |
-| 500 | 导出失败 |
-
 ### 4.15 GET `/pois`
 
-获取所有合法上下客 POI。
+获取所有合法上下客 POI兴趣点。
 
 响应示例：
 
@@ -892,54 +988,14 @@ ETA 状态：
 }
 ```
 
-前端建议：
-
-- 订单创建页可用于起终点选择、地图点位展示。
-- 若前端允许用户任意点选，后端仍会吸附到最近 POI。
-
-### 4.16 GET `/map/road-network`
-
-获取路网节点、道路边、POI ID 列表和地图边界。
-
-响应示例：
-
-```json
-{
-  "nodes": {
-    "node_1": {
-      "id": "node_1",
-      "lon": 113.38,
-      "lat": 23.04,
-      "name": "节点A",
-      "zone": "A",
-      "is_poi": true
-    }
-  },
-  "edges": [],
-  "pois": ["node_1"],
-  "bounds": {
-    "min_lon": 113.1,
-    "max_lon": 113.9,
-    "min_lat": 22.9,
-    "max_lat": 23.5
-  }
-}
-```
-
-前端建议：
-
-- 地图底图或调试路网可使用该接口。
-- 路网数据量可能较大，建议页面初始化时拉取一次并缓存。
-
 ## 5. 前端典型流程
 
 ### 5.1 系统启动流程
 
-1. 调用 `GET /health`。
+1. 调用 `GET /health`查询后端健康。
 2. 如果 `initialized=false`，调用 `POST /init`。
 3. 调用 `GET /time` 校准后端业务时间。
 4. 调用 `GET /pois` 和 `GET /fleet` 初始化页面数据。
-5. 地图页按需调用 `GET /map/road-network`。
 
 ### 5.2 乘客下单流程
 
@@ -956,35 +1012,21 @@ ETA 状态：
 3. 成功后展示取消成功并停止 ETA 轮询。
 4. 如果返回 409，刷新 `/orders/<request_id>/eta` 并更新 UI 状态。
 
-### 5.4 车辆地图流程
-
-1. 调用 `GET /fleet` 获取车辆列表。
-2. 选择车辆后周期性调用 `POST /fleet/<vehicle_id>/path` 上报 GPS。
-3. 使用 `snap.point` 绘制车辆吸附位置。
-4. 使用 `route.points` 绘制后续路线。
-5. 使用 `route.segments` 展示按 O/D 拆分的任务段。
-6. 使用 `events` 触发上车/下车 UI 变更。
-
 ### 5.5 司机休息流程
 
 1. 司机点击立即休息：调用 `POST /fleet/<vehicle_id>/rest`，请求体 `{}`。
 2. 司机预约休息：传 `desired_rest_time` 和可选 `rest_duration_minutes`。
 3. 根据 `decision` 和 `rest_status_text` 展示状态。
-4. 车辆进入 `closing/resting` 后前端应禁用继续接单相关操作。
 
 ## 6. 前端实现建议
 
 ### 6.1 轮询频率
 
-| 数据 | 推荐频率 |
+| 数、据 | 推荐频率 |
 | --- | --- |
-| `/fleet` | 3-5 秒 |
 | `/fleet/<vehicle_id>/path` | 1-5 秒，取决于 GPS 更新频率 |
-| `/orders/<request_id>/eta` | 3-5 秒 |
-| `/orders/pool` | 5 秒 |
-| `/status` | 5-10 秒 |
-| `/pois` | 页面初始化一次 |
-| `/map/road-network` | 页面初始化一次并缓存 |
+| `/orders/<request_id>/eta` | 5-10 秒                     |
+| `/orders/pool`             | 5 秒                        |
 
 ### 6.2 URL 编码
 
@@ -1013,7 +1055,6 @@ const url = `/orders/${encodeURIComponent(requestId)}/eta`;
 
 ```powershell
 $env:AMAP_API_KEY="你的高德Web服务Key"
-python main.py
 ```
 
 如果未配置 Key：
@@ -1031,7 +1072,7 @@ python main.py
 - 点击下单后立即禁用按钮，等待接口返回。
 - 失败后允许重试，但重试时复用同一个 `request_id` 前需与后端确认策略。
 
-### 6.6 错误展示建议
+### 6.6 后端一些错误展示建议
 
 | 场景 | 前端文案建议 |
 | --- | --- |
@@ -1041,168 +1082,3 @@ python main.py
 | 路径不可达 | 当前路线不可达，请调整任务或联系调度 |
 | 已上车不可取消 | 乘客已上车，当前订单不可取消 |
 | ETA disabled/error | ETA 暂不可用，请稍后刷新 |
-
-## 7. 接口兼容说明
-
-### 7.1 路径接口兼容字段
-
-`/fleet/<vehicle_id>/path` 当前保留：
-
-- `path`: 等于 `route.points`
-- `snapped_point`: 旧版吸附点字段
-
-新前端应优先读取：
-
-- `route.points`
-- `route.segments`
-- `snap.point`
-
-### 7.2 不再推荐依赖的字段
-
-前端不应依赖以下旧字段：
-
-- 顶层 `planned_route_point`
-- 顶层 `snapped_node`
-- 顶层 `segments`
-
-### 7.3 ETA 不在路径接口返回
-
-订单 ETA 不通过 `/fleet/<vehicle_id>/path` 返回。请使用：
-
-```http
-GET /orders/<request_id>/eta
-```
-
-## 8. 最小 TypeScript 类型参考
-
-```ts
-export interface Point {
-  id?: string | null;
-  lon: number;
-  lat: number;
-  name?: string | null;
-  zone?: string | number | null;
-}
-
-export interface Vehicle {
-  id: string;
-  color: string;
-  zone: string | number;
-  capacity: number;
-  driver_id: string;
-  driver_no: string;
-  vehicle_id: string;
-  plate_no: string;
-  time: number;
-  time_text: string;
-  on_board_count: number;
-  on_board_orders: string[];
-  gps: { lon: number | null; lat: number | null };
-  planned_route: Array<{
-    type: "O" | "D";
-    request_id: string;
-    node_name: string;
-  }>;
-  planned_route_point: Point[];
-  last_node: string;
-  next_node: string;
-  progress: number;
-  rest_status: "operating" | "preparing_closure" | "closing" | "resting";
-  rest_status_text: string;
-  can_accept_order: boolean;
-}
-
-export interface PathUpdateResponse {
-  vehicle: { id: string };
-  gps: { lon: number; lat: number };
-  snap: {
-    point: Point & {
-      edge_u?: string | null;
-      edge_v?: string | null;
-      progress?: number | null;
-      is_projection: boolean;
-    };
-    edge: { u?: string; v?: string };
-    progress?: number | null;
-    distance_to_gps?: number | null;
-    source?: string | null;
-    next_node?: Point | null;
-  };
-  route: {
-    points: Point[];
-    distance: number;
-    planned_step_count: number;
-    segments: RouteSegment[];
-  };
-  events: Array<{
-    action: "pickup" | "dropoff";
-    type: "O" | "D";
-    request_id: string;
-    node: Point;
-    distance_to_target?: number;
-  }>;
-  orders: {
-    on_board: string[];
-    remaining: Array<{
-      type: "O" | "D";
-      request_id: string;
-      target_node: Point;
-    }>;
-  };
-  path: Point[];
-  snapped_point: Record<string, unknown>;
-}
-
-export interface RouteSegment {
-  type: "O" | "D" | "IDLE";
-  request_id: string | null;
-  target: Point;
-  distance: number;
-  points: Point[];
-  forecast?: Record<string, unknown>;
-}
-
-export interface OrderEtaResponse {
-  request_id: string;
-  status: "matching" | "waiting" | "riding" | "completed" | "cancelled";
-  vehicle: null | {
-    id: string;
-    plate_no: string;
-  };
-  origin: {
-    name: string | null;
-    lon: number | null;
-    lat: number | null;
-  };
-  destination: {
-    name: string | null;
-    lon: number | null;
-    lat: number | null;
-  };
-  eta: {
-    provider: "amap";
-    status: string;
-    updated_at: number | null;
-    updated_at_text: string | null;
-    estimated_arrival_time: number | null;
-    estimated_arrival_time_text: string | null;
-    estimated_arrival_eta_seconds: number | null;
-    estimated_dropoff_time: number | null;
-    estimated_dropoff_time_text: string | null;
-    estimated_dropoff_eta_seconds: number | null;
-    error: string | null;
-  };
-}
-```
-
-## 9. 联调检查清单
-
-- 后端是否可访问 `GET /health`。
-- 系统是否已初始化，`GET /health.initialized=true`。
-- `GET /time.clock_running=true`。
-- `GET /time.eta_thread_running=true`。
-- 前端是否对中文 `vehicle_id` 做了 URL 编码。
-- 前端是否使用 `lon/lat` 顺序调用地图。
-- 订单创建后是否改用 `/orders/<request_id>/eta` 查询状态和 ETA。
-- 路径绘制是否优先使用 `route.points` 和 `snap.point`。
-- 未配置高德 Key 时，前端是否能正确展示 ETA 不可用状态。

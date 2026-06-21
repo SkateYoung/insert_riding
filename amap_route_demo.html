@@ -179,6 +179,7 @@
             <span style="--line-color:#60a5fa;">后端算法原始轨迹</span>
             <span style="--line-color:#16a34a;">订单上客点 O</span>
             <span style="--line-color:#e11d48;">订单下客点 D</span>
+            <span style="--line-color:#f97316;">原始轨迹偏差采样点</span>
         </div>
 
         <div id="status" class="status">等待地图加载...</div>
@@ -189,6 +190,11 @@
         const MAX_WAYPOINTS_PER_REQUEST = 16;
         const MAX_GRASP_ROAD_POINTS = 100;
         const GRASP_ROAD_POINT_INTERVAL_SECONDS = 5;
+        const ROUTE_COMPARISON_SAMPLE_LIMIT = 120;
+        const ROUTE_COMPARISON_MARKER_LIMIT = 8;
+        const ROUTE_COMPARISON_MIN_MARKER_DEVIATION_METERS = 5;
+        const DRIVING_REQUEST_INTERVAL_MS = 900;
+        const DRIVING_QPS_RETRY_DELAYS_MS = [1500, 3000, 6000];
 
         const map = new AMap.Map("container", {
             zoom: 14,
@@ -299,7 +305,7 @@
             map.add(marker);
         }
 
-        function addOdMarker(segment, index) {
+        function addOdMarker(segment, index, pixelOffsetX = 0) {
             if (!segment.target) {
                 return;
             }
@@ -314,7 +320,7 @@
             ].filter(Boolean).join(" - ");
             const marker = new AMap.Marker({
                 position: [segment.target.lon, segment.target.lat],
-                offset: new AMap.Pixel(-12, -28),
+                offset: new AMap.Pixel(-12 + pixelOffsetX, -28),
                 title,
                 content: [
                     `<div style="position:relative;width:24px;height:42px;">`,
@@ -331,8 +337,35 @@
             map.add(marker);
         }
 
+        function getOdMarkerKey(segment) {
+            if (!segment.target) {
+                return "";
+            }
+            return `${Number(segment.target.lon).toFixed(6)},${Number(segment.target.lat).toFixed(6)}`;
+        }
+
         function drawOdMarkers(orderSegments) {
-            orderSegments.forEach((segment, index) => addOdMarker(segment, index));
+            const keyCounts = new Map();
+            orderSegments.forEach(segment => {
+                const key = getOdMarkerKey(segment);
+                if (!key) {
+                    return;
+                }
+                keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+            });
+
+            const keySeen = new Map();
+            orderSegments.forEach((segment, index) => {
+                const key = getOdMarkerKey(segment);
+                const count = keyCounts.get(key) || 1;
+                const seen = keySeen.get(key) || 0;
+                keySeen.set(key, seen + 1);
+
+                // Multiple O/D steps can share one POI. Spread only the icon pixels,
+                // keeping the geographic anchor on the original backend O/D coordinate.
+                const pixelOffsetX = count > 1 ? (seen - ((count - 1) / 2)) * 14 : 0;
+                addOdMarker(segment, index, pixelOffsetX);
+            });
         }
 
         function sampleControlPoints(points, maxCount) {
@@ -367,6 +400,44 @@
             return groups;
         }
 
+        function buildDrivingGroupsFromOdPointQueue(odPointQueue, currentPoint) {
+            const queue = [];
+            if (currentPoint) {
+                queue.push({
+                    type: "CURRENT",
+                    requestId: null,
+                    targetName: "车辆当前位置",
+                    point: currentPoint
+                });
+            }
+            queue.push(...odPointQueue);
+
+            const groups = [];
+            for (let i = 0; i < queue.length - 1; i += 1) {
+                const start = queue[i].point;
+                const end = queue[i + 1].point;
+                if (!start || !end) {
+                    continue;
+                }
+                groups.push({
+                    index: i,
+                    endpointOnly: true,
+                    segment: queue[i + 1],
+                    points: [start, end]
+                });
+            }
+            return groups;
+        }
+
+        function buildFallbackDrivingGroups(points) {
+            return buildDrivingGroups(points).map((group, index) => ({
+                index,
+                endpointOnly: false,
+                segment: null,
+                points: group
+            }));
+        }
+
         function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
         }
@@ -389,6 +460,115 @@
                 Math.sin(dLat / 2) ** 2
                 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
             return 2 * earthRadius * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+        }
+
+        function pathDistanceMeters(points) {
+            let distance = 0;
+            for (let i = 1; i < points.length; i += 1) {
+                distance += distanceMeters(points[i - 1], points[i]);
+            }
+            return distance;
+        }
+
+        function formatMeters(value) {
+            if (!Number.isFinite(value)) {
+                return "-";
+            }
+            if (Math.abs(value) >= 1000) {
+                return `${(value / 1000).toFixed(2)} km`;
+            }
+            return `${value.toFixed(0)} m`;
+        }
+
+        function formatSignedMeters(value) {
+            if (!Number.isFinite(value)) {
+                return "-";
+            }
+            const prefix = value > 0 ? "+" : "";
+            return `${prefix}${formatMeters(value)}`;
+        }
+
+        function formatSignedPercent(value) {
+            if (!Number.isFinite(value)) {
+                return "-";
+            }
+            const prefix = value > 0 ? "+" : "";
+            return `${prefix}${value.toFixed(1)}%`;
+        }
+
+        function samplePathPoints(points, maxCount) {
+            if (points.length <= maxCount) {
+                return points.slice();
+            }
+            if (maxCount <= 1) {
+                return points.length ? [points[0]] : [];
+            }
+
+            const sampled = [];
+            for (let i = 0; i < maxCount; i += 1) {
+                const index = Math.round((i * (points.length - 1)) / (maxCount - 1));
+                sampled.push(points[index]);
+            }
+            return sampled;
+        }
+
+        function createLocalProjector(referencePoint) {
+            const earthRadius = 6371000;
+            const referenceLat = toRadians(referencePoint.lat);
+            const referenceLon = referencePoint.lon;
+            const referenceLatDegrees = referencePoint.lat;
+
+            return point => ({
+                x: toRadians(point.lon - referenceLon) * earthRadius * Math.cos(referenceLat),
+                y: toRadians(point.lat - referenceLatDegrees) * earthRadius
+            });
+        }
+
+        function pointToSegmentDistanceMeters(projectedPoint, projectedStart, projectedEnd) {
+            const dx = projectedEnd.x - projectedStart.x;
+            const dy = projectedEnd.y - projectedStart.y;
+            const lengthSquared = dx * dx + dy * dy;
+            if (lengthSquared <= 0) {
+                return Math.hypot(projectedPoint.x - projectedStart.x, projectedPoint.y - projectedStart.y);
+            }
+
+            const t = Math.max(0, Math.min(1,
+                ((projectedPoint.x - projectedStart.x) * dx + (projectedPoint.y - projectedStart.y) * dy) / lengthSquared
+            ));
+            const nearestX = projectedStart.x + t * dx;
+            const nearestY = projectedStart.y + t * dy;
+            return Math.hypot(projectedPoint.x - nearestX, projectedPoint.y - nearestY);
+        }
+
+        function nearestDistanceToPathMeters(point, path, projectPoint) {
+            if (!path.length) {
+                return Infinity;
+            }
+            if (path.length === 1) {
+                return distanceMeters(point, path[0]);
+            }
+
+            const projectedPoint = projectPoint(point);
+            let minDistance = Infinity;
+            for (let i = 1; i < path.length; i += 1) {
+                const distance = pointToSegmentDistanceMeters(
+                    projectedPoint,
+                    projectPoint(path[i - 1]),
+                    projectPoint(path[i])
+                );
+                if (distance < minDistance) {
+                    minDistance = distance;
+                }
+            }
+            return minDistance;
+        }
+
+        function percentileValue(sortedValues, ratio) {
+            if (!sortedValues.length) {
+                return null;
+            }
+            const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(sortedValues.length * ratio) - 1));
+            return sortedValues[index];
         }
 
         function bearingDegrees(a, b) {
@@ -431,11 +611,106 @@
             return path;
         }
 
+        function formatCoordinate(point) {
+            if (!point) {
+                return "-";
+            }
+            return `${Number(point.lon).toFixed(6)}, ${Number(point.lat).toFixed(6)}`;
+        }
+
+        function getDrivingGroupDescription(group) {
+            const segmentIndex = Number.isInteger(group?.index) ? `第 ${group.index + 1} 段` : "当前分段";
+            const segment = group?.segment;
+            if (!segment) {
+                return segmentIndex;
+            }
+
+            const typeText = segment.type === "O"
+                ? "上客点 O"
+                : (segment.type === "D" ? "下客点 D" : `目标点 ${segment.type || "-"}`);
+            const orderText = segment.requestId ? `订单 ${segment.requestId}` : "无订单号";
+            const targetText = segment.targetName ? `，目标：${segment.targetName}` : "";
+            return `${segmentIndex}，${typeText}，${orderText}${targetText}`;
+        }
+
+        function getAmapDrivingErrorDetail(result) {
+            if (!result) {
+                return "高德未返回 result";
+            }
+            if (typeof result === "string") {
+                return result;
+            }
+
+            const detailKeys = ["info", "message", "infocode", "status", "type", "error", "errInfo"];
+            const details = [];
+            for (const key of detailKeys) {
+                const value = result[key];
+                if (value !== undefined && value !== null && value !== "") {
+                    details.push(`${key}=${typeof value === "object" ? JSON.stringify(value) : value}`);
+                }
+            }
+            if (Array.isArray(result.routes)) {
+                details.push(`routes=${result.routes.length}`);
+            }
+            if (Array.isArray(result.waypoints)) {
+                details.push(`waypoints=${result.waypoints.length}`);
+            }
+            return details.length ? details.join("；") : "高德未返回详细错误字段";
+        }
+
+        function getAmapDrivingErrorSignal(status, result) {
+            const values = [status];
+            if (typeof result === "string") {
+                values.push(result);
+            } else if (result && typeof result === "object") {
+                for (const key of ["info", "message", "infocode", "status", "type", "error", "errInfo"]) {
+                    const value = result[key];
+                    if (value !== undefined && value !== null) {
+                        values.push(typeof value === "object" ? JSON.stringify(value) : String(value));
+                    }
+                }
+            }
+            return values.join(" ").toUpperCase();
+        }
+
+        function isAmapDrivingQpsLimit(status, result) {
+            const signal = getAmapDrivingErrorSignal(status, result);
+            return signal.includes("CUQPS_HAS_EXCEEDED_THE_LIMIT")
+                || signal.includes("QPS_HAS_EXCEEDED")
+                || (signal.includes("QPS") && signal.includes("LIMIT"));
+        }
+
+        function buildDrivingFailureError(status, result, group, start, end, waypoints, reason) {
+            const message = [
+                `高德驾车规划失败：${reason || status}`,
+                `失败分段：${getDrivingGroupDescription(group)}`,
+                `起点：${formatCoordinate(start)}`,
+                `终点：${formatCoordinate(end)}`,
+                `途经点数量：${waypoints.length}`,
+                `AMap status：${status}`,
+                `AMap result：${getAmapDrivingErrorDetail(result)}`
+            ].join("\n");
+            const error = new Error(message);
+            error.amapStatus = status;
+            error.amapResult = result;
+            error.group = group;
+            error.start = start;
+            error.end = end;
+            error.waypoints = waypoints;
+            error.isQpsLimit = isAmapDrivingQpsLimit(status, result);
+            return error;
+        }
+
         function searchDriving(group) {
             return new Promise((resolve, reject) => {
-                const start = group[0];
-                const end = group[group.length - 1];
-                const waypoints = group.slice(1, -1).map(asLngLat);
+                const groupPoints = Array.isArray(group) ? group : group.points;
+                const start = groupPoints[0];
+                const end = groupPoints[groupPoints.length - 1];
+                if (distanceMeters(start, end) <= 2) {
+                    resolve([start, end]);
+                    return;
+                }
+                const waypoints = group.endpointOnly ? [] : groupPoints.slice(1, -1).map(asLngLat);
 
                 driving.search(
                     asLngLat(start),
@@ -449,10 +724,54 @@
                                 return;
                             }
                         }
-                        reject(new Error(`高德驾车规划失败：${status}`));
+                        const error = buildDrivingFailureError(
+                            status,
+                            result,
+                            group,
+                            start,
+                            end,
+                            waypoints,
+                            status === "complete" ? "规划完成但未返回有效路线点" : status
+                        );
+                        console.error("高德驾车规划失败", {
+                            message: error.message,
+                            status,
+                            result,
+                            group,
+                            start,
+                            end,
+                            waypoints
+                        });
+                        reject(error);
                     }
                 );
             });
+        }
+
+        async function searchDrivingWithRetry(group, onRetry) {
+            for (let attemptIndex = 0; attemptIndex <= DRIVING_QPS_RETRY_DELAYS_MS.length; attemptIndex += 1) {
+                try {
+                    return await searchDriving(group);
+                } catch (error) {
+                    const canRetry = error.isQpsLimit && attemptIndex < DRIVING_QPS_RETRY_DELAYS_MS.length;
+                    if (!canRetry) {
+                        throw error;
+                    }
+
+                    const delayMs = DRIVING_QPS_RETRY_DELAYS_MS[attemptIndex];
+                    console.warn("高德驾车规划触发 QPS 限流，等待后重试", {
+                        attempt: attemptIndex + 1,
+                        delayMs,
+                        group,
+                        error
+                    });
+                    if (onRetry) {
+                        onRetry(attemptIndex + 1, delayMs, error);
+                    }
+                    await sleep(delayMs);
+                }
+            }
+            throw new Error("高德驾车规划重试流程异常结束");
         }
 
         function buildGraspRoadOriginPath(points) {
@@ -516,11 +835,37 @@
             });
         }
 
+        function getSegmentType(segment) {
+            return String(segment?.type ?? segment?.endStep?.type ?? "").toUpperCase();
+        }
+
+        function getSegmentRequestId(segment) {
+            return segment?.request_id
+                ?? segment?.requestId
+                ?? segment?.order_id
+                ?? segment?.orderId
+                ?? segment?.endStep?.orderId
+                ?? segment?.endStep?.order_id
+                ?? null;
+        }
+
+        function getSegmentTargetSource(segment) {
+            return segment?.target
+                ?? segment?.target_node
+                ?? segment?.targetNode
+                ?? segment?.end_node
+                ?? segment?.endNode
+                ?? segment?.endStep?.node
+                ?? null;
+        }
+
         function isOrderSegment(segment) {
+            const type = getSegmentType(segment);
+            const requestId = getSegmentRequestId(segment);
             return segment
-                && (segment.type === "O" || segment.type === "D")
-                && segment.request_id !== undefined
-                && segment.request_id !== null;
+                && (type === "O" || type === "D")
+                && requestId !== undefined
+                && requestId !== null;
         }
 
         function appendPointIfDifferent(path, point) {
@@ -553,14 +898,14 @@
             const orderSegments = rawSegments
                 .filter(isOrderSegment)
                 .map((segment, index) => {
-                    const targetSource = segment.target || segment.target_node;
+                    const targetSource = getSegmentTargetSource(segment);
                     const target = normalizePoint(targetSource);
                     const path = normalizeRoutePoints(segment.points || segment.path || []);
                     appendPointIfDifferent(path, target);
                     return {
                         index,
-                        type: segment.type,
-                        requestId: segment.request_id,
+                        type: getSegmentType(segment),
+                        requestId: getSegmentRequestId(segment),
                         targetName: targetSource?.name || "",
                         target,
                         path
@@ -573,6 +918,43 @@
             }
 
             return orderSegments;
+        }
+
+        function extractOdPointQueue(rawData) {
+            const rawSegments = Array.isArray(rawData?.route?.segments)
+                ? rawData.route.segments
+                : (Array.isArray(rawData?.segments) ? rawData.segments : []);
+
+            return rawSegments
+                .filter(isOrderSegment)
+                .map((segment, index) => {
+                    const targetSource = getSegmentTargetSource(segment);
+                    const point = normalizePoint(targetSource);
+                    if (!point) {
+                        return null;
+                    }
+                    return {
+                        index,
+                        type: getSegmentType(segment),
+                        requestId: getSegmentRequestId(segment),
+                        targetName: targetSource?.name || "",
+                        point
+                    };
+                })
+                .filter(Boolean);
+        }
+
+        async function convertOdPointQueueIfNeeded(odPointQueue) {
+            if (!odPointQueue.length) {
+                return [];
+            }
+            const convertedPoints = await convertPointsIfNeeded(odPointQueue.map(item => item.point));
+            return odPointQueue
+                .map((item, index) => {
+                    const point = convertedPoints[index];
+                    return point ? { ...item, point } : null;
+                })
+                .filter(Boolean);
         }
 
         async function convertOrderSegmentsIfNeeded(orderSegments) {
@@ -677,6 +1059,74 @@
             map.add(amapPolylines);
         }
 
+        function mergeSegmentPaths(segmentPaths) {
+            const mergedPath = [];
+            for (const path of segmentPaths) {
+                appendMergedPath(mergedPath, path);
+            }
+            return mergedPath;
+        }
+
+        function buildRouteComparison(originalPath, drivingSegmentPaths) {
+            const drivingPath = mergeSegmentPaths(drivingSegmentPaths);
+            const originalDistance = pathDistanceMeters(originalPath);
+            const drivingDistance = pathDistanceMeters(drivingPath);
+            const distanceDiff = drivingDistance - originalDistance;
+            const distanceDiffPercent = originalDistance > 0 ? (distanceDiff / originalDistance) * 100 : null;
+            const sampledOriginalPoints = samplePathPoints(originalPath, ROUTE_COMPARISON_SAMPLE_LIMIT);
+            const projectPoint = createLocalProjector(originalPath[0]);
+            const deviations = sampledOriginalPoints
+                .map((point, index) => ({
+                    point,
+                    index,
+                    distance: nearestDistanceToPathMeters(point, drivingPath, projectPoint)
+                }))
+                .filter(item => Number.isFinite(item.distance));
+
+            const sortedDistances = deviations
+                .map(item => item.distance)
+                .sort((a, b) => a - b);
+            const averageDeviation = sortedDistances.length
+                ? sortedDistances.reduce((sum, value) => sum + value, 0) / sortedDistances.length
+                : null;
+            const maxDeviation = sortedDistances.length ? sortedDistances[sortedDistances.length - 1] : null;
+            const p95Deviation = percentileValue(sortedDistances, 0.95);
+            const topDeviations = deviations
+                .filter(item => item.distance >= ROUTE_COMPARISON_MIN_MARKER_DEVIATION_METERS)
+                .sort((a, b) => b.distance - a.distance)
+                .slice(0, ROUTE_COMPARISON_MARKER_LIMIT);
+
+            return {
+                drivingPath,
+                originalDistance,
+                drivingDistance,
+                distanceDiff,
+                distanceDiffPercent,
+                sampledCount: deviations.length,
+                averageDeviation,
+                p95Deviation,
+                maxDeviation,
+                topDeviations
+            };
+        }
+
+        function drawRouteComparisonMarkers(comparison) {
+            comparison.topDeviations.forEach((item, index) => {
+                const marker = new AMap.Marker({
+                    position: [item.point.lon, item.point.lat],
+                    offset: new AMap.Pixel(-10, -10),
+                    title: `原始轨迹到高德规划路线偏差：${formatMeters(item.distance)}`,
+                    content: [
+                        `<div style="display:grid;place-items:center;width:20px;height:20px;`,
+                        `border-radius:50%;background:#f97316;color:#fff;border:2px solid #fff;`,
+                        `font-size:10px;font-weight:800;box-shadow:0 2px 8px rgba(0,0,0,.35);">${index + 1}</div>`
+                    ].join("")
+                });
+                markers.push(marker);
+                map.add(marker);
+            });
+        }
+
         function drawGraspRoadRoute(path) {
             const correctedLine = new AMap.Polyline({
                 path: asPath(path),
@@ -755,7 +1205,11 @@
             addMarker(points[0], "起", "#2563eb");
             addMarker(points[points.length - 1], "终", "#dc2626");
             const orderSegments = await convertOrderSegmentsIfNeeded(extractOrderSegments(rawPoints));
-            drawOdMarkers(orderSegments);
+            const odPointQueue = await convertOdPointQueueIfNeeded(extractOdPointQueue(rawPoints));
+            drawOdMarkers(odPointQueue.map(item => ({
+                ...item,
+                target: item.point
+            })));
 
             try {
                 if (routeModeInput.value === "backend") {
@@ -807,22 +1261,61 @@
                     return;
                 }
 
-                const groups = buildDrivingGroups(points);
+                const useOrderDriving = odPointQueue.length > 0;
+                const groups = useOrderDriving
+                    ? buildDrivingGroupsFromOdPointQueue(odPointQueue, points[0])
+                    : buildFallbackDrivingGroups(points);
+                if (!groups.length) {
+                    throw new Error("高德驾车规划分段为空，无法生成 OD 间路线");
+                }
                 const segmentPaths = [];
                 for (let i = 0; i < groups.length; i += 1) {
-                    setStatus(`${title}\n正在调用高德驾车规划：第 ${i + 1}/${groups.length} 段...`);
-                    segmentPaths.push(await searchDriving(groups[i]));
-                    await sleep(120);
+                    const segment = groups[i].segment;
+                    const actionText = segment
+                        ? (segment.type === "O" ? "上客点 O" : "下客点 D")
+                        : null;
+                    setStatus([
+                        title,
+                        `正在按 ${useOrderDriving ? "后端原始 O/D 坐标队列" : "原始轨迹抽样"} 调用高德驾车规划：第 ${i + 1}/${groups.length} 段...`,
+                        actionText && segment.requestId ? `${actionText}：订单 ${segment.requestId}` : null,
+                        `请求节流：每段间隔 ${DRIVING_REQUEST_INTERVAL_MS}ms；遇到 QPS 限流会自动退避重试。`,
+                        "规划策略：最短路径；OD 模式只传相邻两个原始 O/D 坐标，不使用纠偏路线和后端中间轨迹点。"
+                    ].filter(Boolean).join("\n"));
+                    segmentPaths.push(await searchDrivingWithRetry(groups[i], (attempt, delayMs, error) => {
+                        setStatus([
+                            title,
+                            `高德驾车规划触发 QPS 限流，准备重试：第 ${i + 1}/${groups.length} 段`,
+                            actionText && segment.requestId ? `${actionText}：订单 ${segment.requestId}` : null,
+                            `重试次数：${attempt}/${DRIVING_QPS_RETRY_DELAYS_MS.length}`,
+                            `等待时间：${delayMs}ms`,
+                            error.message
+                        ].filter(Boolean).join("\n"));
+                    }));
+                    await sleep(DRIVING_REQUEST_INTERVAL_MS);
                 }
                 drawAmapDrivingSegments(segmentPaths);
+                const comparison = buildRouteComparison(points, segmentPaths);
+                drawRouteComparisonMarkers(comparison);
                 fitRouteView();
                 setStatus([
                     title,
                     `后端轨迹点：${validPoints.length}`,
-                    `高德控制点：${sampleControlPoints(points, MAX_CONTROL_POINTS).length}`,
+                    odPointQueue.length ? `后端原始OD点：${odPointQueue.length}` : null,
                     `高德规划分段：${groups.length}`,
-                    "绿色路线为高德驾车规划结果，蓝色虚线为后端原始轨迹参考。"
-                ].join("\n"));
+                    "规划策略：最短路径（AMap.DrivingPolicy.LEAST_DISTANCE）",
+                    "路线对比：",
+                    `原始路径里程：${formatMeters(comparison.originalDistance)}`,
+                    `高德规划里程：${formatMeters(comparison.drivingDistance)}`,
+                    `里程差值：${formatSignedMeters(comparison.distanceDiff)}（${formatSignedPercent(comparison.distanceDiffPercent)}）`,
+                    `采样偏差：平均 ${formatMeters(comparison.averageDeviation)} / P95 ${formatMeters(comparison.p95Deviation)} / 最大 ${formatMeters(comparison.maxDeviation)}`,
+                    comparison.topDeviations.length
+                        ? `橙色点标出偏差最大的 ${comparison.topDeviations.length} 个原始轨迹采样点。`
+                        : "未发现超过 5 米的明显采样偏差点。",
+                    useOrderDriving
+                        ? "绿色路线为后端原始 O/D 坐标队列相邻两点之间的高德驾车规划结果；不使用纠偏后的点。"
+                        : `高德控制点：${sampleControlPoints(points, MAX_CONTROL_POINTS).length}`,
+                    "蓝色虚线为后端原始轨迹参考。"
+                ].filter(Boolean).join("\n"));
             } catch (error) {
                 drawFallbackRoute(points);
                 fitRouteView();
@@ -934,9 +1427,10 @@
         map.on("complete", () => {
             AMap.plugin(["AMap.Driving", "AMap.GraspRoad"], async () => {
                 driving = new AMap.Driving({
-                    policy: AMap.DrivingPolicy.LEAST_TIME,
+                    policy: AMap.DrivingPolicy.LEAST_DISTANCE,
                     extensions: "base",
-                    showTraffic: false
+                    showTraffic: false,
+                    ferry: 1
                 });
                 graspRoad = new AMap.GraspRoad();
                 await loadFleetAndRenderFirstAvailable();

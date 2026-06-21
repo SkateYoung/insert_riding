@@ -1722,6 +1722,50 @@ class CoreDispatcher:
         )
 
     @staticmethod
+    def _path_point_id(point):
+        """读取轨迹点或节点字典中的稳定 ID。"""
+        if not isinstance(point, dict):
+            return None
+        value = point.get("id") or point.get("nodeId") or point.get("node_id")
+        return str(value) if value is not None else None
+
+    @staticmethod
+    def _segments_share_same_stop(segment, reference_segment, tolerance_m=2.0):
+        """判断当前短分段是否与上一段终点代表同一个 O/D 停靠点。"""
+        if not isinstance(reference_segment, dict):
+            return False
+
+        points = segment.get("points") or segment.get("path") or []
+        current_point = points[-1] if points else segment.get("target_node")
+        reference_target = reference_segment.get("target_node")
+        reference_points = reference_segment.get("points") or reference_segment.get("path") or []
+        reference_point = reference_target or (reference_points[-1] if reference_points else None)
+
+        current_id = (
+            segment.get("endNodeId")
+            or CoreDispatcher._path_point_id(segment.get("target_node"))
+            or CoreDispatcher._path_point_id(current_point)
+        )
+        reference_id = (
+            reference_segment.get("endNodeId")
+            or CoreDispatcher._path_point_id(reference_target)
+            or CoreDispatcher._path_point_id(reference_point)
+        )
+        if current_id is not None and reference_id is not None and str(current_id) == str(reference_id):
+            return True
+
+        if (
+            isinstance(current_point, dict)
+            and isinstance(reference_point, dict)
+            and current_point.get("lon") is not None
+            and current_point.get("lat") is not None
+            and reference_point.get("lon") is not None
+            and reference_point.get("lat") is not None
+        ):
+            return CoreDispatcher._point_distance_m(current_point, reference_point) <= tolerance_m
+        return False
+
+    @staticmethod
     def _project_point_on_polyline_segment(point, start, end):
         """把一个点近似投影到经纬度折线段上。
 
@@ -1828,6 +1872,17 @@ class CoreDispatcher:
         for index, raw_segment in enumerate(raw_segments or []):
             raw_points = copy.deepcopy(raw_segment.get("points") or [])
             if len(raw_points) < 2:
+                previous = previous_by_key.get(CoreDispatcher._route_segment_key(raw_segment))
+                if previous is not None:
+                    segment = copy.deepcopy(previous)
+                    segment["source"] = f"{previous.get('source', 'short_segment_skip_grasp')}_trimmed"
+                    segment_grasp = copy.deepcopy(previous.get("grasp") or {})
+                    segment_grasp["trimmed_from_previous"] = True
+                    segment["grasp"] = segment_grasp
+                else:
+                    reference_segment = trimmed_segments[-1] if trimmed_segments else None
+                    segment = CoreDispatcher._overlap_stop_grasp_segment(raw_segment, reference_segment)
+                trimmed_segments.append(segment)
                 continue
 
             previous = previous_by_key.get(CoreDispatcher._route_segment_key(raw_segment))
@@ -2064,6 +2119,50 @@ class CoreDispatcher:
             else:
                 points.extend(copy.deepcopy(segment_points))
         return points
+
+    @staticmethod
+    def _short_segment_skip_grasp(segment, reason="too_few_points"):
+        """把零长度或单点 O/D/IDLE 分段标记为无需纠偏的成功分段。"""
+        points = copy.deepcopy(segment.get("points") or segment.get("path") or [])
+        if not points and isinstance(segment.get("target_node"), dict):
+            target = segment["target_node"]
+            if target.get("lon") is not None and target.get("lat") is not None:
+                points = [copy.deepcopy(target)]
+
+        grasped = copy.deepcopy(segment)
+        grasped["points"] = points
+        grasped["source"] = "short_segment_skip_grasp"
+        grasped["grasp"] = {
+            "ok": True,
+            "skipped": True,
+            "reason": reason,
+            "distance_m": segment.get("distance", segment.get("aStarDistanceM", 0.0)) or 0.0,
+            "request_points": len(points),
+        }
+        return grasped
+
+    @staticmethod
+    def _overlap_stop_grasp_segment(segment, reference_segment=None):
+        """把与上一停靠点重合的 O/D 分段绑定到上一段纠偏终点。"""
+        if (
+            reference_segment is not None
+            and CoreDispatcher._segments_share_same_stop(segment, reference_segment)
+        ):
+            reference_points = reference_segment.get("points") or reference_segment.get("path") or []
+            if reference_points:
+                grasped = copy.deepcopy(segment)
+                grasped["points"] = [copy.deepcopy(reference_points[-1])]
+                grasped["source"] = "overlap_stop_same_point"
+                grasped["grasp"] = {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "overlap_stop_same_point",
+                    "overlap_with_previous_stop": True,
+                    "distance_m": 0.0,
+                    "request_points": len(segment.get("points") or segment.get("path") or []),
+                }
+                return grasped
+        return CoreDispatcher._short_segment_skip_grasp(segment)
 
     @staticmethod
     def refresh_vehicle_route_metadata(vehicle, city_map, start_node=None, submit_grasp=True):
@@ -2430,7 +2529,7 @@ class CoreDispatcher:
         return jobs
 
     @staticmethod
-    def _grasp_route_segment(client, segment):
+    def _grasp_route_segment(client, segment, previous_grasped_segment=None):
         """对单个路线分段做高德纠偏。
 
         Args:
@@ -2445,10 +2544,11 @@ class CoreDispatcher:
         """
         points = copy.deepcopy(segment.get("points") or [])
         if len(points) < 2:
+            # O/D 点重合或相邻停靠点吸附到同一路网节点时，A* 会返回单点零长度分段。
+            # 这类分段直接复用上一段纠偏终点，确保多个重合 O/D 在高德路线里表现为同一个点。
             return {
-                "ok": False,
-                "reason": "too_few_points",
-                "segment": segment,
+                "ok": True,
+                "segment": CoreDispatcher._overlap_stop_grasp_segment(segment, previous_grasped_segment),
             }
 
         if not getattr(client, "enabled", True):
@@ -2523,7 +2623,8 @@ class CoreDispatcher:
         for segment in job["segments"]:
             try:
                 # 单个分段失败不立即抛出，统一收集错误并返回给车辆状态。
-                result = CoreDispatcher._grasp_route_segment(client, segment)
+                previous_grasped_segment = grasped_segments[-1] if grasped_segments else None
+                result = CoreDispatcher._grasp_route_segment(client, segment, previous_grasped_segment)
             except Exception as exc:
                 result = {"ok": False, "reason": str(exc), "segment": segment}
             if result.get("ok"):
