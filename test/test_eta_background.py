@@ -5,14 +5,16 @@ import unittest
 import os
 import asyncio
 import time
+import threading
 from datetime import datetime, timedelta
 
 from flask import Flask
 
-from api import state
+from api import state, persistence
 from api.core import CoreDispatcher
 from api.models import Node, Order, Vehicle
 from api.routes import bp as api_routes
+from forecast.amap_driving_route_planner import AmapDrivingRoutePlanner
 from forecast.amap_eta_correct import DEFAULT_AMAP_KEY, AmapEtaCorrectClient, build_eta_pipeline_from_astar, run_blocking_io
 
 
@@ -79,6 +81,31 @@ class FakeEtaService:
         }
 
 
+class ConcurrentEtaService(FakeEtaService):
+    """记录 ETA job 并发度的服务桩。"""
+
+    def __init__(self, expected_jobs):
+        super().__init__()
+        self.barrier = threading.Barrier(expected_jobs)
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def build_eta_pipeline_from_astar(self, payload, now=None):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            try:
+                self.barrier.wait(timeout=1.0)
+            except threading.BrokenBarrierError:
+                pass
+            return super().build_eta_pipeline_from_astar(payload, now=now)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
 class FakeAmapCorrectClient:
     """模拟 ETA pipeline 只调用驾车 ETA，不再调用轨迹纠偏。"""
 
@@ -105,7 +132,7 @@ class FakeAmapCorrectClient:
 
 
 class FakeRouteGraspService:
-    """路线纠偏服务桩，成功时给每个点轻微偏移以便断言写回。"""
+    """路线规划服务桩，成功时给每个点轻微偏移以便断言写回。"""
 
     enabled = True
 
@@ -113,26 +140,32 @@ class FakeRouteGraspService:
         self.fail = fail
         self.calls = []
 
-    def grasp_driving_sync(self, points, speed_mps=16.6667):
+    def plan_segment_sync(self, points):
         self.calls.append(points)
         if self.fail:
-            return {"ok": False, "reason": "grasp_failed", "request_points": len(points)}
+            return {"ok": False, "reason": "driving_plan_failed", "request_points": len(points)}
         return {
             "ok": True,
-            "points": [
+            "polyline": [
                 {**point, "lon": float(point["lon"]) + 0.0001}
                 for point in points
             ],
             "distance_m": 123,
-            "request_points": len(points),
+            "duration_sec": 45,
+            "traffic_status": "畅通",
+            "strategy": "37",
+            "waypoint_count": 0,
         }
+
+    def grasp_driving_sync(self, points, speed_mps=16.6667):
+        raise AssertionError("route planning should not call grasp_driving_sync")
 
     def driving_eta_sync(self, points):
         return {"ok": False, "reason": "not_used"}
 
 
 class RecordingGraspClient(AmapEtaCorrectClient):
-    """记录高德纠偏 payload 的客户端，避免单测访问真实网络。"""
+    """记录高德 ETA payload 的客户端，避免单测访问真实网络。"""
 
     def __init__(self):
         super().__init__(api_key="fake-key")
@@ -151,6 +184,41 @@ class RecordingGraspClient(AmapEtaCorrectClient):
                     for point in self.payload_points
                 ],
                 "distance": 100,
+            },
+        }
+
+
+class RecordingDrivingRoutePlanner(AmapDrivingRoutePlanner):
+    """记录高德驾车规划请求的客户端，避免单测访问真实网络。"""
+
+    def __init__(self, responses):
+        super().__init__(
+            api_key="fake-key",
+            request_interval_ms=0,
+            qps_retry_delays_ms=[0, 0, 0],
+        )
+        self.responses = list(responses)
+        self.requests = []
+
+    def _urlopen_json(self, req):
+        self.requests.append(req.full_url)
+        if self.responses:
+            return self.responses.pop(0)
+        return {
+            "status": "1",
+            "route": {
+                "paths": [
+                    {
+                        "distance": "100",
+                        "cost": {"duration": "20"},
+                        "steps": [
+                            {
+                                "polyline": "113.000000,23.000000;113.001000,23.001000",
+                                "tmcs": [{"tmc_status": "畅通"}],
+                            }
+                        ],
+                    }
+                ]
             },
         }
 
@@ -194,7 +262,12 @@ class EtaBackgroundTest(unittest.TestCase):
             "route_grasp_last_refresh_timestamp": CoreDispatcher.route_grasp_last_refresh_timestamp,
             "order_pool": list(CoreDispatcher.order_pool),
             "completed_orders_pool": list(CoreDispatcher.completed_orders_pool),
+            "route_grasp_auto_submit_enabled": CoreDispatcher.route_grasp_auto_submit_enabled,
+            "route_grasp_apply_lock": CoreDispatcher.route_grasp_apply_lock,
+            "route_planner_service": CoreDispatcher.route_planner_service,
+            "route_planner_api_key": CoreDispatcher.route_planner_api_key,
         }
+        CoreDispatcher.disable_route_grasp_async(wait=True)
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.completed_orders_pool.clear()
 
@@ -217,6 +290,10 @@ class EtaBackgroundTest(unittest.TestCase):
         CoreDispatcher.route_grasp_last_refresh_timestamp = self.previous["route_grasp_last_refresh_timestamp"]
         CoreDispatcher.order_pool[:] = self.previous["order_pool"]
         CoreDispatcher.completed_orders_pool[:] = self.previous["completed_orders_pool"]
+        CoreDispatcher.route_grasp_auto_submit_enabled = self.previous["route_grasp_auto_submit_enabled"]
+        CoreDispatcher.route_grasp_apply_lock = self.previous["route_grasp_apply_lock"]
+        CoreDispatcher.route_planner_service = self.previous["route_planner_service"]
+        CoreDispatcher.route_planner_api_key = self.previous["route_planner_api_key"]
 
     def test_waiting_order_eta_is_written_and_payload_keeps_od_types(self):
         order = make_order(self.city)
@@ -243,6 +320,71 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(order.estimated_dropoff_time, 1300.0)
         self.assertEqual(order.estimated_arrival_eta_seconds, 60.0)
         self.assertEqual(order.estimated_dropoff_eta_seconds, 300.0)
+
+    def test_eta_refresh_runs_vehicle_jobs_concurrently(self):
+        previous_workers = os.environ.get("BUS_ETA_REFRESH_MAX_WORKERS")
+        os.environ["BUS_ETA_REFRESH_MAX_WORKERS"] = "3"
+        vehicles = []
+        try:
+            for index in range(3):
+                vehicle = Vehicle(f"bus-{index}", self.city.a.id, "#000000", 1)
+                vehicle.next_node = self.city.a.id
+                vehicle.last_node = self.city.a.id
+                vehicle.gps = {"lon": self.city.a.lon, "lat": self.city.a.lat}
+                order = make_order(self.city, request_id=f"order-{index}")
+                vehicle.planned_route = [
+                    {"type": "O", "order": order},
+                    {"type": "D", "order": order},
+                ]
+                mark_vehicle_grasp_ready(vehicle, self.city)
+                vehicles.append(vehicle)
+            state.fleet = vehicles
+            service = ConcurrentEtaService(expected_jobs=3)
+
+            changed = state.refresh_order_etas_if_due(
+                current_timestamp=1000.0,
+                force=True,
+                service=service,
+            )
+
+            self.assertEqual(changed, 3)
+            self.assertEqual(len(service.payloads), 3)
+            self.assertGreaterEqual(service.max_active, 2)
+        finally:
+            if previous_workers is None:
+                os.environ.pop("BUS_ETA_REFRESH_MAX_WORKERS", None)
+            else:
+                os.environ["BUS_ETA_REFRESH_MAX_WORKERS"] = previous_workers
+
+    def test_pending_route_marks_order_eta_loading_and_persists(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.planned_route_grasp_status = "pending"
+        self.vehicle.planned_route_grasp_error = None
+        service = FakeEtaService()
+        records = []
+        original_record = persistence.record_order_snapshot
+        persistence.record_order_snapshot = lambda order_obj, **kwargs: records.append((
+            str(order_obj.request_id),
+            order_obj.eta_status,
+            order_obj.eta_error,
+            kwargs.get("vehicle").id if kwargs.get("vehicle") is not None else None,
+        ))
+        try:
+            changed = state.refresh_order_etas_if_due(
+                current_timestamp=1000.0,
+                force=True,
+                service=service,
+            )
+        finally:
+            persistence.record_order_snapshot = original_record
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(service.payloads, [])
+        self.assertEqual(order.eta_status, "loading")
+        self.assertEqual(order.eta_error, "route_planning_pending")
+        self.assertEqual(order.eta_updated_at, 1000.0)
+        self.assertEqual(records, [(str(order.request_id), "loading", "route_planning_pending", self.vehicle.id)])
 
     def test_riding_order_eta_uses_actual_pickup_and_live_dropoff(self):
         order = make_order(self.city)
@@ -420,6 +562,108 @@ class EtaBackgroundTest(unittest.TestCase):
     def test_core_uses_eta_module_default_amap_key(self):
         self.assertEqual(CoreDispatcher.DEFAULT_AMAP_API_KEY, DEFAULT_AMAP_KEY)
 
+    def test_driving_route_planner_returns_polyline_duration_and_distance(self):
+        planner = RecordingDrivingRoutePlanner([
+            {
+                "status": "1",
+                "route": {
+                    "paths": [
+                        {
+                            "distance": "321",
+                            "cost": {"duration": "54"},
+                            "steps": [
+                                {
+                                    "polyline": "113.000000,23.000000;113.001000,23.001000",
+                                    "tmcs": [{"tmc_status": "畅通"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ])
+
+        result = planner.plan_segment_sync([
+            {"lon": 113.0, "lat": 23.0},
+            {"lon": 113.001, "lat": 23.001},
+        ])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["duration_sec"], 54.0)
+        self.assertEqual(result["distance_m"], 321.0)
+        self.assertEqual(result["strategy"], "37")
+        self.assertEqual(len(result["polyline"]), 2)
+
+    def test_driving_route_planner_plans_segments_and_combines_path(self):
+        planner = RecordingDrivingRoutePlanner([
+            {
+                "status": "1",
+                "route": {
+                    "paths": [
+                        {
+                            "distance": "321",
+                            "cost": {"duration": "54"},
+                            "steps": [
+                                {
+                                    "polyline": "113.000000,23.000000;113.001000,23.001000",
+                                    "tmcs": [{"tmc_status": "畅通"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ])
+
+        result = planner.plan_segments_sync([
+            {
+                "type": "IDLE",
+                "request_id": None,
+                "points": [
+                    {"lon": 113.0, "lat": 23.0},
+                    {"lon": 113.001, "lat": 23.001},
+                ],
+            }
+        ])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["segments"][0]["source"], "driving_plan")
+        self.assertEqual(result["segments"][0]["duration_sec"], 54.0)
+        self.assertEqual(result["segments"][0]["distance_m"], 321.0)
+        self.assertEqual(len(result["path"]), 2)
+
+    def test_driving_route_planner_retries_qps_limit(self):
+        planner = RecordingDrivingRoutePlanner([
+            {
+                "status": "0",
+                "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT",
+                "infocode": "10029",
+            },
+            {
+                "status": "1",
+                "route": {
+                    "paths": [
+                        {
+                            "distance": "100",
+                            "cost": {"duration": "20"},
+                            "steps": [
+                                {"polyline": "113.000000,23.000000;113.001000,23.001000"}
+                            ],
+                        }
+                    ]
+                },
+            },
+        ])
+
+        result = planner.plan_segment_sync([
+            {"lon": 113.0, "lat": 23.0},
+            {"lon": 113.001, "lat": 23.001},
+        ])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(planner.requests), 2)
+
     def test_route_update_marks_order_segments_pending(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [
@@ -543,7 +787,7 @@ class EtaBackgroundTest(unittest.TestCase):
                     {"lon": 113.0010, "lat": 23.0010},
                     {"lon": 113.0015, "lat": 23.0015},
                 ],
-                "source": "grasproad",
+                "source": "driving_plan",
                 "grasp": {"ok": True},
             }
         ]
@@ -632,19 +876,62 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(result["passengerEtas"][0]["pickupEtaSec"], 120.0)
         self.assertEqual(result["passengerEtas"][0]["dropoffEtaSec"], 120.0)
 
+    def test_eta_pipeline_uses_preplanned_duration_without_driving_call(self):
+        client = FakeAmapCorrectClient()
+        payload = {
+            "vehicleId": self.vehicle.id,
+            "routeVersion": "route-preplanned",
+            "vehiclePosition": {"lon": self.city.a.lon, "lat": self.city.a.lat},
+            "segments": [
+                {
+                    "index": 0,
+                    "endStep": {"type": "O", "orderId": "order-preplanned"},
+                    "points": [
+                        {"lon": self.city.a.lon, "lat": self.city.a.lat},
+                        {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    ],
+                    "durationSec": 30.0,
+                    "distanceM": 100.0,
+                    "source": "driving_plan",
+                },
+                {
+                    "index": 1,
+                    "endStep": {"type": "D", "orderId": "order-preplanned"},
+                    "points": [
+                        {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                        {"lon": self.city.c.lon, "lat": self.city.c.lat},
+                    ],
+                    "durationSec": 90.0,
+                    "distanceM": 200.0,
+                    "source": "driving_plan",
+                },
+            ],
+        }
+
+        result = build_eta_pipeline_from_astar(payload, amap=client)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.driving_calls, [])
+        self.assertEqual(result["passengerEtas"][0]["pickupEtaSec"], 30.0)
+        self.assertEqual(result["passengerEtas"][0]["dropoffEtaSec"], 120.0)
+        self.assertEqual(
+            [segment["chosenSource"] for segment in result["segments"]],
+            ["driving_plan", "driving_plan"],
+        )
+
     def test_route_update_auto_submits_async_grasp_when_enabled(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
         fake_service = FakeRouteGraspService()
-        previous_service = CoreDispatcher.eta_service
-        previous_service_key = CoreDispatcher.eta_service_api_key
+        previous_service = CoreDispatcher.route_planner_service
+        previous_service_key = CoreDispatcher.route_planner_api_key
         previous_lock = CoreDispatcher.route_grasp_apply_lock
         previous_enabled = CoreDispatcher.route_grasp_auto_submit_enabled
         api_key = os.getenv("AMAP_API_KEY") or CoreDispatcher.DEFAULT_AMAP_API_KEY
 
         CoreDispatcher.disable_route_grasp_async(wait=True)
-        CoreDispatcher.eta_service = fake_service
-        CoreDispatcher.eta_service_api_key = api_key
+        CoreDispatcher.route_planner_service = fake_service
+        CoreDispatcher.route_planner_api_key = api_key
         CoreDispatcher.configure_route_grasp_async(
             state_lock=state.state_lock,
             enabled=True,
@@ -661,8 +948,8 @@ class EtaBackgroundTest(unittest.TestCase):
             self.assertGreater(self.vehicle.planned_route_grasped_point[0]["lon"], self.city.a.lon)
         finally:
             CoreDispatcher.disable_route_grasp_async(wait=True)
-            CoreDispatcher.eta_service = previous_service
-            CoreDispatcher.eta_service_api_key = previous_service_key
+            CoreDispatcher.route_planner_service = previous_service
+            CoreDispatcher.route_planner_api_key = previous_service_key
             CoreDispatcher.route_grasp_apply_lock = previous_lock
             CoreDispatcher.route_grasp_auto_submit_enabled = previous_enabled
 

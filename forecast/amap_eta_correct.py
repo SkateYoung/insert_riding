@@ -1,8 +1,8 @@
-"""高德轨迹纠偏与整车 ETA pipeline。
+"""高德整车 ETA pipeline。
 
-本模块只消费上游算法已经生成的 A* 轨迹，不负责派单和寻路。
-核心职责是把整车剩余 A* 路径按 O/D 停靠点切段、调用高德纠偏和 ETA，
-最后按车辆段前缀和汇总每个订单的接驾/送达 ETA。
+本模块只消费上游已经生成好的 O/D/IDLE 分段路线，不负责派单和寻路。
+当前运行链路优先使用分段里已有的高德驾车规划耗时；缺少耗时时才降级请求高德 ETA。
+旧轨迹纠偏方法保留为兼容代码，但后台订单 ETA 刷新不再调用纠偏接口。
 """
 
 from __future__ import annotations
@@ -72,6 +72,16 @@ def env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def to_float_or_none(value: Any) -> float | None:
+    """把可选数值安全转换成 float。"""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -576,14 +586,19 @@ def normalize_input_segments(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if not raw_points:
             continue
         end_step = normalize_end_step(src.get("endStep") or src.get("action") or src)
-        segments.append({
+        segment = {
             "index": src.get("index", len(segments)),
             "startNodeId": src.get("startNodeId") or _node_id_from_point(raw_points[0]),
             "endNodeId": src.get("endNodeId") or _node_id_from_point(raw_points[-1]),
             "endStep": end_step,
             "points": raw_points,
             "aStarDistanceM": float(src.get("aStarDistanceM") or polyline_distance(raw_points)),
-        })
+            "durationSec": src.get("durationSec", src.get("duration_sec")),
+            "distanceM": src.get("distanceM", src.get("distance_m")),
+            "trafficStatus": src.get("trafficStatus", src.get("traffic_status")),
+            "source": src.get("source"),
+        }
+        segments.append(segment)
     return segments
 
 
@@ -760,7 +775,7 @@ async def build_eta_pipeline_from_astar_async(
 ) -> dict[str, Any]:
     """异步构建单车 ETA pipeline，并按订单输出接驾/送达 ETA。
 
-    调用方传入的 segments[].points 应为已纠偏路线；本函数只负责驾车 ETA。
+    调用方传入的 segments[].points 应为已规划路线；本函数不再执行轨迹纠偏。
     """
     client = amap or AmapEtaCorrectClient(api_key=api_key, timeout_sec=timeout_sec)
     vehicle_id = str(payload.get("vehicleId") or payload.get("vehicle_id") or "")
@@ -789,11 +804,25 @@ async def build_eta_pipeline_from_astar_async(
         step_type = normalize_stop_type(end_step.get("type"))
         fallback_dist = float(src.get("aStarDistanceM") or polyline_distance(raw_points))
         fallback_eta = fallback_dist / max(speed_mps, 1.0)
+        planned_duration = to_float_or_none(src.get("durationSec", src.get("duration_sec")))
+        planned_distance = to_float_or_none(src.get("distanceM", src.get("distance_m")))
 
         if len(raw_points) < 2:
             # 零长度 O/D 分段表示两个停靠点吸附到同一节点；不请求高德，ETA 沿用当前累计值。
             eta = {"ok": False, "reason": "zero_length_segment", "polyline": raw_points}
             chosen = {"chosenDurationSec": 0.0, "chosenSource": "zero_length_segment"}
+        elif planned_duration is not None:
+            # 路线规划阶段已经调用过高德驾车规划；ETA 直接消费该分段耗时，避免重复请求高德。
+            eta = {
+                "ok": True,
+                "duration_sec": planned_duration,
+                "distance_m": planned_distance if planned_distance is not None else polyline_distance(raw_points),
+                "polyline": raw_points,
+                "traffic_status": src.get("trafficStatus") or src.get("traffic_status") or "未知",
+                "waypoint_count": 0,
+                "source": src.get("source") or "preplanned_driving_segment",
+            }
+            chosen = {"chosenDurationSec": planned_duration, "chosenSource": eta["source"]}
         else:
             eta = await client.driving_eta(raw_points)
             chosen = choose_amap_eta(eta)
@@ -823,7 +852,7 @@ async def build_eta_pipeline_from_astar_async(
                 "distanceM": eta.get("distance_m"),
                 "trafficStatus": eta.get("traffic_status") or "未知",
                 "waypointCount": eta.get("waypoint_count"),
-                "source": "grasped_segment",
+                "source": eta.get("source") or "grasped_segment",
                 "error": eta.get("error") or eta.get("reason") or eta.get("info"),
             },
             "chosenDurationSec": round(chosen["chosenDurationSec"], 1) if chosen["chosenDurationSec"] is not None else None,

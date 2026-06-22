@@ -7,13 +7,14 @@ import copy
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from . import persistence
 from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS
 from .auxiliary import AuxiliaryFunctions
 from forecast import od_forecast_module
+from forecast.amap_driving_route_planner import AmapDrivingRoutePlanner
 from forecast.amap_eta_correct import DEFAULT_AMAP_KEY, AmapEtaCorrectClient, build_eta_pipeline_from_astar
 
 class CoreDispatcher:
@@ -30,14 +31,17 @@ class CoreDispatcher:
     IDLE_MIN_HOTSPOT_DISTANCE_METERS = 800.0
     idle_hotspot_cache = None
 
-    # 高德纠偏 ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
+    # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
+    ETA_REFRESH_MAX_WORKERS = 4
     ROUTE_GRASP_REFRESH_INTERVAL_SECONDS = 5.0
     eta_last_refresh_timestamp = None
     route_grasp_last_refresh_timestamp = None
     eta_service = None
+    route_planner_service = None
     DEFAULT_AMAP_API_KEY = DEFAULT_AMAP_KEY
     eta_service_api_key = DEFAULT_AMAP_API_KEY
+    route_planner_api_key = DEFAULT_AMAP_API_KEY
     route_grasp_auto_submit_enabled = False
     route_grasp_apply_lock = None
     route_grasp_executor = None
@@ -1637,11 +1641,11 @@ class CoreDispatcher:
 
     @staticmethod
     def _vehicle_grasp_route_version(vehicle):
-        """生成车辆当前计划路线的纠偏版本签名。
+        """生成车辆当前计划路线的规划版本签名。
 
         说明:
             该版本只表达订单/热点路线是否变化，不包含 GPS 所在边和进度。
-            GPS 行进只裁剪既有纠偏路线，不触发新的高德纠偏请求。
+            GPS 行进只裁剪既有规划路线，不触发新的高德规划请求。
         """
         parts = [
             str(vehicle.id),
@@ -1660,7 +1664,7 @@ class CoreDispatcher:
 
     @staticmethod
     def _route_result_to_grasp_raw_segments(result):
-        """把当前 A* 路线结果转换成后台纠偏线程可消费的分段快照。"""
+        """把当前 A* 路线结果转换成后台规划线程可消费的分段快照。"""
         raw_segments = []
         for index, segment in enumerate((result or {}).get("segments", [])):
             points = copy.deepcopy(segment.get("path") or [])
@@ -1692,13 +1696,13 @@ class CoreDispatcher:
 
     @staticmethod
     def _clear_route_grasp_state(vehicle):
-        """清理车辆路线纠偏与空车热点 ETA 状态。
+        """清理车辆路线规划与空车热点 ETA 状态。
 
         Args:
-            vehicle (Vehicle): 需要清理纠偏状态的车辆。
+            vehicle (Vehicle): 需要清理规划状态的车辆。
 
         Side Effects:
-            清空已纠偏总路线、已纠偏分段、原始分段、纠偏状态和空车热点 ETA。
+            清空已规划总路线、已规划分段、原始分段、规划状态和空车热点 ETA。
         """
         vehicle.planned_route_grasped_point = []
         vehicle.planned_route_segment_grasped_point = []
@@ -1720,6 +1724,21 @@ class CoreDispatcher:
             float(b["lon"]),
             float(b["lat"]),
         )
+
+    @staticmethod
+    def _path_distance_m(points):
+        """计算轨迹点列表的折线总距离，单位为米。"""
+        distance = 0.0
+        normalized = [
+            point
+            for point in points or []
+            if isinstance(point, dict)
+            and point.get("lon") is not None
+            and point.get("lat") is not None
+        ]
+        for index in range(1, len(normalized)):
+            distance += CoreDispatcher._point_distance_m(normalized[index - 1], normalized[index])
+        return distance
 
     @staticmethod
     def _path_point_id(point):
@@ -1800,10 +1819,10 @@ class CoreDispatcher:
 
     @staticmethod
     def _trim_points_from_position(points, start_point):
-        """从旧纠偏轨迹中裁出车辆当前位置之后的剩余轨迹。
+        """从旧规划轨迹中裁出车辆当前位置之后的剩余轨迹。
 
         Args:
-            points (list[dict]): 旧的已纠偏分段轨迹。
+            points (list[dict]): 旧的已规划分段轨迹。
             start_point (dict): 新 GPS 投影点，会作为裁剪后轨迹首点。
 
         Returns:
@@ -1854,15 +1873,15 @@ class CoreDispatcher:
 
     @staticmethod
     def _trim_grasped_segments_to_position(grasped_segments, raw_segments, start_point=None):
-        """按车辆 GPS 在纠偏路线上的投影点裁剪一组已纠偏分段。
+        """按车辆 GPS 在规划路线上的投影点裁剪一组已规划分段。
 
         Args:
-            grasped_segments (list[dict]): 已纠偏分段，可能来自车辆当前状态或高德新返回结果。
+            grasped_segments (list[dict]): 已规划分段，可能来自车辆当前状态或高德新返回结果。
             raw_segments (list[dict]): GPS 更新后重新生成的原始剩余分段。
             start_point (dict | None): 车辆真实 GPS 点；为空时退回 raw segment 起点。
 
         Returns:
-            list[dict]: 从当前车辆位置开始的已纠偏分段；缺失的分段退回 raw segment。
+            list[dict]: 从当前车辆位置开始的已规划分段；缺失的分段退回 raw segment。
         """
         previous_by_key = {}
         for segment in grasped_segments or []:
@@ -1903,7 +1922,7 @@ class CoreDispatcher:
                 source = "raw_trim_fallback"
                 grasp_meta = {"ok": False, "error": "trim_fallback"}
             else:
-                source = f"{previous.get('source', 'grasproad')}_trimmed" if previous is not None else "raw_trim_fallback"
+                source = f"{previous.get('source', 'driving_plan')}_trimmed" if previous is not None else "raw_trim_fallback"
                 grasp_meta = copy.deepcopy((previous or {}).get("grasp") or {})
                 grasp_meta["trimmed_from_previous"] = previous is not None
 
@@ -1911,23 +1930,54 @@ class CoreDispatcher:
             segment["points"] = points
             segment["source"] = source
             segment["grasp"] = grasp_meta
+            if previous is not None and len(points) >= 2:
+                previous_points = previous.get("points") or previous.get("path") or []
+                raw_previous_distance = previous.get("distance_m") or previous.get("distance")
+                try:
+                    previous_distance = float(raw_previous_distance)
+                except (TypeError, ValueError):
+                    previous_distance = CoreDispatcher._path_distance_m(previous_points)
+                trimmed_distance = CoreDispatcher._path_distance_m(points)
+                previous_duration = previous.get("duration_sec")
+                trimmed_duration = None
+                if previous_duration is not None and previous_distance and previous_distance > 0:
+                    try:
+                        ratio = max(0.0, min(1.0, trimmed_distance / previous_distance))
+                        trimmed_duration = float(previous_duration) * ratio
+                        segment["duration_sec"] = trimmed_duration
+                    except (TypeError, ValueError):
+                        pass
+                elif previous_duration is not None:
+                    try:
+                        trimmed_duration = float(previous_duration)
+                        segment["duration_sec"] = trimmed_duration
+                    except (TypeError, ValueError):
+                        pass
+                if previous.get("traffic_status") is not None:
+                    segment["traffic_status"] = previous.get("traffic_status")
+                segment["distance_m"] = trimmed_distance
+                grasp_meta["distance_m"] = trimmed_distance
+                if trimmed_duration is not None:
+                    grasp_meta["duration_sec"] = trimmed_duration
+                if segment.get("traffic_status") is not None:
+                    grasp_meta["traffic_status"] = segment.get("traffic_status")
             trimmed_segments.append(segment)
         return trimmed_segments
 
     @staticmethod
     def _trim_vehicle_grasped_route_from_result(vehicle, result, start_point=None):
-        """GPS 更新时只裁剪既有纠偏路线，不重新请求高德。
+        """GPS 更新时只裁剪既有规划路线，不重新请求高德。
 
         Args:
             vehicle (Vehicle): GPS 刚更新的车辆。
             result (dict): 本次 GPS 更新后的原始剩余路径结果。
-            start_point (dict | None): 车辆真实 GPS 点；用于吸附到既有纠偏路线。
+            start_point (dict | None): 车辆真实 GPS 点；用于吸附到既有规划路线。
 
         Returns:
-            bool: 成功更新 raw segments 或裁剪纠偏路线返回 True。
+            bool: 成功更新 raw segments 或裁剪规划路线返回 True。
 
         Side Effects:
-            更新 planned_route_segment_raw_point，并在已有纠偏路线时同步缩短
+            更新 planned_route_segment_raw_point，并在已有规划路线时同步缩短
             planned_route_segment_grasped_point/planned_route_grasped_point。
         """
         raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
@@ -1960,17 +2010,17 @@ class CoreDispatcher:
 
     @classmethod
     def configure_route_grasp_async(cls, state_lock=None, enabled=True, max_workers=None):
-        """配置路线更新触发式异步纠偏执行器。
+        """配置路线更新触发式异步驾车规划执行器。
 
         Args:
             state_lock (RLock | None): 写回车辆状态时复用的全局状态锁。
             enabled (bool): 是否启用路线更新后的自动异步提交。
-            max_workers (int | None): 纠偏线程池最大工作线程数；为空时使用默认值。
+            max_workers (int | None): 规划线程池最大工作线程数；为空时使用默认值。
 
         Side Effects:
             初始化或复用 ThreadPoolExecutor，并记录写回锁。
         """
-        # 纠偏请求在线程池执行；结果写回仍使用全局状态锁，避免与派单/GPS 更新并发写车辆。
+        # 高德规划请求在线程池执行；结果写回仍使用全局状态锁，避免与派单/GPS 更新并发写车辆。
         cls.route_grasp_apply_lock = state_lock
         cls.route_grasp_auto_submit_enabled = bool(enabled)
         if max_workers is not None:
@@ -1983,13 +2033,13 @@ class CoreDispatcher:
 
     @classmethod
     def disable_route_grasp_async(cls, wait=False):
-        """关闭路线更新触发式异步纠偏。
+        """关闭路线更新触发式异步驾车规划。
 
         Args:
-            wait (bool): 是否等待线程池中已提交的纠偏任务结束。
+            wait (bool): 是否等待线程池中已提交的规划任务结束。
 
         Side Effects:
-            停止继续提交新纠偏任务，并清理正在执行任务的去重标记。
+            停止继续提交新规划任务，并清理正在执行任务的去重标记。
         """
         cls.route_grasp_auto_submit_enabled = False
         executor = cls.route_grasp_executor
@@ -2001,26 +2051,26 @@ class CoreDispatcher:
 
     @classmethod
     def route_grasp_inflight_count(cls):
-        """读取当前正在执行的纠偏任务数量。
+        """读取当前正在执行的规划任务数量。
 
         Returns:
-            int: 线程池中仍在执行或等待写回的纠偏任务数。
+            int: 线程池中仍在执行或等待写回的规划任务数。
         """
         with cls.route_grasp_inflight_lock:
             return len(cls.route_grasp_inflight)
 
     @staticmethod
     def _route_grasp_job_from_vehicle(vehicle):
-        """从车辆 pending 路线快照构造一次纠偏任务。
+        """从车辆 pending 路线快照构造一次驾车规划任务。
 
         Args:
             vehicle (Vehicle): 已由路线更新逻辑写入 raw segments 的车辆。
 
         Returns:
-            dict | None: 可提交到纠偏线程池的任务快照；状态不满足时返回 None。
+            dict | None: 可提交到规划线程池的任务快照；状态不满足时返回 None。
 
         Side Effects:
-            如果当前车辆路线版本已经变化，会把纠偏状态置为 stale。
+            如果当前车辆路线版本已经变化，会把规划状态置为 stale。
         """
         route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
         raw_segments = getattr(vehicle, "planned_route_segment_raw_point", None) or []
@@ -2041,16 +2091,16 @@ class CoreDispatcher:
 
     @classmethod
     def _submit_vehicle_route_grasp_async(cls, vehicle):
-        """异步提交当前车辆的待纠偏路线任务。
+        """异步提交当前车辆的待驾车规划路线任务。
 
         Args:
-            vehicle (Vehicle): 路线刚更新、且纠偏状态为 pending 的车辆。
+            vehicle (Vehicle): 路线刚更新、且规划状态为 pending 的车辆。
 
         Returns:
             bool: 成功提交新任务返回 True；未启用、无任务或重复提交返回 False。
 
         Side Effects:
-            向线程池提交高德纠偏请求；当前调用栈不等待高德返回。
+            向线程池提交高德驾车规划请求；当前调用栈不等待高德返回。
         """
         if not cls.route_grasp_auto_submit_enabled:
             return False
@@ -2069,32 +2119,32 @@ class CoreDispatcher:
 
         job_key = (job["vehicle_id"], job["route_version"])
         with cls.route_grasp_inflight_lock:
-            # 同一辆车同一版本只允许存在一个在途纠偏任务，避免重复请求高德。
+            # 同一辆车同一版本只允许存在一个在途规划任务，避免重复请求高德。
             if job_key in cls.route_grasp_inflight:
                 return False
             cls.route_grasp_inflight.add(job_key)
 
         cls.route_grasp_last_refresh_timestamp = time.time()
-        # 网络请求和路线纠偏都在线程池执行，避免阻塞派单、GPS 更新或接口返回。
+        # 网络请求和路线规划都在线程池执行，避免阻塞派单、GPS 更新或接口返回。
         cls.route_grasp_executor.submit(cls._execute_vehicle_route_grasp_job, vehicle, job, job_key)
         return True
 
     @staticmethod
     def _mark_vehicle_route_grasp_pending(vehicle, result):
-        """路线刷新后记录原始分段，并触发异步高德纠偏。
+        """路线刷新后记录原始分段，并触发异步高德驾车规划。
 
         Args:
             vehicle (Vehicle): 路线刚刷新完成的车辆。
             result (dict): 本地 A* 生成的总路线和分段路线结果。
 
         Side Effects:
-            写入 raw segments、纠偏版本和 pending 状态；如果异步纠偏已启用，会立即提交线程池任务。
+            写入 raw segments、规划版本和 pending 状态；如果异步规划已启用，会立即提交线程池任务。
         """
         raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
         if not raw_segments:
             CoreDispatcher._clear_route_grasp_state(vehicle)
             return
-        # raw segments 是纠偏线程消费的稳定快照，避免线程读到后续被修改的路线对象。
+        # raw segments 是规划线程消费的稳定快照，避免线程读到后续被修改的路线对象。
         vehicle.planned_route_segment_raw_point = raw_segments
         vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(vehicle)
         vehicle.planned_route_grasp_status = "pending"
@@ -2110,7 +2160,7 @@ class CoreDispatcher:
 
     @staticmethod
     def _combine_grasped_segments(segments):
-        """拼接分段纠偏轨迹为整条路线，去掉相邻段首尾重复点。"""
+        """拼接分段规划轨迹为整条路线，去掉相邻段首尾重复点。"""
         points = []
         for segment in segments or []:
             segment_points = segment.get("points") or []
@@ -2122,7 +2172,7 @@ class CoreDispatcher:
 
     @staticmethod
     def _short_segment_skip_grasp(segment, reason="too_few_points"):
-        """把零长度或单点 O/D/IDLE 分段标记为无需纠偏的成功分段。"""
+        """把零长度或单点 O/D/IDLE 分段标记为无需高德规划的成功分段。"""
         points = copy.deepcopy(segment.get("points") or segment.get("path") or [])
         if not points and isinstance(segment.get("target_node"), dict):
             target = segment["target_node"]
@@ -2132,18 +2182,20 @@ class CoreDispatcher:
         grasped = copy.deepcopy(segment)
         grasped["points"] = points
         grasped["source"] = "short_segment_skip_grasp"
+        grasped["duration_sec"] = 0.0
+        grasped["distance_m"] = segment.get("distance", segment.get("aStarDistanceM", 0.0)) or 0.0
         grasped["grasp"] = {
             "ok": True,
             "skipped": True,
             "reason": reason,
-            "distance_m": segment.get("distance", segment.get("aStarDistanceM", 0.0)) or 0.0,
+            "distance_m": grasped["distance_m"],
             "request_points": len(points),
         }
         return grasped
 
     @staticmethod
     def _overlap_stop_grasp_segment(segment, reference_segment=None):
-        """把与上一停靠点重合的 O/D 分段绑定到上一段纠偏终点。"""
+        """把与上一停靠点重合的 O/D 分段绑定到上一段规划终点。"""
         if (
             reference_segment is not None
             and CoreDispatcher._segments_share_same_stop(segment, reference_segment)
@@ -2153,6 +2205,8 @@ class CoreDispatcher:
                 grasped = copy.deepcopy(segment)
                 grasped["points"] = [copy.deepcopy(reference_points[-1])]
                 grasped["source"] = "overlap_stop_same_point"
+                grasped["duration_sec"] = 0.0
+                grasped["distance_m"] = 0.0
                 grasped["grasp"] = {
                     "ok": True,
                     "skipped": True,
@@ -2172,7 +2226,7 @@ class CoreDispatcher:
             vehicle (Vehicle): 需要同步元数据的车辆。
             city_map (CityGraph): 路网对象。
             start_node (Node | None): 指定刷新起点；为空时使用车辆 next_node/last_node。
-            submit_grasp (bool): 是否在路线更新后立即提交异步高德纠偏。
+            submit_grasp (bool): 是否在路线更新后立即提交异步高德驾车规划。
 
         Returns:
             dict | None: 最新轨迹结果；起点无效或路径不可达时返回 None。
@@ -2442,10 +2496,10 @@ class CoreDispatcher:
         result["planned_route_point"] = result["path"]
         vehicle.planned_route_point = result["planned_route_point"]
         if changed_steps or not getattr(vehicle, "planned_route_segment_grasped_point", None):
-            # 上下客会改变后续 O/D 队列；没有既有纠偏路线时也需要发起一次高德纠偏。
+            # 上下客会改变后续 O/D 队列；没有既有规划路线时也需要发起一次高德规划。
             CoreDispatcher._mark_vehicle_route_grasp_pending(vehicle, result)
         else:
-            # 普通 GPS 前进只裁剪既有纠偏路线，不重新请求高德。
+            # 普通 GPS 前进只裁剪既有规划路线，不重新请求高德。
             CoreDispatcher._trim_vehicle_grasped_route_from_result(
                 vehicle,
                 result,
@@ -2496,7 +2550,7 @@ class CoreDispatcher:
 
     @classmethod
     def _get_eta_service(cls):
-        """懒加载并复用高德轨迹纠偏 ETA 客户端。
+        """懒加载并复用高德 ETA 客户端。
 
         说明:
             API Key 优先从环境变量 AMAP_API_KEY 读取；未配置时沿用当前项目默认 Key。
@@ -2508,18 +2562,27 @@ class CoreDispatcher:
             cls.eta_service_api_key = api_key
         return cls.eta_service
 
+    @classmethod
+    def _get_route_planner(cls):
+        """懒加载并复用高德驾车规划路线客户端。"""
+        api_key = os.getenv("AMAP_API_KEY") or cls.DEFAULT_AMAP_API_KEY
+        if cls.route_planner_service is None or cls.route_planner_api_key != api_key:
+            cls.route_planner_service = AmapDrivingRoutePlanner(api_key=api_key)
+            cls.route_planner_api_key = api_key
+        return cls.route_planner_service
+
     @staticmethod
     def _collect_route_grasp_jobs(fleet):
-        """采集待高德纠偏的车辆路线快照。
+        """采集待高德驾车规划的车辆路线快照。
 
         Args:
             fleet (list[Vehicle] | None): 当前车队。
 
         Returns:
-            list[dict]: 可同步执行的纠偏任务列表。
+            list[dict]: 可同步执行的路线规划任务列表。
 
         Side Effects:
-            对版本已过期的车辆，可能把其纠偏状态置为 stale。
+            对版本已过期的车辆，可能把其规划状态置为 stale。
         """
         jobs = []
         for vehicle in fleet or []:
@@ -2530,22 +2593,25 @@ class CoreDispatcher:
 
     @staticmethod
     def _grasp_route_segment(client, segment, previous_grasped_segment=None):
-        """对单个路线分段做高德纠偏。
+        """对单个路线分段做高德驾车规划。
 
         Args:
-            client (AmapEtaCorrectClient): 高德纠偏/驾车规划客户端。
+            client (AmapDrivingRoutePlanner): 高德驾车规划客户端。
             segment (dict): 单个 O、D 或 IDLE 原始路线分段。
 
         Returns:
-            dict: 形如 {"ok": bool, "segment": dict, "reason": str | None} 的分段纠偏结果。
-
-        Notes:
-            优先使用高德轨迹纠偏；如果失败，再降级使用高德驾车规划 polyline。
+            dict: 形如 {"ok": bool, "segment": dict, "reason": str | None} 的分段规划结果。
         """
         points = copy.deepcopy(segment.get("points") or [])
-        if len(points) < 2:
+        same_endpoint = False
+        if len(points) >= 2:
+            try:
+                same_endpoint = CoreDispatcher._point_distance_m(points[0], points[-1]) <= 2.0
+            except (TypeError, ValueError, KeyError):
+                same_endpoint = False
+        if len(points) < 2 or same_endpoint:
             # O/D 点重合或相邻停靠点吸附到同一路网节点时，A* 会返回单点零长度分段。
-            # 这类分段直接复用上一段纠偏终点，确保多个重合 O/D 在高德路线里表现为同一个点。
+            # 这类分段直接复用上一段规划终点，确保多个重合 O/D 在高德路线里表现为同一个点。
             return {
                 "ok": True,
                 "segment": CoreDispatcher._overlap_stop_grasp_segment(segment, previous_grasped_segment),
@@ -2558,57 +2624,49 @@ class CoreDispatcher:
                 "segment": segment,
             }
 
-        # 第一优先级：使用高德轨迹纠偏接口把 A* 折线吸附到真实道路形态。
-        grasp = client.grasp_driving_sync(points, SPEED_MPS)
-        if isinstance(grasp, dict) and grasp.get("ok") and len(grasp.get("points") or []) >= 2:
+        # 只用分段起终点规划，保持与前端 amap_route_demo.html 的 OD 驾车规划方式一致。
+        if hasattr(client, "plan_segment_sync"):
+            driving = client.plan_segment_sync(points)
+        elif hasattr(client, "driving_eta_sync"):
+            driving = client.driving_eta_sync([points[0], points[-1]])
+        else:
+            driving = {"ok": False, "reason": "missing_plan_segment_sync"}
+        if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
             grasped = copy.deepcopy(segment)
-            grasped["points"] = copy.deepcopy(grasp["points"])
-            grasped["source"] = "grasproad"
+            grasped["points"] = copy.deepcopy(driving["polyline"])
+            grasped["source"] = "driving_plan"
+            grasped["duration_sec"] = driving.get("duration_sec")
+            grasped["distance_m"] = driving.get("distance_m") or CoreDispatcher._path_distance_m(grasped["points"])
+            grasped["traffic_status"] = driving.get("traffic_status")
             grasped["grasp"] = {
                 "ok": True,
-                "distance_m": grasp.get("distance_m"),
-                "request_points": grasp.get("request_points"),
+                "provider": "amap_driving",
+                "strategy": driving.get("strategy"),
+                "distance_m": grasped["distance_m"],
+                "duration_sec": driving.get("duration_sec"),
+                "traffic_status": driving.get("traffic_status"),
+                "request_points": 2,
+                "waypoint_count": driving.get("waypoint_count", 0),
+                "cached": driving.get("cached"),
                 "error": None,
             }
             return {"ok": True, "segment": grasped}
 
-        # 降级路径：轨迹纠偏失败时，尝试用高德驾车规划返回的 polyline 作为展示路线。
-        driving = client.driving_eta_sync(points) if hasattr(client, "driving_eta_sync") else {}
-        if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
-            grasped = copy.deepcopy(segment)
-            grasped["points"] = copy.deepcopy(driving["polyline"])
-            grasped["source"] = "driving_polyline"
-            grasped["grasp"] = {
-                "ok": False,
-                "distance_m": grasp.get("distance_m") if isinstance(grasp, dict) else None,
-                "request_points": grasp.get("request_points") if isinstance(grasp, dict) else None,
-                "error": (
-                    grasp.get("error")
-                    or grasp.get("reason")
-                    or grasp.get("errmsg")
-                    if isinstance(grasp, dict)
-                    else "grasp_failed"
-                ),
-            }
-            return {"ok": True, "segment": grasped}
-
-        reason = "grasp_failed"
+        reason = "driving_plan_failed"
         if isinstance(driving, dict):
             reason = driving.get("error") or driving.get("reason") or driving.get("info") or reason
-        elif isinstance(grasp, dict):
-            reason = grasp.get("error") or grasp.get("reason") or grasp.get("errmsg") or reason
         return {"ok": False, "reason": reason, "segment": segment}
 
     @staticmethod
     def _run_route_grasp_job(client, job):
-        """锁外执行单车路线纠偏任务。
+        """锁外执行单车路线驾车规划任务。
 
         Args:
-            client (AmapEtaCorrectClient): 高德纠偏/驾车规划客户端。
+            client (AmapDrivingRoutePlanner): 高德驾车规划客户端。
             job (dict): _route_grasp_job_from_vehicle 构造出的任务快照。
 
         Returns:
-            dict: 单车纠偏结果；成功时包含分段纠偏路线和拼接后的完整路线。
+            dict: 单车规划结果；成功时包含分段规划路线和拼接后的完整路线。
         """
         if not getattr(client, "enabled", True):
             return {
@@ -2648,11 +2706,11 @@ class CoreDispatcher:
 
     @staticmethod
     def _apply_route_grasp_result(job, result, fleet):
-        """在车队中定位目标车辆，并应用纠偏结果。
+        """在车队中定位目标车辆，并应用驾车规划结果。
 
         Args:
-            job (dict): 原纠偏任务快照。
-            result (dict): _run_route_grasp_job 返回的纠偏结果。
+            job (dict): 原规划任务快照。
+            result (dict): _run_route_grasp_job 返回的规划结果。
             fleet (list[Vehicle] | None): 当前车队。
 
         Returns:
@@ -2669,18 +2727,18 @@ class CoreDispatcher:
 
     @staticmethod
     def _apply_route_grasp_result_to_vehicle(target_vehicle, job, result):
-        """校验版本并把单车纠偏结果写回车辆对象。
+        """校验版本并把单车驾车规划结果写回车辆对象。
 
         Args:
-            target_vehicle (Vehicle): 纠偏任务对应的车辆对象。
-            job (dict): 原纠偏任务快照。
-            result (dict): _run_route_grasp_job 返回的纠偏结果。
+            target_vehicle (Vehicle): 规划任务对应的车辆对象。
+            job (dict): 原规划任务快照。
+            result (dict): _run_route_grasp_job 返回的规划结果。
 
         Returns:
             int: 成功写回或写入错误状态返回 1；版本不匹配返回 0。
 
         Side Effects:
-            更新车辆的已纠偏分段、已纠偏总路线、纠偏状态和错误信息。
+            更新车辆的已规划分段、已规划总路线、规划状态和错误信息。
         """
         if target_vehicle is None:
             return 0
@@ -2723,19 +2781,19 @@ class CoreDispatcher:
 
     @classmethod
     def _execute_vehicle_route_grasp_job(cls, vehicle, job, job_key):
-        """在线程池中执行一次车辆路线纠偏，并在锁内写回结果。
+        """在线程池中执行一次车辆路线驾车规划，并在锁内写回结果。
 
         Args:
             vehicle (Vehicle): 提交任务时对应的车辆对象。
-            job (dict): 原纠偏任务快照。
+            job (dict): 原规划任务快照。
             job_key (tuple): 用于去重和清理在途任务的 (vehicle_id, route_version)。
 
         Side Effects:
-            锁外请求高德；锁内校验版本并写回车辆纠偏状态。
+            锁外请求高德；锁内校验版本并写回车辆规划状态。
         """
         try:
             try:
-                client = cls._get_eta_service()
+                client = cls._get_route_planner()
                 result = cls._run_route_grasp_job(client, job)
             except Exception as exc:
                 result = {
@@ -2763,20 +2821,20 @@ class CoreDispatcher:
         force=False,
         service=None,
     ):
-        """手动刷新待纠偏车辆路线结果。
+        """手动刷新待驾车规划车辆路线结果。
 
         Args:
             fleet (list[Vehicle] | None): 当前车队。
             state_lock (RLock | None): 读取和写回车辆状态时使用的锁。
             current_timestamp (float | None): 本次手动刷新时间戳；为空时取当前系统时间。
             force (bool): 是否忽略 5 秒节流限制。
-            service (object | None): 测试用高德纠偏服务桩；为空时使用默认高德客户端。
+            service (object | None): 测试用高德驾车规划服务桩；为空时使用默认高德客户端。
 
         Returns:
             int: 本次成功写回或写入错误状态的车辆数量。
 
         Notes:
-            运行时主链路已改为“路径更新即异步提交纠偏”；该函数保留给测试和人工排障使用。
+            运行时主链路已改为“路径更新即异步提交规划”；该函数保留给测试和人工排障使用。
         """
         current_timestamp = float(current_timestamp if current_timestamp is not None else time.time())
         lock_context = state_lock if state_lock is not None else nullcontext()
@@ -2791,13 +2849,13 @@ class CoreDispatcher:
             ):
                 return 0
             cls.route_grasp_last_refresh_timestamp = current_timestamp
-            # 持锁阶段只复制待纠偏任务快照，不在锁内请求高德。
+            # 持锁阶段只复制待规划任务快照，不在锁内请求高德。
             jobs = cls._collect_route_grasp_jobs(fleet)
 
         if not jobs:
             return 0
 
-        client = service or cls._get_eta_service()
+        client = service or cls._get_route_planner()
         results = []
         for job in jobs:
             # 网络请求锁外执行，避免阻塞派单、GPS 更新和状态查询。
@@ -2856,7 +2914,7 @@ class CoreDispatcher:
         """构造单车 ETA 刷新任务快照。
 
         算法说明:
-            ETA 只读取后台纠偏线程已经写回的分段轨迹，不在这里重新请求纠偏。
+            ETA 只读取后台规划线程已经写回的分段轨迹，不在这里重新请求高德规划。
         """
         if getattr(vehicle, "planned_route_grasp_status", None) != "ready":
             return None
@@ -2888,6 +2946,10 @@ class CoreDispatcher:
                 },
                 "points": points,
                 "aStarDistanceM": segment.get("aStarDistanceM", segment.get("distance")),
+                "durationSec": segment.get("duration_sec"),
+                "distanceM": segment.get("distance_m"),
+                "trafficStatus": segment.get("traffic_status"),
+                "source": segment.get("source"),
             })
         if not segments:
             return None
@@ -3030,6 +3092,81 @@ class CoreDispatcher:
             return "riding"
         return "matched"
 
+    @classmethod
+    def _eta_refresh_worker_count(cls, job_count):
+        """读取 ETA 刷新并发数，保证单轮尽快覆盖全部车辆任务。"""
+        if job_count <= 0:
+            return 0
+        raw_value = os.getenv("BUS_ETA_REFRESH_MAX_WORKERS") or os.getenv("ETA_REFRESH_MAX_WORKERS")
+        try:
+            configured = int(raw_value) if raw_value is not None else int(cls.ETA_REFRESH_MAX_WORKERS)
+        except (TypeError, ValueError):
+            configured = int(cls.ETA_REFRESH_MAX_WORKERS)
+        return max(1, min(job_count, configured))
+
+    @staticmethod
+    def _run_eta_refresh_job(eta_client, job, current_timestamp):
+        """锁外执行单车 ETA pipeline，供串行和并发刷新路径复用。"""
+        try:
+            if hasattr(eta_client, "build_eta_pipeline_from_astar"):
+                result = eta_client.build_eta_pipeline_from_astar(job["payload"], now=current_timestamp)
+            else:
+                result = build_eta_pipeline_from_astar(job["payload"], amap=eta_client)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "amapEnabled": True,
+                "reason": "eta_error",
+                "message": str(exc),
+                "passengerEtas": [],
+            }
+        return job, result
+
+    @staticmethod
+    def _route_waiting_eta_status(vehicle):
+        """把车辆路线规划状态映射成订单 ETA 等待状态。"""
+        route_status = getattr(vehicle, "planned_route_grasp_status", None)
+        route_error = getattr(vehicle, "planned_route_grasp_error", None)
+        if route_status == "ready":
+            return None, None
+        if route_status == "disabled":
+            return "disabled", "route_planning_disabled"
+        if route_status == "error":
+            return "route_error", route_error or "route_planning_error"
+        if route_status == "stale":
+            return "loading", route_error or "route_planning_stale"
+        return "loading", route_error or "route_planning_pending"
+
+    @classmethod
+    def _mark_eta_waiting_for_unready_routes(cls, fleet, updated_at):
+        """路线尚未规划完成时，把相关订单/空车热点 ETA 状态写成 loading 并落库。
+
+        Notes:
+            该函数只更新 eta_status/eta_error/eta_updated_at，不清空上一次有效 ETA 时间。
+        """
+        changed = 0
+        for vehicle in fleet or []:
+            status, message = cls._route_waiting_eta_status(vehicle)
+            if status is None:
+                continue
+
+            current_orders = cls._current_vehicle_orders(vehicle)
+            for order in current_orders.values():
+                cls._mark_order_eta_error(order, status, message, updated_at)
+                persistence.record_order_snapshot(
+                    order,
+                    status=cls._order_status_for_persistence(order),
+                    vehicle=vehicle,
+                )
+                changed += 1
+
+            if not current_orders and getattr(vehicle, "idle_target", None):
+                vehicle.idle_target_eta_status = status
+                vehicle.idle_target_eta_error = message
+                persistence.record_eta_result(vehicle)
+                changed += 1
+        return changed
+
     @staticmethod
     def _apply_vehicle_eta_result(job, result, updated_at, fleet):
         """校验路线版本并把单车 ETA 结果写回订单。"""
@@ -3142,16 +3279,17 @@ class CoreDispatcher:
         force=False,
         service=None,
     ):
-        """按 5 秒节流刷新订单 ETA。
+        """按固定间隔刷新订单 ETA，并尽量在一轮内覆盖所有可计算订单。
 
         并发约束:
             1. 持锁阶段只采集车辆/订单/路线快照。
-            2. 高德网络请求在锁外执行，避免阻塞派单和路径更新。
+            2. ETA pipeline 在锁外按车辆并发执行，避免阻塞派单和路径更新。
             3. 写回时再次持锁并校验 route_version，路线变更则丢弃旧结果。
         """
         current_timestamp = float(current_timestamp if current_timestamp is not None else time.time())
         lock_context = state_lock if state_lock is not None else nullcontext()
 
+        pending_changed = 0
         with lock_context:
             if city_map is None or fleet is None:
                 return 0
@@ -3162,30 +3300,30 @@ class CoreDispatcher:
             ):
                 return 0
             cls.eta_last_refresh_timestamp = current_timestamp
+            pending_changed = cls._mark_eta_waiting_for_unready_routes(fleet, current_timestamp)
             jobs = cls._collect_eta_refresh_jobs(fleet, city_map, current_timestamp)
 
         if not jobs:
-            return 0
+            return pending_changed
 
         eta_client = service or cls._get_eta_service()
-        results = []
-        for job in jobs:
-            try:
-                if hasattr(eta_client, "build_eta_pipeline_from_astar"):
-                    result = eta_client.build_eta_pipeline_from_astar(job["payload"], now=current_timestamp)
-                else:
-                    result = build_eta_pipeline_from_astar(job["payload"], amap=eta_client)
-            except Exception as exc:
-                result = {
-                    "ok": False,
-                    "amapEnabled": True,
-                    "reason": "eta_error",
-                    "message": str(exc),
-                    "passengerEtas": [],
-                }
-            results.append((job, result))
+        worker_count = cls._eta_refresh_worker_count(len(jobs))
+        if worker_count <= 1:
+            results = [
+                cls._run_eta_refresh_job(eta_client, job, current_timestamp)
+                for job in jobs
+            ]
+        else:
+            results = []
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="OrderEtaRefreshWorker") as executor:
+                futures = [
+                    executor.submit(cls._run_eta_refresh_job, eta_client, job, current_timestamp)
+                    for job in jobs
+                ]
+                for future in as_completed(futures):
+                    results.append(future.result())
 
-        changed = 0
+        changed = pending_changed
         with lock_context:
             for job, result in results:
                 updated_at = float(

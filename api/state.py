@@ -84,6 +84,11 @@ def current_time():
         "clock_last_dt": clock_last_dt,
         "clock_tick_count": clock_tick_count,
         "eta_refresh_interval_seconds": ETA_REFRESH_INTERVAL_SECONDS,
+        "eta_refresh_max_workers": CoreDispatcher._eta_refresh_worker_count(
+            len(fleet or [])
+            if fleet is not None
+            else int(CoreDispatcher.ETA_REFRESH_MAX_WORKERS)
+        ),
         "eta_thread_running": eta_thread is not None and eta_thread.is_alive(),
         "eta_last_refresh_timestamp": CoreDispatcher.eta_last_refresh_timestamp,
         "eta_last_refresh_time_text": (
@@ -164,8 +169,10 @@ def _clock_loop():
 def _eta_loop():
     """后台高德 ETA 刷新线程；独立于车辆时钟线程运行。"""
     while True:
-        time.sleep(ETA_REFRESH_INTERVAL_SECONDS)
+        loop_started = time.monotonic()
         refresh_order_etas_if_due(now_timestamp(), force=True)
+        elapsed = time.monotonic() - loop_started
+        time.sleep(max(0.5, ETA_REFRESH_INTERVAL_SECONDS - elapsed))
 
 
 def _route_grasp_loop():
