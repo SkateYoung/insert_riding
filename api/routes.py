@@ -339,6 +339,9 @@ def health():
         "status": "ok",
         "initialized": state.system_initialized,
         "db_enabled": db_status.get("enabled"),
+        "db_available": db_status.get("available"),
+        "db_database": db_status.get("database"),
+        "db_tenant_id": db_status.get("tenant_id"),
         "db_queue_size": db_status.get("queue_size"),
         "db_last_error": db_status.get("last_error"),
     })

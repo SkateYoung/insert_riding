@@ -481,9 +481,8 @@ class CoreDispatcher:
 
                 if not CoreDispatcher.order_pool:
                     print(f"[Core.Pool] 池中暂无订单...")
-                    if CoreDispatcher._collect_forecast_orders(fleet):
-                        # 无订单时对全部真正空闲车辆做一次车队级分散热点分配，避免车辆扎堆。
-                        CoreDispatcher.assign_idle_parking_targets(fleet, city_map)
+                    # 无订单时对全部真正空闲车辆做一次车队级分散热点分配，避免车辆扎堆。
+                    CoreDispatcher.assign_idle_parking_targets(fleet, city_map)
 
                 if CoreDispatcher.order_pool:
                     print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
@@ -1145,36 +1144,92 @@ class CoreDispatcher:
         return best_node, best_dist
 
     @staticmethod
+    def _forecast_sample_request_id(order):
+        """读取预测样本 ID，兼容数据库 dict 样本和内存 Order 对象。"""
+        if isinstance(order, dict):
+            return order.get("request_id")
+        return getattr(order, "request_id", None)
+
+    @staticmethod
+    def _forecast_sample_request_time(order):
+        """读取预测样本时间，兼容数据库 dict 样本和内存 Order 对象。"""
+        if isinstance(order, dict):
+            request_time = order.get("request_time")
+            if request_time is not None:
+                return request_time
+            completion_time = order.get("completion_time")
+            if completion_time is not None:
+                return completion_time
+            return order.get("req_time")
+
+        request_time = getattr(order, "request_time", None)
+        if request_time is not None:
+            return request_time
+        completion_time = getattr(order, "completion_time", None)
+        if completion_time is not None:
+            return completion_time
+        return getattr(order, "req_time", None)
+
+    @staticmethod
+    def _forecast_history_unavailable_reason():
+        """给空车预测样本为空的情况生成可读原因。"""
+        db_status = persistence.status()
+        if not db_status.get("enabled"):
+            return "数据库持久化未启用"
+        if db_status.get("last_error"):
+            return f"数据库读写异常：{db_status.get('last_error')}"
+        forecast_read = db_status.get("last_forecast_read") or {}
+        if forecast_read:
+            if not forecast_read.get("ok"):
+                return forecast_read.get("reason") or "预测历史订单读取失败"
+            matched_count = int(forecast_read.get("matched_row_count") or 0)
+            usable_count = int(forecast_read.get("usable_order_count") or 0)
+            dropped_count = int(forecast_read.get("dropped_invalid_count") or 0)
+            if matched_count == 0:
+                status_groups = forecast_read.get("status_groups_when_no_match") or []
+                if status_groups:
+                    return (
+                        f"当前读取 database={forecast_read.get('database')}, "
+                        f"tenant_id={forecast_read.get('tenant_id')} 未命中；"
+                        f"其他完成订单分布={status_groups}"
+                    )
+                return (
+                    f"当前读取 database={forecast_read.get('database')}, "
+                    f"tenant_id={forecast_read.get('tenant_id')}，没有匹配完成订单"
+                )
+            if usable_count == 0 and dropped_count > 0:
+                return (
+                    f"查询到 {matched_count} 条完成订单，但均缺少 request_id 或 OD 经纬度字段，"
+                    "已被预测输入转换过滤"
+                )
+        return "bus_order 中没有 status 为 completed/complete 的有效订单"
+
+    @staticmethod
     def _collect_forecast_orders(fleet=None):
-        """收集可供 OD 预测使用的历史和运行期订单样本。
+        """收集可供 OD 预测使用的已完成订单样本。
 
         Args:
-            fleet (list[Vehicle] | None): 当前车队；为空时只读取全局订单池。
+            fleet (list[Vehicle] | None): 保留兼容参数；预测样本以数据库已完成订单为主。
 
         Returns:
-            list[Order]: 去重后的订单对象列表。
+            list[Order|dict]: 去重后的订单样本列表。
         """
         orders = []
         seen_ids = set()
 
         def add_order(order):
             """按订单 ID 去重后加入预测样本集合。"""
-            request_id = getattr(order, "request_id", None)
+            request_id = CoreDispatcher._forecast_sample_request_id(order)
             key = str(request_id) if request_id is not None else id(order)
             if key in seen_ids:
                 return
             seen_ids.add(key)
             orders.append(order)
 
+        for order in persistence.fetch_completed_orders_for_forecast():
+            add_order(order)
         for order in CoreDispatcher.completed_orders_pool:
             add_order(order)
-        for order in CoreDispatcher.order_pool:
-            add_order(order)
-        for v in fleet or []:
-            for order in v.on_board_orders:
-                add_order(order)
-            for step in v.planned_route:
-                add_order(step["order"])
 
         return orders
 
@@ -1183,11 +1238,14 @@ class CoreDispatcher:
         """生成预测样本签名，用于判断热点缓存是否仍可复用。"""
         latest_time = 0.0
         for order in orders:
-            request_time = getattr(order, "request_time", None)
+            request_time = CoreDispatcher._forecast_sample_request_time(order)
             if isinstance(request_time, datetime):
                 order_time = request_time.timestamp()
             else:
-                order_time = float(getattr(order, "req_time", 0.0) or 0.0)
+                try:
+                    order_time = float(request_time or 0.0)
+                except (TypeError, ValueError):
+                    order_time = 0.0
             latest_time = max(latest_time, order_time)
         return len(orders), latest_time
 
@@ -1252,7 +1310,7 @@ class CoreDispatcher:
         try:
             clean_orders = od_forecast_module.orders_from_insert_riding(
                 orders,
-                city_map=city_map,
+                city_map=None,
                 base_datetime=datetime.fromtimestamp(0),
                 speed_mps=SPEED_MPS,
             )
@@ -1260,6 +1318,7 @@ class CoreDispatcher:
             print(f"[Core.Planner] 订单预测输入转换失败：{exc}")
             return None
         if not clean_orders:
+            print("[Core.Planner] 已完成订单样本无法转换为预测输入，空车热点预测跳过。")
             return None
 
         # 沿用现有预测窗口：最近一条历史订单之后的下一个 15 分钟窗口。
@@ -1283,8 +1342,15 @@ class CoreDispatcher:
                 horizons_min=(15,),
                 top_k=50,
             )
+        if not predictions:
+            print("[Core.Planner] 已完成订单样本不足或分布过稀，未生成空车热点预测结果。")
+            return None
 
         hotspots = CoreDispatcher._build_idle_hotspot_candidates(predictions, metrics, city_map)
+        if not hotspots:
+            print("[Core.Planner] 预测结果没有可用热点候选，空车热点预测跳过。")
+            return None
+
         generated_at_text = datetime.fromtimestamp(now_ts).isoformat(sep=" ", timespec="seconds")
         cache = {
             "city_map_id": id(city_map),
@@ -1306,6 +1372,10 @@ class CoreDispatcher:
         """读取或刷新车队级空车热点预测缓存。"""
         orders = CoreDispatcher._collect_forecast_orders(fleet)
         if not orders:
+            print(
+                "[Core.Planner] 未找到可用已完成订单预测样本，空车热点预测跳过："
+                f"{CoreDispatcher._forecast_history_unavailable_reason()}。"
+            )
             return None
 
         now_ts = time.time()
@@ -1922,7 +1992,7 @@ class CoreDispatcher:
                 source = "raw_trim_fallback"
                 grasp_meta = {"ok": False, "error": "trim_fallback"}
             else:
-                source = f"{previous.get('source', 'driving_plan')}_trimmed" if previous is not None else "raw_trim_fallback"
+                source = f"Amap_Driving"
                 grasp_meta = copy.deepcopy((previous or {}).get("grasp") or {})
                 grasp_meta["trimmed_from_previous"] = previous is not None
 

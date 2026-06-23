@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""MySQL 异步持久化层。
+"""MySQL 持久化层。
 
-本模块只负责把内存调度系统中的运行快照镜像写入 MySQL，不反向参与派单、
-路径重建、ETA、纠偏等核心算法决策。所有 record_* 入口均为 best-effort：
+本模块负责把内存调度系统中的运行快照镜像写入 MySQL，并为 OD 热点预测
+提供已完成订单的只读查询。所有 record_* 写入入口均为 best-effort：
 当 BUS_DB_ENABLED 未开启、PyMySQL 缺失、数据库断连或 SQL 异常时，错误只会
 留在后台写库线程状态中，不会向业务主流程继续抛出。
 """
@@ -28,6 +28,7 @@ except Exception:  # pragma: no cover - keeps module importable in isolation.
 
 DEFAULT_QUEUE_SIZE = 10000
 DEFAULT_TENANT_ID = "000000"
+DEFAULT_FORECAST_HISTORY_LIMIT = 5000
 
 
 # ============================================================
@@ -115,6 +116,48 @@ def _point_from_mapping(point):
         "lat": point.get("lat"),
         "name": point.get("name"),
         "zone": point.get("zone"),
+    }
+
+
+def _forecast_order_from_row(row):
+    """把 bus_order 查询行转换为 OD 预测模块可消费的轻量订单。"""
+    if not isinstance(row, dict):
+        return None
+
+    request_id = row.get("request_id")
+    origin_lon = _float_or_none(row.get("origin_lon"))
+    origin_lat = _float_or_none(row.get("origin_lat"))
+    destination_lon = _float_or_none(row.get("destination_lon"))
+    destination_lat = _float_or_none(row.get("destination_lat"))
+    if (
+        request_id in (None, "")
+        or origin_lon is None
+        or origin_lat is None
+        or destination_lon is None
+        or destination_lat is None
+    ):
+        return None
+
+    return {
+        "request_id": str(request_id),
+        "request_time": row.get("request_time") or row.get("completion_time"),
+        "status": row.get("status"),
+        "passenger_count": _int_or_none(row.get("passenger_count")) or 1,
+        "o_node": {
+            "id": row.get("origin_node_code") or f"origin:{request_id}",
+            "lon": origin_lon,
+            "lat": origin_lat,
+            "name": row.get("origin_name"),
+            "zone": None,
+        },
+        "d_node": {
+            "id": row.get("destination_node_code") or f"destination:{request_id}",
+            "lon": destination_lon,
+            "lat": destination_lat,
+            "name": row.get("destination_name"),
+            "zone": None,
+        },
+        "network_dist_m": _float_or_none(row.get("route_distance_m")),
     }
 
 
@@ -374,6 +417,7 @@ class MySqlPersistence:
         self.worker = None
         self.stop_event = threading.Event()
         self.last_error = None
+        self.last_forecast_read = None
         self.last_success_at = None
         self.dropped_tasks = 0
         self.processed_tasks = 0
@@ -405,12 +449,121 @@ class MySqlPersistence:
             "available": pymysql is not None,
             "queue_size": self.queue.qsize(),
             "last_error": self.last_error,
+            "last_forecast_read": copy.deepcopy(self.last_forecast_read),
             "last_success_at": self.last_success_at,
             "dropped_tasks": self.dropped_tasks,
             "processed_tasks": self.processed_tasks,
             "database": self.database,
             "tenant_id": self.tenant_id,
         }
+
+    def fetch_completed_orders_for_forecast(self, limit=None):
+        """读取 bus_order 中已完成订单，供 OD 热点预测使用。
+
+        该读取使用独立短连接，避免和异步写库线程共享连接。status 同时兼容
+        completed 和 complete；历史 mock-completed-* 测试订单会被排除。
+        """
+        if not self.enabled or pymysql is None:
+            self.last_forecast_read = {
+                "ok": False,
+                "reason": "database_disabled_or_pymysql_unavailable",
+                "database": self.database,
+                "tenant_id": self.tenant_id,
+                "pymysql_available": pymysql is not None,
+            }
+            return []
+
+        try:
+            limit = int(limit or os.getenv("BUS_FORECAST_HISTORY_LIMIT", DEFAULT_FORECAST_HISTORY_LIMIT))
+        except (TypeError, ValueError):
+            limit = DEFAULT_FORECAST_HISTORY_LIMIT
+        if limit <= 0:
+            return []
+
+        connection = None
+        try:
+            connection = pymysql.connect(
+                host=self.host,
+                port=self.port,
+                user=self.user,
+                password=self.password,
+                database=self.database,
+                charset="utf8mb4",
+                autocommit=True,
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT
+                        request_id,
+                        passenger_count,
+                        status,
+                        origin_lon,
+                        origin_lat,
+                        destination_lon,
+                        destination_lat,
+                        origin_node_code,
+                        destination_node_code,
+                        origin_name,
+                        destination_name,
+                        request_time,
+                        completion_time,
+                        route_distance_m
+                    FROM bus_order
+                    WHERE tenant_id = %s
+                      AND deleted = 0
+                      AND LOWER(status) IN ('completed', 'complete')
+                    ORDER BY COALESCE(completion_time, request_time) DESC
+                    LIMIT %s
+                """, (self.tenant_id, limit))
+                rows = cursor.fetchall()
+                status_groups = []
+                if not rows:
+                    cursor.execute("""
+                        SELECT tenant_id, status, deleted, COUNT(*) AS count
+                        FROM bus_order
+                        WHERE LOWER(status) IN ('completed', 'complete')
+                          AND request_id NOT LIKE 'mock-completed-%%'
+                        GROUP BY tenant_id, status, deleted
+                        ORDER BY count DESC
+                        LIMIT 10
+                    """)
+                    status_groups = cursor.fetchall()
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"forecast_history_read_failed: {exc}"
+            self.last_forecast_read = {
+                "ok": False,
+                "reason": "forecast_history_read_failed",
+                "error": str(exc),
+                "database": self.database,
+                "tenant_id": self.tenant_id,
+            }
+            return []
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+        orders = []
+        for row in rows or []:
+            order = _forecast_order_from_row(row)
+            if order is not None:
+                orders.append(order)
+        self.last_forecast_read = {
+            "ok": True,
+            "database": self.database,
+            "tenant_id": self.tenant_id,
+            "limit": limit,
+            "matched_row_count": len(rows or []),
+            "usable_order_count": len(orders),
+            "dropped_invalid_count": max(0, len(rows or []) - len(orders)),
+            "status_groups_when_no_match": status_groups,
+        }
+        if self.last_error and str(self.last_error).startswith("forecast_history_read_failed:"):
+            self.last_error = None
+        return orders
 
     def start(self):
         """按需启动后台写库线程。
@@ -641,12 +794,13 @@ class MySqlPersistence:
         self._execute(cursor, """
             INSERT INTO bus_vehicle
                 (vehicle_code, plate_no, vehicle_type, seat_count, max_load_count, vehicle_color,
-                 operation_status, operation_mode, current_driver_id, tenant_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 operation_status, operation_mode, current_driver_id, segment_route, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 plate_no=VALUES(plate_no), seat_count=VALUES(seat_count), max_load_count=VALUES(max_load_count),
                 vehicle_color=VALUES(vehicle_color), operation_status=VALUES(operation_status),
-                current_driver_id=VALUES(current_driver_id), updated_at=CURRENT_TIMESTAMP(3)
+                current_driver_id=VALUES(current_driver_id), segment_route=VALUES(segment_route),
+                updated_at=CURRENT_TIMESTAMP(3)
         """, (
             payload["vehicle_code"],
             payload.get("plate_no") or payload["vehicle_code"],
@@ -657,6 +811,7 @@ class MySqlPersistence:
             payload.get("operation_status") or "idle",
             payload.get("operation_mode") or "dynamic_bus",
             driver_id,
+            _json(payload.get("segment_route")),
             tenant_id,
         ))
 
@@ -1087,6 +1242,11 @@ def status():
     return _manager.status()
 
 
+def fetch_completed_orders_for_forecast(limit=None):
+    """读取已完成订单预测样本；数据库不可用时返回空列表。"""
+    return _manager.fetch_completed_orders_for_forecast(limit=limit)
+
+
 def start():
     """启动模块级后台写库线程。"""
     return _manager.start()
@@ -1180,6 +1340,7 @@ def record_vehicle(vehicle):
         "vehicle_color": getattr(vehicle, "color", None),
         "operation_status": _operation_status(vehicle),
         "driver_code": _driver_code(vehicle),
+        "segment_route": getattr(vehicle, "planned_route_segment_grasped_point", None),
     })
 
 
@@ -1514,6 +1675,7 @@ def record_route_grasp(vehicle):
     Args:
         vehicle (Vehicle): 车辆运行对象。
     """
+    record_vehicle(vehicle)
     record_vehicle_route(vehicle)
     record_vehicle_runtime(vehicle)
 

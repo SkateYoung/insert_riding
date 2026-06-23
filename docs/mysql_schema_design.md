@@ -17,7 +17,7 @@
 | --- | --- |
 | `sys_tenant` | 租户/运营主体。 |
 | `bus_driver` | 司机基础档案，包含司机业务 ID、工号、姓名、手机号、准驾车型、工作状态。 |
-| `bus_vehicle` | 车辆基础档案，包含车辆业务 ID、车牌、车型、座位数、核载人数、当前司机、运营状态。 |
+| `bus_vehicle` | 车辆基础档案，包含车辆业务 ID、车牌、车型、座位数、核载人数、当前司机、运营状态和当前分段纠偏路线。 |
 | `bus_vehicle_driver_bind` | 司机和车辆绑定历史，用于交班、换车和追溯。 |
 | `bus_passenger` | 乘客基础档案，包含乘客业务 ID、手机号、昵称、来源渠道、状态。 |
 
@@ -80,11 +80,12 @@
 | 当前对象/字段 | 推荐落库位置 |
 | --- | --- |
 | `CoreDispatcher.order_pool` | `bus_order.status = 'pooled'` |
-| `CoreDispatcher.completed_orders_pool` | `bus_order.status = 'completed'` |
+| OD 热点预测历史样本 | `bus_order.status IN ('completed', 'complete')` |
+| `CoreDispatcher.completed_orders_pool` | 当前进程内新完成/取消订单归档，重启后不再注入测试历史订单 |
 | `Vehicle.planned_route` | `bus_dispatch_route_step` |
 | `Vehicle.planned_route_point` | `bus_vehicle_route_snapshot.raw_route_points` |
 | `Vehicle.planned_route_grasped_point` | `bus_vehicle_route_snapshot.grasped_route_points` |
-| `Vehicle.planned_route_segment_grasped_point` | `bus_dispatch_route_segment.grasped_points` |
+| `Vehicle.planned_route_segment_grasped_point` | `bus_vehicle.segment_route` 和 `bus_dispatch_route_segment.grasped_points` |
 | `Vehicle.gps` | `bus_vehicle_runtime` 和 `bus_vehicle_location_log` |
 | `Order.estimated_arrival_time` | `bus_order.estimated_arrival_time` |
 | `Order.estimated_dropoff_time` | `bus_order.estimated_dropoff_time` |

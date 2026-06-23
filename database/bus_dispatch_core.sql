@@ -82,6 +82,7 @@ CREATE TABLE `bus_vehicle` (
   `operation_status` varchar(32) NOT NULL DEFAULT 'offline' COMMENT '运营状态:offline/idle/serving/closing/resting/maintenance',
   `operation_mode` varchar(32) DEFAULT 'dynamic_bus' COMMENT '运营模式:dynamic_bus/custom_bus/regular',
   `current_driver_id` bigint DEFAULT NULL COMMENT '当前司机ID',
+  `segment_route` json DEFAULT NULL COMMENT '车辆当前高德纠偏分段路线，对应 planned_route_segment_grasped_point',
   `remark` varchar(500) DEFAULT NULL COMMENT '备注',
   `tenant_id` varchar(32) NOT NULL DEFAULT '000000' COMMENT '租户ID',
   `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',

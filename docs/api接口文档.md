@@ -712,7 +712,7 @@ ETA 状态：
 ```json
 {
   "pool_size": 1,   # 订单池中的订单数量
-  "completed_orders_size": 30,  # 已完成订单数
+  "completed_orders_size": 0,  # 当前进程内已完成/已归档订单数
   "orders": [
     {
       "request_id": "order_10001",

@@ -1,7 +1,7 @@
 """Flask 运行期共享状态。
 
 该模块集中保存路网、车队、后台匹配线程等进程内单例对象。
-接口层只读取这些状态，初始化和模拟数据注入统一由 init_system 完成。
+接口层只读取这些状态，初始化统一由 init_system 完成。
 """
 
 import threading
@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import persistence
-from .models import CityGraph, Order, Vehicle
+from .models import CityGraph, Vehicle
 from .core import CoreDispatcher
 
 
@@ -222,65 +222,12 @@ def start_route_grasp_thread():
 
 
 # ============================================================
-# 功能二：预测模块测试历史订单注入--测试用
-# 相关方法：_seed_completed_orders
-# ============================================================
-
-def _seed_completed_orders(city_map, count=30):
-    """生成用于预测测试的历史完成订单。
-
-    Args:
-        city_map (CityGraph): 已完成 POI 映射的城市路网对象。
-        count (int): 需要生成的模拟订单数量。
-
-    Returns:
-        None。
-
-    Side Effects:
-        清空并重建 CoreDispatcher.completed_orders_pool。
-    """
-    CoreDispatcher.completed_orders_pool = []
-    if len(city_map.pois) < 2:
-        return
-
-    # 热点 OD 故意重复出现，让预测模块能稳定识别高需求上车区域。
-    hot_pairs = [
-        (3, 8), (3, 8), (3, 8), (3, 9), (3, 10),
-        (5, 8), (5, 8), (5, 9),
-        (1, 12), (2, 14),
-    ]
-    now = now_datetime()
-    for i in range(count):
-        o_idx, d_idx = hot_pairs[i % len(hot_pairs)]
-        o = city_map.pois[o_idx % len(city_map.pois)]
-        d = city_map.pois[d_idx % len(city_map.pois)]
-        request_time = now - timedelta(minutes=(count - i) * 5)
-        order = Order(
-            request_id=f"mock-completed-{i + 1:02d}",
-            o_lon=o.lon,
-            o_lat=o.lat,
-            d_lon=d.lon,
-            d_lat=d.lat,
-            request_time=request_time,
-            expected_pickup_earliest=request_time + timedelta(minutes=3),
-            expected_pickup_latest=request_time + timedelta(minutes=18),
-            passenger_count=1 + (i % 3),
-            city_map=city_map,
-            req_time=datetime_to_timestamp(request_time),
-        )
-        order.status = "completed"
-        order.actual_pick_time = datetime_to_timestamp(request_time) + 180
-        order.completion_time = datetime_to_timestamp(request_time) + 900
-        CoreDispatcher.completed_orders_pool.append(order)
-
-
-# ============================================================
-# 功能三：系统初始化入口
+# 功能二：系统初始化入口
 # 相关方法：init_system
 # ============================================================
 
 def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
-    """加载路网、创建车队、注入测试历史订单并启动后台匹配引擎。
+    """加载路网、创建车队并启动后台匹配引擎。
 
     Args:
         shp_path (str): 路网 SHP 文件路径。
@@ -321,12 +268,9 @@ def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
         for v in fleet:
             CoreDispatcher.refresh_vehicle_route_metadata(v, city)
 
-        # 预测模块依赖历史订单样本；这里注入模拟完成订单，不进入实时订单池。
-        _seed_completed_orders(city, count=30)
+        CoreDispatcher.completed_orders_pool = []
         system_initialized = True
         persistence.record_initial_state(city, fleet)
-        for completed_order in CoreDispatcher.completed_orders_pool:
-            persistence.record_order_snapshot(completed_order, city_map=city, status="completed")
 
     matching_thread = threading.Thread(
         target=CoreDispatcher.process_pool_matching,
