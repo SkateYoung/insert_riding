@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from . import persistence
 from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS
 from .auxiliary import AuxiliaryFunctions
+from .restrictions import restriction_signature
 from forecast import od_forecast_module
 from forecast.amap_driving_route_planner import AmapDrivingRoutePlanner
 from forecast.amap_eta_correct import DEFAULT_AMAP_KEY, AmapEtaCorrectClient, build_eta_pipeline_from_astar
@@ -48,6 +49,42 @@ class CoreDispatcher:
     route_grasp_executor_workers = 4
     route_grasp_inflight = set()
     route_grasp_inflight_lock = threading.Lock()
+    operation_restriction_policy = None
+    operation_restriction_lock = threading.Lock()
+
+    @classmethod
+    def set_operation_restriction_policy(cls, policy):
+        """更新进程内当前生效的运营禁区策略。"""
+        with cls.operation_restriction_lock:
+            cls.operation_restriction_policy = copy.deepcopy(policy) if policy else None
+        return cls.current_operation_restriction_policy()
+
+    @classmethod
+    def current_operation_restriction_policy(cls):
+        """返回当前运营禁区策略副本，避免调用方误改全局状态。"""
+        with cls.operation_restriction_lock:
+            return copy.deepcopy(cls.operation_restriction_policy)
+
+    @classmethod
+    def current_operation_restriction_signature(cls):
+        """返回当前禁区策略签名，用于 A* 路径缓存隔离。"""
+        return restriction_signature(cls.current_operation_restriction_policy())
+
+    @staticmethod
+    def _vehicle_restriction_policy(vehicle):
+        """返回车辆当前路线携带的禁区策略快照。"""
+        return copy.deepcopy(getattr(vehicle, "operation_restriction_policy", None))
+
+    @staticmethod
+    def _get_path(city_map, start_node, end_node, restriction_policy=None):
+        """在路网支持时带禁区策略调用 CityGraph.get_path。"""
+        try:
+            return city_map.get_path(start_node, end_node, restriction_policy=restriction_policy)
+        except TypeError as exc:
+            text = str(exc)
+            if "restriction_policy" in text or "unexpected keyword" in text:
+                return city_map.get_path(start_node, end_node)
+            raise
 
     # ============================================================
     # 功能一：订单路线成本评估与单车插单寻优
@@ -108,7 +145,12 @@ class CoreDispatcher:
             order = step['order']
             target_node = order.o_node if step['type'] == 'O' else order.d_node
             
-            dist, path = city_map.get_path(city_map.nodes_map[sim_next_node], target_node)
+            dist, path = CoreDispatcher._get_path(
+                city_map,
+                city_map.nodes_map[sim_next_node],
+                target_node,
+                restriction_policy=CoreDispatcher.current_operation_restriction_policy(),
+            )
             
             if dist == float('inf'):
                 return _result(False, float('inf'), None, {"infeasible_reason": "path_unreachable"})
@@ -789,7 +831,12 @@ class CoreDispatcher:
                 finish_time += edge_dist * (1.0 - vehicle.progress) / SPEED_MPS
 
         for target in CoreDispatcher._planned_route_targets(vehicle):
-            dist, _ = city_map.get_path(current_node, target["node"])
+            dist, _ = CoreDispatcher._get_path(
+                city_map,
+                current_node,
+                target["node"],
+                restriction_policy=CoreDispatcher._vehicle_restriction_policy(vehicle),
+            )
             if dist == float("inf"):
                 return None
             finish_time += dist / SPEED_MPS
@@ -1618,7 +1665,7 @@ class CoreDispatcher:
         return sorted(rows, key=score)[0]
 
     @staticmethod
-    def _build_idle_route_from_node(vehicle, city_map, start_node):
+    def _build_idle_route_from_node(vehicle, city_map, start_node, restriction_policy=None):
         """构建空车从当前节点前往预测热点的展示轨迹。
 
         Args:
@@ -1636,7 +1683,12 @@ class CoreDispatcher:
         if target_node is None:
             return None
 
-        dist, path = city_map.get_path(start_node, target_node)
+        dist, path = CoreDispatcher._get_path(
+            city_map,
+            start_node,
+            target_node,
+            restriction_policy=restriction_policy,
+        )
         if dist == float("inf"):
             return None
 
@@ -1664,7 +1716,7 @@ class CoreDispatcher:
     # ============================================================
 
     @staticmethod
-    def rebuild_vehicle_path_from_node(vehicle, city_map, start_node):
+    def rebuild_vehicle_path_from_node(vehicle, city_map, start_node, restriction_policy=None):
         """从指定路网节点出发，按车辆计划订单重新拼接完整路网轨迹。
 
         Args:
@@ -1681,7 +1733,12 @@ class CoreDispatcher:
         total_distance = 0.0
 
         for target in CoreDispatcher._planned_route_targets(vehicle):
-            dist, path = city_map.get_path(current_node, target["node"])
+            dist, path = CoreDispatcher._get_path(
+                city_map,
+                current_node,
+                target["node"],
+                restriction_policy=restriction_policy,
+            )
             if dist == float("inf"):
                 return None
 
@@ -1719,6 +1776,7 @@ class CoreDispatcher:
         """
         parts = [
             str(vehicle.id),
+            f"RESTRICT:{getattr(vehicle, 'operation_restriction_policy_signature', None) or 'none'}",
         ]
         if getattr(vehicle, "planned_route", None):
             for step in vehicle.planned_route:
@@ -1992,7 +2050,11 @@ class CoreDispatcher:
                 source = "raw_trim_fallback"
                 grasp_meta = {"ok": False, "error": "trim_fallback"}
             else:
-                source = f"Amap_Driving"
+                source = (
+                    f"{previous.get('source', 'driving_plan')}_trimmed"
+                    if previous is not None
+                    else "Amap_Driving"
+                )
                 grasp_meta = copy.deepcopy((previous or {}).get("grasp") or {})
                 grasp_meta["trimmed_from_previous"] = previous is not None
 
@@ -2157,6 +2219,8 @@ class CoreDispatcher:
             "vehicle_id": str(vehicle.id),
             "route_version": route_version,
             "segments": copy.deepcopy(raw_segments),
+            "restriction_policy": CoreDispatcher._vehicle_restriction_policy(vehicle),
+            "restriction_signature": getattr(vehicle, "operation_restriction_policy_signature", None) or "none",
         }
 
     @classmethod
@@ -2317,15 +2381,28 @@ class CoreDispatcher:
             CoreDispatcher._clear_idle_parking(vehicle)
 
         vehicle.gps = {"lon": start_node.lon, "lat": start_node.lat}
+        restriction_policy = CoreDispatcher.current_operation_restriction_policy()
         if not vehicle.planned_route and vehicle.idle_target:
-            result = CoreDispatcher._build_idle_route_from_node(vehicle, city_map, start_node)
+            result = CoreDispatcher._build_idle_route_from_node(
+                vehicle,
+                city_map,
+                start_node,
+                restriction_policy=restriction_policy,
+            )
         else:
-            result = CoreDispatcher.rebuild_vehicle_path_from_node(vehicle, city_map, start_node)
+            result = CoreDispatcher.rebuild_vehicle_path_from_node(
+                vehicle,
+                city_map,
+                start_node,
+                restriction_policy=restriction_policy,
+            )
         if result is None:
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
             return None
 
+        vehicle.operation_restriction_policy = copy.deepcopy(restriction_policy) if restriction_policy else None
+        vehicle.operation_restriction_policy_signature = restriction_signature(restriction_policy)
         vehicle.planned_route_point = result["path"]
         if submit_grasp:
             CoreDispatcher._mark_vehicle_route_grasp_pending(vehicle, result)
@@ -2662,7 +2739,7 @@ class CoreDispatcher:
         return jobs
 
     @staticmethod
-    def _grasp_route_segment(client, segment, previous_grasped_segment=None):
+    def _grasp_route_segment(client, segment, previous_grasped_segment=None, restriction_policy=None):
         """对单个路线分段做高德驾车规划。
 
         Args:
@@ -2696,7 +2773,14 @@ class CoreDispatcher:
 
         # 只用分段起终点规划，保持与前端 amap_route_demo.html 的 OD 驾车规划方式一致。
         if hasattr(client, "plan_segment_sync"):
-            driving = client.plan_segment_sync(points)
+            try:
+                driving = client.plan_segment_sync(points, restriction_policy=restriction_policy)
+            except TypeError as exc:
+                text = str(exc)
+                if "restriction_policy" in text or "unexpected keyword" in text:
+                    driving = client.plan_segment_sync(points)
+                else:
+                    raise
         elif hasattr(client, "driving_eta_sync"):
             driving = client.driving_eta_sync([points[0], points[-1]])
         else:
@@ -2748,11 +2832,17 @@ class CoreDispatcher:
 
         grasped_segments = []
         errors = []
+        restriction_policy = copy.deepcopy(job.get("restriction_policy"))
         for segment in job["segments"]:
             try:
                 # 单个分段失败不立即抛出，统一收集错误并返回给车辆状态。
                 previous_grasped_segment = grasped_segments[-1] if grasped_segments else None
-                result = CoreDispatcher._grasp_route_segment(client, segment, previous_grasped_segment)
+                result = CoreDispatcher._grasp_route_segment(
+                    client,
+                    segment,
+                    previous_grasped_segment,
+                    restriction_policy=restriction_policy,
+                )
             except Exception as exc:
                 result = {"ok": False, "reason": str(exc), "segment": segment}
             if result.get("ok"):

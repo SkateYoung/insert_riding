@@ -11,6 +11,7 @@ from . import persistence
 from .auxiliary import AuxiliaryFunctions
 from .core import CoreDispatcher
 from .models import Order, SPEED_MPS
+from .restrictions import OperationRestrictionError, normalize_policy_payload, policy_to_response
 
 
 bp = Blueprint("api_routes", __name__)
@@ -121,6 +122,7 @@ def _vehicle_to_dict(v):
         "planned_route_grasp_status": getattr(v, "planned_route_grasp_status", None),
         "planned_route_grasp_error": getattr(v, "planned_route_grasp_error", None),
         "planned_route_grasp_route_version": getattr(v, "planned_route_grasp_route_version", None),
+        "operation_restriction_policy_signature": getattr(v, "operation_restriction_policy_signature", None),
         "last_node": v.last_node,
         "next_node": v.next_node,
         "progress": v.progress,
@@ -236,6 +238,49 @@ def _order_node_to_dict(node):
         "lon": node.lon if node else None,
         "lat": node.lat if node else None,
     }
+
+
+def _restriction_policy_response(policy):
+    """把禁区策略统一转换成接口响应结构。"""
+    return policy_to_response(policy)
+
+
+def _sync_active_restriction_policy(policy):
+    """同步进程内当前禁区策略，并返回响应结构。"""
+    CoreDispatcher.set_operation_restriction_policy(policy)
+    return _restriction_policy_response(policy)
+
+
+def _nearest_node_from_coords(city_map, lon, lat):
+    """根据经纬度查找最近的路网节点。"""
+    best_node = None
+    best_dist = float("inf")
+    for node in city_map.nodes_map.values():
+        dist = AuxiliaryFunctions.haversine_distance(float(lon), float(lat), node.lon, node.lat)
+        if dist < best_dist:
+            best_node = node
+            best_dist = dist
+    return best_node, best_dist
+
+
+def _route_test_node(city_map, payload, key):
+    """解析路线测试起终点，并吸附到路网节点。"""
+    node_id = payload.get(f"{key}_node_id") or payload.get(f"{key}NodeId")
+    if node_id:
+        node = city_map.nodes_map.get(str(node_id))
+        if node is None:
+            raise ValueError(f"{key}_node_id 未找到")
+        return node, 0.0
+
+    point = payload.get(key) or {}
+    lon = point.get("lon", point.get("lng", point.get("longitude")))
+    lat = point.get("lat", point.get("latitude"))
+    if lon is None or lat is None:
+        raise ValueError(f"{key} 必须包含 lon/lat 或 {key}_node_id")
+    node, dist = _nearest_node_from_coords(city_map, float(lon), float(lat))
+    if node is None:
+        raise ValueError(f"{key} 无法吸附到路网节点")
+    return node, dist
 
 
 def _find_order_eta_context(request_id):
@@ -550,6 +595,122 @@ def cancel_order(request_id):
 # 相关接口：/fleet、/fleet/<vehicle_id>、/fleet/<vehicle_id>/path、/fleet/<vehicle_id>/rest、/tick、/status
 # ============================================================
 
+@bp.route("/operation-restrictions/policies", methods=["GET"])
+def list_operation_restriction_policies():
+    """查询运营禁区策略列表。"""
+    policies = persistence.list_operation_restriction_policies()
+    return jsonify({
+        "policies": [_restriction_policy_response(policy) for policy in policies],
+        "active_policy": _restriction_policy_response(CoreDispatcher.current_operation_restriction_policy()),
+    })
+
+
+@bp.route("/operation-restrictions/policies", methods=["POST"])
+def create_operation_restriction_policy():
+    """创建运营禁区策略。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        policy = normalize_policy_payload(data, require_identity=True)
+        if persistence.get_operation_restriction_policy(policy["policy_name"]):
+            return jsonify({
+                "error": "policy_name_exists",
+                "message": "禁区策略名称已存在",
+                "policy_name": policy["policy_name"],
+            }), 400
+        saved = persistence.save_operation_restriction_policy(policy)
+        active = persistence.get_active_operation_restriction_policy()
+        _sync_active_restriction_policy(active)
+        return jsonify({"policy": _restriction_policy_response(saved)}), 201
+    except OperationRestrictionError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.route("/operation-restrictions/policies/<policy_identity>", methods=["GET"])
+def get_operation_restriction_policy(policy_identity):
+    """查询单个运营禁区策略。"""
+    policy = persistence.get_operation_restriction_policy(policy_identity)
+    if policy is None:
+        return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
+    return jsonify({"policy": _restriction_policy_response(policy)})
+
+
+@bp.route("/operation-restrictions/policies/<policy_identity>", methods=["PUT"])
+def update_operation_restriction_policy(policy_identity):
+    """更新单个运营禁区策略。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        policy = normalize_policy_payload(data, require_identity=True)
+        existing = persistence.get_operation_restriction_policy(policy_identity)
+        if existing is None:
+            return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
+        if policy["policy_name"] != existing.get("policy_name"):
+            return jsonify({
+                "error": "policy_name_immutable",
+                "message": "禁区策略名称是唯一标识，编辑已有策略时不能修改名称",
+                "policy_name": existing.get("policy_name"),
+            }), 400
+        policy["is_active"] = bool(existing.get("is_active"))
+        saved = persistence.save_operation_restriction_policy(policy)
+        active = persistence.get_active_operation_restriction_policy()
+        _sync_active_restriction_policy(active)
+        return jsonify({"policy": _restriction_policy_response(saved)})
+    except OperationRestrictionError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.route("/operation-restrictions/policies/<policy_identity>", methods=["DELETE"])
+def delete_operation_restriction_policy(policy_identity):
+    """软删除单个运营禁区策略。"""
+    try:
+        deleted = persistence.delete_operation_restriction_policy(policy_identity)
+        if not deleted:
+            return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
+        active = persistence.get_active_operation_restriction_policy()
+        _sync_active_restriction_policy(active)
+        return jsonify({
+            "status": "deleted",
+            "policy_identity": str(policy_identity),
+            "active_policy": _restriction_policy_response(active),
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@bp.route("/operation-restrictions/active", methods=["GET"])
+def get_active_operation_restriction_policy():
+    """查询当前生效的运营禁区策略。"""
+    active = persistence.get_active_operation_restriction_policy()
+    _sync_active_restriction_policy(active)
+    return jsonify({"policy": _restriction_policy_response(active)})
+
+
+@bp.route("/operation-restrictions/active", methods=["POST"])
+def set_active_operation_restriction_policy():
+    """选择当前生效的禁区策略，或关闭禁区限制。"""
+    data = request.get_json(silent=True) or {}
+    policy_identity = data.get("policy_name")
+    if policy_identity in (None, ""):
+        policy_identity = data.get("policy_code")
+    try:
+        active = persistence.set_active_operation_restriction_policy(policy_identity)
+        if policy_identity not in (None, "") and active is None:
+            return jsonify({
+                "error": "policy_not_found_or_disabled",
+                "policy_identity": str(policy_identity),
+            }), 404
+        _sync_active_restriction_policy(active)
+        return jsonify({
+            "status": "active_updated",
+            "policy": _restriction_policy_response(active),
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @bp.route("/fleet", methods=["GET"])
 def get_fleet():
     """获取全部车辆状态。
@@ -748,6 +909,9 @@ def full_status():
             "fleet": [_vehicle_to_dict(v) for v in state.fleet],
             "order_pool_size": len(CoreDispatcher.order_pool),
             "completed_orders": len(CoreDispatcher.completed_orders_pool),
+            "operation_restriction_policy": _restriction_policy_response(
+                CoreDispatcher.current_operation_restriction_policy()
+            ),
         })
 
 

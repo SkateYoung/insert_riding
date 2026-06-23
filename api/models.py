@@ -9,6 +9,7 @@ import heapq
 import time as time_module
 from datetime import datetime, timedelta, timezone
 from .auxiliary import AuxiliaryFunctions
+from .restrictions import edge_is_restricted, restriction_signature
 
 # 尝试并实现自动热加载安装 shapefile (pyshp)
 # ============================================================
@@ -255,7 +256,7 @@ class CityGraph:
                 new_edges.append(e)
         self.edges = new_edges
 
-    def get_path(self, start_node, end_node):
+    def get_path(self, start_node, end_node, restriction_policy=None):
         """A* (A-Star) 全局最短路径推演扫描算子。
         
         提供从目标起终点的逐级地理网格渗透式搜索，并带有结果缓存机制。
@@ -267,7 +268,8 @@ class CityGraph:
         Returns:
             tuple: (全行程最低距离(米), Node对象数组路径)
         """
-        cache_key = f"{start_node.id}|{end_node.id}"
+        restriction_key = restriction_signature(restriction_policy)
+        cache_key = f"{start_node.id}|{end_node.id}|{restriction_key}"
         if cache_key in self.path_cache:
             return self.path_cache[cache_key]
 
@@ -297,11 +299,13 @@ class CityGraph:
                 
             curr_node = self.nodes_map[curr_id]
             for nbr_id, dist in curr_node.neighbors.items():
+                nbr_node = self.nodes_map[nbr_id]
+                if edge_is_restricted(restriction_policy, curr_node, nbr_node):
+                    continue
                 tentative_g = g_score[curr_id] + dist
                 if nbr_id not in g_score or tentative_g < g_score[nbr_id]:
                     came_from[nbr_id] = curr_id
                     g_score[nbr_id] = tentative_g
-                    nbr_node = self.nodes_map[nbr_id]
                     # Heuristic A* 评估法：到目标坐标的物理鸟瞰直线开销
                     h = AuxiliaryFunctions.haversine_distance(nbr_node.lon, nbr_node.lat, end_node.lon, end_node.lat)
                     f_val = tentative_g + h

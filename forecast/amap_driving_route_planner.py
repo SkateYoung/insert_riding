@@ -41,6 +41,15 @@ except ImportError:  # pragma: no cover - depends on deployment environment.
 DEFAULT_DRIVING_STRATEGY = "37"
 DEFAULT_DRIVING_REQUEST_INTERVAL_MS = 500
 DEFAULT_DRIVING_QPS_RETRY_DELAYS_MS = (1500, 3000, 6000)
+DEFAULT_DRIVING_GET_URL_LIMIT = 1900
+
+
+def _restriction_avoidpolygons(restriction_policy: dict[str, Any] | None) -> str | None:
+    """从禁区策略中取出高德 avoidpolygons 参数。"""
+    if not isinstance(restriction_policy, dict):
+        return None
+    avoidpolygons = str(restriction_policy.get("amap_avoidpolygons") or "").strip()
+    return avoidpolygons or None
 
 
 def _env_retry_delays_ms(name: str, default: tuple[int, ...]) -> list[float]:
@@ -126,7 +135,11 @@ class AmapDrivingRoutePlanner:
         """返回当前是否具备可用的高德 Key。"""
         return bool(self.api_key)
 
-    def plan_segment_sync(self, points: list[dict[str, Any]]) -> dict[str, Any]:
+    def plan_segment_sync(
+        self,
+        points: list[dict[str, Any]],
+        restriction_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """同步规划一个分段，只使用分段起终点，不传 A* 中间点。"""
         if not self.enabled:
             return {"ok": False, "reason": "missing_api_key"}
@@ -156,6 +169,9 @@ class AmapDrivingRoutePlanner:
             "show_fields": "cost,polyline,tmcs",
             "output": "json",
         }
+        avoidpolygons = _restriction_avoidpolygons(restriction_policy)
+        if avoidpolygons:
+            params["avoidpolygons"] = avoidpolygons
         cache_key = json.dumps(params, sort_keys=True, separators=(",", ":"))
         cached = self._route_cache.get(cache_key)
         if cached:
@@ -166,12 +182,21 @@ class AmapDrivingRoutePlanner:
         result = self._request_driving_with_qps_retry(params)
         result["waypoint_count"] = 0
         result["strategy"] = self.strategy
+        result["restriction_policy_signature"] = (
+            restriction_policy.get("policy_signature")
+            if isinstance(restriction_policy, dict)
+            else None
+        )
         result["cached"] = False
         if result.get("ok"):
             self._route_cache[cache_key] = copy.deepcopy(result)
         return result
 
-    def plan_segments_sync(self, segments: list[dict[str, Any]]) -> dict[str, Any]:
+    def plan_segments_sync(
+        self,
+        segments: list[dict[str, Any]],
+        restriction_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """规划多个 O/D/IDLE 分段，并返回统一的整车路线结构。"""
         if not self.enabled:
             return {
@@ -185,7 +210,10 @@ class AmapDrivingRoutePlanner:
         planned_segments: list[dict[str, Any]] = []
         errors: list[str] = []
         for segment in segments or []:
-            result = self.plan_segment_sync(segment.get("points") or [])
+            result = self.plan_segment_sync(
+                segment.get("points") or [],
+                restriction_policy=restriction_policy,
+            )
             if not isinstance(result, dict) or not result.get("ok"):
                 reason = "driving_plan_failed"
                 if isinstance(result, dict):
@@ -241,8 +269,15 @@ class AmapDrivingRoutePlanner:
         for attempt_index in range(attempts):
             try:
                 self._throttle_request()
-                url = f"https://restapi.amap.com/v5/direction/driving?{urlencode(params)}"
-                req = Request(url, headers={"User-Agent": "insert-riding-driving-route/1.0"})
+                base_url = "https://restapi.amap.com/v5/direction/driving"
+                encoded = urlencode(params)
+                url = f"{base_url}?{encoded}"
+                headers = {"User-Agent": "insert-riding-driving-route/1.0"}
+                if len(url) > DEFAULT_DRIVING_GET_URL_LIMIT:
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    req = Request(base_url, data=encoded.encode("utf-8"), headers=headers, method="POST")
+                else:
+                    req = Request(url, headers=headers)
                 payload = self._urlopen_json(req)
                 result = self._parse_driving_response(payload)
             except Exception as exc:

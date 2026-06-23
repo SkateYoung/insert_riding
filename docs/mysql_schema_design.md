@@ -145,3 +145,17 @@ ETA 状态：
 1. 第一阶段只写入订单、车辆运行快照、GPS 历史和路线快照，不改变现有派单逻辑。
 2. 第二阶段把派单任务和路线步骤落库，用于算法回放和问题排查。
 3. GPS 历史属于高频写入表，数据量上来后再做按月分区或冷热归档。
+
+## 运营禁区策略
+
+`bus_operation_restriction_policy` 用于存储前端维护的运营禁区策略。
+
+- `policy_code`: 策略业务编码，可重复，用于前端展示或外部分组。
+- `policy_name`: 策略展示名称，同一租户下唯一，后端以该字段定位策略。
+- `polygons_json`: 规范化后的禁区 polygon 列表，每个 polygon 包含 `points`、`area_km2` 和 `bounds`。
+- `amap_avoidpolygons`: 序列化后的高德 WebService `avoidpolygons` 参数值。
+- `polygon_count`、`vertex_count`、`total_area_km2`: 校验与统计字段。
+- `status`: 策略状态，取值为 `enabled` 或 `disabled`。
+- `is_active`: 当前全局生效策略标记；应用层事务会先清空同租户其他生效策略，再设置新的生效策略。
+
+后端写库前会校验高德限制：最多 32 个 polygon、单个 polygon 最多 16 个顶点，且单个 polygon 面积不超过 81 平方公里。

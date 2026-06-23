@@ -26,7 +26,7 @@
             top: 16px;
             left: 16px;
             z-index: 10;
-            width: 360px;
+            width: 380px;
             max-height: calc(100vh - 32px);
             overflow: auto;
             box-sizing: border-box;
@@ -50,13 +50,15 @@
             margin-bottom: 10px;
         }
 
-        .field label {
+        .field label,
+        .section-title {
             font-size: 12px;
             color: #9ca3af;
         }
 
         input,
         select,
+        textarea,
         button {
             box-sizing: border-box;
             width: 100%;
@@ -65,7 +67,8 @@
         }
 
         input,
-        select {
+        select,
+        textarea {
             border: 1px solid #334155;
             padding: 8px;
             outline: none;
@@ -73,11 +76,21 @@
             color: #f8fafc;
         }
 
-        .actions {
+        textarea {
+            min-height: 56px;
+            resize: vertical;
+        }
+
+        .actions,
+        .compact-actions {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 8px;
             margin: 12px 0;
+        }
+
+        .compact-actions {
+            margin: 8px 0;
         }
 
         button {
@@ -92,9 +105,25 @@
             background: #475569;
         }
 
+        button.danger {
+            background: #b91c1c;
+        }
+
         button:disabled {
             opacity: 0.55;
             cursor: not-allowed;
+        }
+
+        .divider {
+            height: 1px;
+            margin: 14px 0;
+            background: rgba(148, 163, 184, 0.24);
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
         }
 
         .legend {
@@ -114,6 +143,13 @@
             vertical-align: middle;
             border-radius: 999px;
             background: var(--line-color);
+        }
+
+        .hint {
+            margin: 8px 0 0;
+            color: #cbd5e1;
+            font-size: 12px;
+            line-height: 1.5;
         }
 
         .status {
@@ -160,7 +196,48 @@
             <span style="--line-color:#2563eb;">后端原始 A* 路线</span>
             <span style="--line-color:#a855f7;">后端高德纠偏路线</span>
             <span style="--line-color:#f97316;">纠偏分段路线</span>
+            <span style="--line-color:#ef4444;">运营禁区</span>
         </div>
+
+        <div class="divider"></div>
+        <div class="section-title">运营禁区策略</div>
+
+        <div class="field">
+            <label for="restrictionPolicySelect">策略</label>
+            <select id="restrictionPolicySelect"></select>
+        </div>
+
+        <div class="compact-actions">
+            <button id="newRestrictionPolicyBtn" type="button">新增禁区策略</button>
+            <button id="reloadRestrictionBtn" type="button" class="secondary">查询全部策略</button>
+        </div>
+
+        <div class="two-col">
+            <div class="field">
+                <label for="restrictionPolicyCodeInput">编号</label>
+                <input id="restrictionPolicyCodeInput" value="campus-block">
+            </div>
+            <div class="field">
+                <label for="restrictionPolicyNameInput">名称</label>
+                <input id="restrictionPolicyNameInput" value="校园施工禁区">
+            </div>
+        </div>
+
+        <div class="field">
+            <label for="restrictionDescriptionInput">备注</label>
+            <textarea id="restrictionDescriptionInput"></textarea>
+        </div>
+
+        <div class="compact-actions">
+            <button id="drawRestrictionBtn" type="button">开始画禁区</button>
+            <button id="closeRestrictionBtn" type="button" class="secondary">闭合当前禁区</button>
+            <button id="saveRestrictionBtn" type="button">保存策略</button>
+            <button id="activateRestrictionBtn" type="button" class="secondary">设为当前</button>
+            <button id="deleteRestrictionBtn" type="button" class="danger">删除策略</button>
+            <button id="clearRestrictionBtn" type="button" class="secondary">清空禁区图形</button>
+        </div>
+
+        <div class="hint">选择已有策略后可继续绘制并闭合新禁区，保存后会追加到该策略；新增策略会先清空当前表单。画禁区时请按边界顺时针或逆时针依次点击，避免对角线交叉。</div>
 
         <div id="status" class="status">等待加载车队。</div>
     </section>
@@ -174,6 +251,19 @@
         const clearBtn = document.getElementById("clearBtn");
         const statusEl = document.getElementById("status");
 
+        const restrictionPolicySelect = document.getElementById("restrictionPolicySelect");
+        const newRestrictionPolicyBtn = document.getElementById("newRestrictionPolicyBtn");
+        const restrictionPolicyCodeInput = document.getElementById("restrictionPolicyCodeInput");
+        const restrictionPolicyNameInput = document.getElementById("restrictionPolicyNameInput");
+        const restrictionDescriptionInput = document.getElementById("restrictionDescriptionInput");
+        const drawRestrictionBtn = document.getElementById("drawRestrictionBtn");
+        const closeRestrictionBtn = document.getElementById("closeRestrictionBtn");
+        const saveRestrictionBtn = document.getElementById("saveRestrictionBtn");
+        const activateRestrictionBtn = document.getElementById("activateRestrictionBtn");
+        const deleteRestrictionBtn = document.getElementById("deleteRestrictionBtn");
+        const clearRestrictionBtn = document.getElementById("clearRestrictionBtn");
+        const reloadRestrictionBtn = document.getElementById("reloadRestrictionBtn");
+
         const map = new AMap.Map("container", {
             zoom: 14,
             center: [113.4, 23.05],
@@ -184,6 +274,12 @@
 
         const fleetById = new Map();
         let layers = [];
+        let restrictionPolicies = [];
+        let restrictionPolygons = [];
+        let restrictionLayers = [];
+        let draftRestrictionPoints = [];
+        let draftRestrictionLine = null;
+        let isDrawingRestriction = false;
 
         function setStatus(message) {
             statusEl.textContent = message;
@@ -197,6 +293,18 @@
             vehicleSelect.disabled = isBusy;
         }
 
+        function setRestrictionBusy(isBusy) {
+            restrictionPolicySelect.disabled = isBusy;
+            newRestrictionPolicyBtn.disabled = isBusy;
+            drawRestrictionBtn.disabled = isBusy;
+            closeRestrictionBtn.disabled = isBusy;
+            saveRestrictionBtn.disabled = isBusy;
+            activateRestrictionBtn.disabled = isBusy;
+            deleteRestrictionBtn.disabled = isBusy;
+            clearRestrictionBtn.disabled = isBusy;
+            reloadRestrictionBtn.disabled = isBusy;
+        }
+
         function apiBase() {
             return apiBaseInput.value.replace(/\/+$/, "");
         }
@@ -205,9 +313,20 @@
             const response = await fetch(url, options);
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
-                throw new Error(data.error || `${response.status} ${response.statusText}`);
+                throw new Error(data.error || data.message || `${response.status} ${response.statusText}`);
             }
             return data;
+        }
+
+        async function apiJson(path, options = {}) {
+            const init = {
+                headers: { "Content-Type": "application/json" },
+                ...options
+            };
+            if (init.body && typeof init.body !== "string") {
+                init.body = JSON.stringify(init.body);
+            }
+            return fetchJson(`${apiBase()}${path}`, init);
         }
 
         function toNumber(value) {
@@ -281,7 +400,7 @@
         function addMarker(point, label, color) {
             const normalized = normalizePoint(point);
             if (!normalized) {
-                return;
+                return null;
             }
             const marker = new AMap.Marker({
                 position: [normalized.lon, normalized.lat],
@@ -295,12 +414,14 @@
             });
             layers.push(marker);
             map.add(marker);
+            return marker;
         }
 
-        function fitVisible(points) {
+        function fitVisible(points, customLayers) {
             const normalized = normalizePoints(points);
-            if (normalized.length >= 2) {
-                map.setFitView(layers, false, [70, 40, 40, 390]);
+            const targetLayers = customLayers || layers;
+            if (normalized.length >= 2 && targetLayers.length) {
+                map.setFitView(targetLayers, false, [70, 40, 40, 390]);
             } else if (normalized.length === 1) {
                 map.setCenter([normalized[0].lon, normalized[0].lat]);
             }
@@ -365,6 +486,7 @@
             setStatus([
                 `车辆：${vehicle.id}`,
                 `纠偏状态：${vehicle.planned_route_grasp_status || "none"}`,
+                vehicle.operation_restriction_policy_signature ? `禁区策略：${vehicle.operation_restriction_policy_signature}` : null,
                 vehicle.planned_route_grasp_error ? `纠偏错误：${vehicle.planned_route_grasp_error}` : null,
                 `原始路线点：${rawPoints.length}`,
                 `纠偏总路线点：${graspedPoints.length}`,
@@ -456,6 +578,231 @@
             await waitForGraspReady(vehicleId, vehicle.planned_route_grasp_route_version);
         }
 
+        function pointFromLngLat(lnglat) {
+            return {
+                lon: Number(lnglat.lng.toFixed(6)),
+                lat: Number(lnglat.lat.toFixed(6))
+            };
+        }
+
+        function clearRestrictionLayers() {
+            if (restrictionLayers.length) {
+                map.remove(restrictionLayers);
+            }
+            restrictionLayers = [];
+            if (draftRestrictionLine) {
+                map.remove(draftRestrictionLine);
+                draftRestrictionLine = null;
+            }
+        }
+
+        function renderRestrictionPolygon(points, isActive) {
+            const normalized = normalizePoints(points);
+            if (normalized.length < 3) {
+                return null;
+            }
+            const polygon = new AMap.Polygon({
+                path: asLngLat(normalized),
+                strokeColor: isActive ? "#ef4444" : "#f97316",
+                strokeWeight: isActive ? 3 : 2,
+                fillColor: "#ef4444",
+                fillOpacity: isActive ? 0.22 : 0.14,
+                zIndex: 30
+            });
+            restrictionLayers.push(polygon);
+            map.add(polygon);
+            return polygon;
+        }
+
+        function renderRestrictionPolygons(shouldFit = false) {
+            clearRestrictionLayers();
+            for (const polygon of restrictionPolygons) {
+                renderRestrictionPolygon(polygon.points || polygon, true);
+            }
+            if (shouldFit && restrictionLayers.length) {
+                map.setFitView(restrictionLayers, false, [70, 40, 40, 390]);
+            }
+        }
+
+        function renderDraftRestrictionLine() {
+            if (draftRestrictionLine) {
+                map.remove(draftRestrictionLine);
+            }
+            if (draftRestrictionPoints.length < 1) {
+                draftRestrictionLine = null;
+                return;
+            }
+            draftRestrictionLine = new AMap.Polyline({
+                path: asLngLat(draftRestrictionPoints),
+                strokeColor: "#f97316",
+                strokeWeight: 3,
+                strokeStyle: "dashed",
+                zIndex: 70
+            });
+            map.add(draftRestrictionLine);
+        }
+
+        function closeCurrentRestriction() {
+            if (draftRestrictionPoints.length < 3) {
+                setStatus("当前禁区至少需要 3 个顶点。");
+                return;
+            }
+            restrictionPolygons.push({
+                name: `polygon-${restrictionPolygons.length + 1}`,
+                points: draftRestrictionPoints.slice()
+            });
+            draftRestrictionPoints = [];
+            isDrawingRestriction = false;
+            renderRestrictionPolygons(true);
+            setStatus(`已闭合当前禁区，当前策略共有 ${restrictionPolygons.length} 个禁区。保存后会写入该策略。`);
+        }
+
+        function selectedRestrictionPolicy() {
+            return restrictionPolicies.find(policy => policy.policy_name === restrictionPolicySelect.value);
+        }
+
+        function buildNewRestrictionPolicyCode() {
+            const timestamp = new Date()
+                .toISOString()
+                .slice(0, 19)
+                .replace(/[-:T]/g, "");
+            return `restriction-${timestamp}`;
+        }
+
+        function resetRestrictionPolicyForm(message) {
+            restrictionPolicySelect.value = "";
+            restrictionPolicyCodeInput.value = buildNewRestrictionPolicyCode();
+            restrictionPolicyNameInput.value = "新禁区策略";
+            restrictionPolicyNameInput.readOnly = false;
+            restrictionDescriptionInput.value = "";
+            restrictionPolygons = [];
+            draftRestrictionPoints = [];
+            isDrawingRestriction = false;
+            renderRestrictionPolygons();
+            renderDraftRestrictionLine();
+            if (message) {
+                setStatus(message);
+            }
+        }
+
+        function loadPolicyIntoForm(policy) {
+            if (!policy) {
+                resetRestrictionPolicyForm();
+                return;
+            }
+            restrictionPolicyCodeInput.value = policy.policy_code || "";
+            restrictionPolicyNameInput.value = policy.policy_name || "";
+            restrictionPolicyNameInput.readOnly = true;
+            restrictionDescriptionInput.value = policy.description || "";
+            restrictionPolygons = (policy.polygons || policy.polygons_json || []).map(item => ({
+                name: item.name,
+                points: normalizePoints(item.points || item)
+            }));
+            draftRestrictionPoints = [];
+            isDrawingRestriction = false;
+            renderRestrictionPolygons(true);
+            renderDraftRestrictionLine();
+        }
+
+        async function loadRestrictionPolicies(message, preferredPolicyCode) {
+            setRestrictionBusy(true);
+            try {
+                const data = await apiJson("/operation-restrictions/policies");
+                restrictionPolicies = data.policies || [];
+            restrictionPolicySelect.innerHTML = "";
+                const emptyOption = document.createElement("option");
+                emptyOption.value = "";
+                emptyOption.textContent = restrictionPolicies.length ? "请选择策略或新增策略" : "暂无策略，请新增";
+                restrictionPolicySelect.appendChild(emptyOption);
+                for (const policy of restrictionPolicies) {
+                    const option = document.createElement("option");
+                    option.value = policy.policy_name;
+                    const polygonCount = policy.polygon_count ?? (policy.polygons || []).length;
+                    option.textContent = `${policy.is_active ? "[当前] " : ""}${policy.policy_name || policy.policy_code}（编号：${policy.policy_code || "-"}，${polygonCount} 个禁区）`;
+                    restrictionPolicySelect.appendChild(option);
+                }
+                const currentName = preferredPolicyCode || restrictionPolicySelect.value;
+                const selectedPolicy = restrictionPolicies.find(policy => policy.policy_name === currentName);
+                const activePolicy = restrictionPolicies.find(policy => policy.is_active);
+                const policyToLoad = selectedPolicy || activePolicy || restrictionPolicies[0] || null;
+                if (policyToLoad) {
+                    restrictionPolicySelect.value = policyToLoad.policy_name;
+                    loadPolicyIntoForm(policyToLoad);
+                } else {
+                    resetRestrictionPolicyForm();
+                }
+                setStatus(message || `已从数据库查询 ${restrictionPolicies.length} 个禁区策略。`);
+            } catch (error) {
+                setStatus(`加载禁区策略失败：${error.message}`);
+            } finally {
+                setRestrictionBusy(false);
+            }
+        }
+
+        async function saveRestrictionPolicy() {
+            if (!restrictionPolicyCodeInput.value.trim()) {
+                throw new Error("请填写策略编号");
+            }
+            if (!restrictionPolygons.length) {
+                throw new Error("请至少绘制并闭合一个禁区");
+            }
+            const payload = {
+                policy_code: restrictionPolicyCodeInput.value.trim(),
+                policy_name: restrictionPolicyNameInput.value.trim() || restrictionPolicyCodeInput.value.trim(),
+                description: restrictionDescriptionInput.value.trim(),
+                polygons: restrictionPolygons
+            };
+            const selectedPolicy = selectedRestrictionPolicy();
+            const duplicatedName = restrictionPolicies.some(policy =>
+                policy.policy_name === payload.policy_name
+                && (!selectedPolicy || policy.policy_name !== selectedPolicy.policy_name)
+            );
+            if (duplicatedName) {
+                throw new Error("禁区策略名称已存在，请更换名称");
+            }
+            const isUpdating = Boolean(selectedPolicy);
+            await apiJson(
+                isUpdating
+                    ? `/operation-restrictions/policies/${encodeURIComponent(selectedPolicy.policy_name)}`
+                    : "/operation-restrictions/policies",
+                {
+                    method: isUpdating ? "PUT" : "POST",
+                    body: payload
+                }
+            );
+            await loadRestrictionPolicies(`禁区策略已保存：${payload.policy_name}`, payload.policy_name);
+        }
+
+        async function activateRestrictionPolicy() {
+            const policyName = restrictionPolicyNameInput.value.trim();
+            await apiJson("/operation-restrictions/active", {
+                method: "POST",
+                body: { policy_name: policyName || null }
+            });
+            await loadRestrictionPolicies("当前禁区策略已更新。");
+        }
+
+        async function deleteRestrictionPolicy() {
+            const policyName = restrictionPolicyNameInput.value.trim();
+            if (!policyName) {
+                throw new Error("请先选择或填写策略名称");
+            }
+            await apiJson(`/operation-restrictions/policies/${encodeURIComponent(policyName)}`, {
+                method: "DELETE"
+            });
+            restrictionPolygons = [];
+            renderRestrictionPolygons();
+            await loadRestrictionPolicies("禁区策略已删除。");
+        }
+
+        map.on("click", event => {
+            if (!isDrawingRestriction) {
+                return;
+            }
+            draftRestrictionPoints.push(pointFromLngLat(event.lnglat));
+            renderDraftRestrictionLine();
+        });
+
         loadFleetBtn.addEventListener("click", loadFleet);
         refreshVehicleBtn.addEventListener("click", async () => {
             setBusy(true);
@@ -479,7 +826,7 @@
         });
         clearBtn.addEventListener("click", () => {
             clearMap();
-            setStatus("地图已清空。");
+            setStatus("路线已清空，禁区图形保留。");
         });
         vehicleSelect.addEventListener("change", async () => {
             setBusy(true);
@@ -492,7 +839,67 @@
             }
         });
 
+        drawRestrictionBtn.addEventListener("click", () => {
+            isDrawingRestriction = true;
+            draftRestrictionPoints = [];
+            renderDraftRestrictionLine();
+            const policyCode = restrictionPolicyCodeInput.value.trim() || "新策略";
+            setStatus(`开始为 ${policyCode} 绘制新禁区：按边界顺序点击地图，完成后点“闭合当前禁区”。`);
+        });
+        closeRestrictionBtn.addEventListener("click", closeCurrentRestriction);
+        newRestrictionPolicyBtn.addEventListener("click", () => {
+            resetRestrictionPolicyForm("已进入新增策略模式，请绘制禁区后保存。");
+        });
+        saveRestrictionBtn.addEventListener("click", async () => {
+            setRestrictionBusy(true);
+            try {
+                await saveRestrictionPolicy();
+            } catch (error) {
+                setStatus(`保存禁区策略失败：${error.message}`);
+            } finally {
+                setRestrictionBusy(false);
+            }
+        });
+        activateRestrictionBtn.addEventListener("click", async () => {
+            setRestrictionBusy(true);
+            try {
+                await activateRestrictionPolicy();
+            } catch (error) {
+                setStatus(`设置当前禁区失败：${error.message}`);
+            } finally {
+                setRestrictionBusy(false);
+            }
+        });
+        deleteRestrictionBtn.addEventListener("click", async () => {
+            setRestrictionBusy(true);
+            try {
+                await deleteRestrictionPolicy();
+            } catch (error) {
+                setStatus(`删除禁区策略失败：${error.message}`);
+            } finally {
+                setRestrictionBusy(false);
+            }
+        });
+        clearRestrictionBtn.addEventListener("click", () => {
+            restrictionPolygons = [];
+            draftRestrictionPoints = [];
+            renderRestrictionPolygons();
+            setStatus("禁区图形已清空，已保存策略不会自动删除。");
+        });
+        reloadRestrictionBtn.addEventListener("click", () => loadRestrictionPolicies());
+        restrictionPolicySelect.addEventListener("change", () => {
+            const policy = selectedRestrictionPolicy();
+            loadPolicyIntoForm(policy);
+            if (policy) {
+                const polygonCount = policy.polygon_count ?? (policy.polygons || []).length;
+                setStatus(`禁区策略已切换：${policy.policy_name}，当前已有 ${polygonCount} 个禁区，可继续新增禁区后保存。`);
+            } else {
+                resetRestrictionPolicyForm("已进入新增策略模式，请绘制禁区后保存。");
+            }
+        });
+
         loadFleet();
+        loadRestrictionPolicies();
     </script>
 </body>
 

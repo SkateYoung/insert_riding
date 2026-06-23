@@ -196,14 +196,17 @@ def _route_version(vehicle):
     version = getattr(vehicle, "planned_route_grasp_route_version", None)
     if version:
         return str(version)
-    parts = [str(getattr(vehicle, "id", ""))]
+    parts = [
+        str(getattr(vehicle, "id", "")),
+        f"RESTRICT:{getattr(vehicle, 'operation_restriction_policy_signature', None) or 'none'}",
+    ]
     for step in getattr(vehicle, "planned_route", []) or []:
         order = step.get("order")
         parts.append(f"{step.get('type')}:{getattr(order, 'request_id', '')}")
     idle_target = getattr(vehicle, "idle_target", None)
     if idle_target and not getattr(vehicle, "planned_route", None):
         parts.append(f"IDLE:{idle_target.get('node_id')}:{idle_target.get('generated_at')}")
-    if len(parts) == 1:
+    if len(parts) == 2:
         parts.append("EMPTY")
     return "|".join(parts)
 
@@ -423,6 +426,8 @@ class MySqlPersistence:
         self.processed_tasks = 0
         self._connection = None
         self._lock = threading.Lock()
+        self._restriction_memory = {}
+        self._restriction_memory_active = None
 
     @classmethod
     def from_env(cls):
@@ -564,6 +569,354 @@ class MySqlPersistence:
         if self.last_error and str(self.last_error).startswith("forecast_history_read_failed:"):
             self.last_error = None
         return orders
+
+    def _sync_connection(self, autocommit=True):
+        """创建同步数据库连接，供需要事务的禁区管理接口使用。"""
+        if not self.enabled or pymysql is None:
+            return None
+        return pymysql.connect(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            database=self.database,
+            charset="utf8mb4",
+            autocommit=autocommit,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+
+    @staticmethod
+    def _policy_from_row(row):
+        """把禁区策略表记录转换成接口层使用的策略字典。"""
+        if not row:
+            return None
+        polygons = row.get("polygons_json")
+        if isinstance(polygons, str):
+            try:
+                polygons = json.loads(polygons)
+            except json.JSONDecodeError:
+                polygons = []
+        policy = {
+            "policy_code": row.get("policy_code"),
+            "policy_name": row.get("policy_name"),
+            "description": row.get("description"),
+            "polygons": polygons or [],
+            "polygons_json": polygons or [],
+            "amap_avoidpolygons": row.get("amap_avoidpolygons") or "",
+            "polygon_count": int(row.get("polygon_count") or 0),
+            "vertex_count": int(row.get("vertex_count") or 0),
+            "total_area_km2": float(row.get("total_area_km2") or 0.0),
+            "status": row.get("status") or "enabled",
+            "is_active": bool(row.get("is_active")),
+            "tenant_id": row.get("tenant_id"),
+            "created_at": row.get("created_at").isoformat(sep=" ") if isinstance(row.get("created_at"), datetime) else row.get("created_at"),
+            "updated_at": row.get("updated_at").isoformat(sep=" ") if isinstance(row.get("updated_at"), datetime) else row.get("updated_at"),
+        }
+        try:
+            from .restrictions import restriction_signature
+            policy["policy_signature"] = restriction_signature(policy)
+        except Exception:
+            policy["policy_signature"] = None
+        return policy
+
+    def _memory_policy_list(self):
+        """读取内存兜底模式下的禁区策略列表。"""
+        policies = [copy.deepcopy(policy) for policy in self._restriction_memory.values()]
+        active = self._restriction_memory_active
+        for policy in policies:
+            policy["is_active"] = bool(policy.get("policy_name") == active)
+        return sorted(policies, key=lambda item: (not item.get("is_active"), item.get("policy_name") or ""))
+
+    def _memory_policy_by_identity(self, policy_identity):
+        """在内存兜底模式下按名称优先、编号次之查找策略。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return None
+        policy = self._restriction_memory.get(policy_identity)
+        if policy is not None:
+            return policy
+        matches = [
+            item
+            for item in self._restriction_memory.values()
+            if str(item.get("policy_code") or "").strip() == policy_identity
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def list_operation_restriction_policies(self):
+        """读取所有未软删除的运营禁区策略。"""
+        if not self.enabled or pymysql is None:
+            return self._memory_policy_list()
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s AND deleted=0
+                    ORDER BY is_active DESC, updated_at DESC, id DESC
+                """, (self.tenant_id,))
+                return [self._policy_from_row(row) for row in cursor.fetchall()]
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_list_failed: {exc}"
+            return self._memory_policy_list()
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_operation_restriction_policy(self, policy_identity):
+        """按策略名称优先读取一个运营禁区策略，编号仅作兼容查询。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return None
+        if not self.enabled or pymysql is None:
+            policy = self._memory_policy_by_identity(policy_identity)
+            if not policy:
+                return None
+            result = copy.deepcopy(policy)
+            result["is_active"] = result.get("policy_name") == self._restriction_memory_active
+            return result
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, policy_identity))
+                row = cursor.fetchone()
+                if row is None:
+                    cursor.execute("""
+                        SELECT *
+                        FROM bus_operation_restriction_policy
+                        WHERE tenant_id=%s AND policy_code=%s AND deleted=0
+                        ORDER BY updated_at DESC, id DESC
+                        LIMIT 2
+                    """, (self.tenant_id, policy_identity))
+                    rows = cursor.fetchall()
+                    if len(rows) > 1:
+                        self.last_error = f"operation_restriction_policy_code_ambiguous:{policy_identity}"
+                        return None
+                    row = rows[0] if rows else None
+                return self._policy_from_row(row)
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_get_failed: {exc}"
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_operation_restriction_policy(self, policy):
+        """同步写入或更新一个运营禁区策略。"""
+        payload = copy.deepcopy(policy or {})
+        policy_code = str(payload.get("policy_code") or "").strip()
+        policy_name = str(payload.get("policy_name") or "").strip()
+        if not policy_code:
+            raise ValueError("policy_code 不能为空")
+        if not policy_name:
+            raise ValueError("policy_name 不能为空")
+        policy_status = payload.get("status") or "enabled"
+        active_requested = bool(payload.get("is_active")) and policy_status == "enabled"
+        if not self.enabled or pymysql is None:
+            payload["tenant_id"] = self.tenant_id
+            payload["is_active"] = bool(active_requested or (
+                policy_name == self._restriction_memory_active and policy_status == "enabled"
+            ))
+            self._restriction_memory[policy_name] = payload
+            if payload.get("is_active"):
+                self._restriction_memory_active = policy_name
+            elif self._restriction_memory_active == policy_name:
+                self._restriction_memory_active = None
+            return copy.deepcopy(self._restriction_memory[policy_name])
+
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, policy_name))
+                existing = cursor.fetchone()
+                values = (
+                    policy_code,
+                    policy_name,
+                    payload.get("description"),
+                    _json(payload.get("polygons") or payload.get("polygons_json") or []),
+                    payload.get("amap_avoidpolygons") or "",
+                    payload.get("polygon_count") or 0,
+                    payload.get("vertex_count") or 0,
+                    payload.get("total_area_km2") or 0.0,
+                    policy_status,
+                )
+                if existing:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET policy_code=%s,
+                            policy_name=%s,
+                            description=%s,
+                            polygons_json=%s,
+                            amap_avoidpolygons=%s,
+                            polygon_count=%s,
+                            vertex_count=%s,
+                            total_area_km2=%s,
+                            status=%s,
+                            updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND id=%s AND deleted=0
+                    """, values + (self.tenant_id, existing["id"]))
+                else:
+                    cursor.execute("""
+                        INSERT INTO bus_operation_restriction_policy
+                            (policy_code, policy_name, description, polygons_json, amap_avoidpolygons,
+                             polygon_count, vertex_count, total_area_km2, status, is_active, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s)
+                    """, values + (self.tenant_id,))
+                if policy_status != "enabled":
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    """, (self.tenant_id, policy_name))
+                if active_requested:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND deleted=0
+                    """, (self.tenant_id,))
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=1, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    """, (self.tenant_id, policy_name))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_operation_restriction_policy(policy_name)
+
+    def delete_operation_restriction_policy(self, policy_identity):
+        """软删除一个运营禁区策略。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return False
+        if not self.enabled or pymysql is None:
+            policy = self._memory_policy_by_identity(policy_identity)
+            if not policy:
+                return False
+            policy_name = policy.get("policy_name")
+            self._restriction_memory.pop(policy_name, None)
+            if self._restriction_memory_active == policy_name:
+                self._restriction_memory_active = None
+            return True
+        policy = self.get_operation_restriction_policy(policy_identity)
+        if not policy:
+            return False
+        policy_name = policy.get("policy_name")
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                affected = cursor.execute("""
+                    UPDATE bus_operation_restriction_policy
+                    SET deleted=1, is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                """, (self.tenant_id, policy_name))
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_active_operation_restriction_policy(self):
+        """读取当前全局生效的运营禁区策略。"""
+        if not self.enabled or pymysql is None:
+            if not self._restriction_memory_active:
+                return None
+            return self.get_operation_restriction_policy(self._restriction_memory_active)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s AND deleted=0 AND status='enabled' AND is_active=1
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                """, (self.tenant_id,))
+                return self._policy_from_row(cursor.fetchone())
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_active_read_failed: {exc}"
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def set_active_operation_restriction_policy(self, policy_identity):
+        """设置当前全局禁区策略；传入 None 表示关闭禁区。"""
+        policy_identity = str(policy_identity).strip() if policy_identity not in (None, "") else None
+        if not self.enabled or pymysql is None:
+            if policy_identity is None:
+                self._restriction_memory_active = None
+                return None
+            policy = self._memory_policy_by_identity(policy_identity)
+            if not policy or policy.get("status") != "enabled":
+                return None
+            self._restriction_memory_active = policy.get("policy_name")
+            return self.get_operation_restriction_policy(policy.get("policy_name"))
+        target_policy = self.get_operation_restriction_policy(policy_identity)
+        if policy_identity is not None and (
+            not target_policy or target_policy.get("status") != "enabled"
+        ):
+            return None
+        policy_name = target_policy.get("policy_name") if target_policy else None
+
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                if policy_name is not None:
+                    cursor.execute("""
+                        SELECT id
+                        FROM bus_operation_restriction_policy
+                        WHERE tenant_id=%s AND policy_name=%s AND deleted=0 AND status='enabled'
+                        LIMIT 1
+                    """, (self.tenant_id, policy_name))
+                    if cursor.fetchone() is None:
+                        connection.rollback()
+                        return None
+                cursor.execute("""
+                    UPDATE bus_operation_restriction_policy
+                    SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND deleted=0
+                """, (self.tenant_id,))
+                if policy_name is not None:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=1, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    """, (self.tenant_id, policy_name))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_active_operation_restriction_policy()
 
     def start(self):
         """按需启动后台写库线程。
@@ -1245,6 +1598,36 @@ def status():
 def fetch_completed_orders_for_forecast(limit=None):
     """读取已完成订单预测样本；数据库不可用时返回空列表。"""
     return _manager.fetch_completed_orders_for_forecast(limit=limit)
+
+
+def list_operation_restriction_policies():
+    """读取运营禁区策略列表。"""
+    return _manager.list_operation_restriction_policies()
+
+
+def get_operation_restriction_policy(policy_code):
+    """按编码读取运营禁区策略。"""
+    return _manager.get_operation_restriction_policy(policy_code)
+
+
+def save_operation_restriction_policy(policy):
+    """保存运营禁区策略。"""
+    return _manager.save_operation_restriction_policy(policy)
+
+
+def delete_operation_restriction_policy(policy_code):
+    """软删除运营禁区策略。"""
+    return _manager.delete_operation_restriction_policy(policy_code)
+
+
+def get_active_operation_restriction_policy():
+    """读取当前生效的运营禁区策略。"""
+    return _manager.get_active_operation_restriction_policy()
+
+
+def set_active_operation_restriction_policy(policy_code):
+    """设置当前生效的运营禁区策略。"""
+    return _manager.set_active_operation_restriction_policy(policy_code)
 
 
 def start():

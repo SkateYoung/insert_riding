@@ -106,6 +106,7 @@ def current_time():
             if CoreDispatcher.route_grasp_last_refresh_timestamp is not None
             else None
         ),
+        "operation_restriction_policy_signature": CoreDispatcher.current_operation_restriction_signature(),
     }
 
 
@@ -221,6 +222,13 @@ def start_route_grasp_thread():
     return None
 
 
+def load_active_operation_restriction_policy():
+    """从持久化层加载当前生效的运营禁区策略。"""
+    policy = persistence.get_active_operation_restriction_policy()
+    CoreDispatcher.set_operation_restriction_policy(policy)
+    return policy
+
+
 # ============================================================
 # 功能二：系统初始化入口
 # 相关方法：init_system
@@ -243,6 +251,7 @@ def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
 
     with state_lock:
         city = CityGraph(shp_path)
+        load_active_operation_restriction_policy()
 
         # 测试车队固定从三个 POI 出发，便于前端和接口测试复现路径。
         fleet = [

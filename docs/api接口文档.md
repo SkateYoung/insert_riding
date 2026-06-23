@@ -1082,3 +1082,81 @@ $env:AMAP_API_KEY="你的高德Web服务Key"
 | 路径不可达 | 当前路线不可达，请调整任务或联系调度 |
 | 已上车不可取消 | 乘客已上车，当前订单不可取消 |
 | ETA disabled/error | ETA 暂不可用，请稍后刷新 |
+
+## 运营禁区策略
+
+### `GET /operation-restrictions/policies`
+
+返回所有未软删除的禁区策略，以及当前生效策略。
+
+### `POST /operation-restrictions/policies`
+
+创建禁区策略。请求体示例：
+
+```json
+{
+  "policy_code": "campus-block",
+  "policy_name": "校园施工禁区",
+  "description": "optional",
+  "polygons": [
+    {
+      "name": "area-1",
+      "points": [
+        {"lon": 113.4001, "lat": 23.0501},
+        {"lon": 113.4011, "lat": 23.0501},
+        {"lon": 113.4011, "lat": 23.0511},
+        {"lon": 113.4001, "lat": 23.0511}
+      ]
+    }
+  ]
+}
+```
+
+后端会校验高德 `avoidpolygons` 限制：最多 32 个 polygon、单个 polygon 最多 16 个顶点，且单个 polygon 面积不超过 81 平方公里。
+
+策略名称 `policy_name` 在同一租户下必须唯一；策略编号 `policy_code` 允许重复。
+
+### `GET /operation-restrictions/policies/<policy_name>`
+
+返回单个禁区策略。
+
+### `PUT /operation-restrictions/policies/<policy_name>`
+
+更新单个禁区策略。请求体结构与创建接口一致，策略名称作为唯一标识，编辑已有策略时不允许修改名称。
+
+### `DELETE /operation-restrictions/policies/<policy_name>`
+
+软删除单个禁区策略；如果该策略当前生效，则同步清空当前策略。
+
+### `GET /operation-restrictions/active`
+
+返回当前全局生效的禁区策略。
+
+### `POST /operation-restrictions/active`
+
+选择当前全局生效策略，或关闭禁区限制：
+
+```json
+{"policy_code": "campus-block"}
+```
+
+```json
+{"policy_code": null}
+```
+
+策略切换只影响后续新路线计算，不会主动重算已有车辆路线。
+
+### `POST /operation-restrictions/route-test`
+
+在选定策略下执行本地 A* 与可选高德驾车路线测试：
+
+```json
+{
+  "origin": {"lon": 113.4001, "lat": 23.0501},
+  "destination": {"lon": 113.4101, "lat": 23.0551},
+  "policy_code": "campus-block",
+  "include_amap": true
+}
+```
+
+也可以使用 `origin_node_id` 和 `destination_node_id` 直接指定路网节点。
