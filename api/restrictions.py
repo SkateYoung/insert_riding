@@ -24,7 +24,18 @@ class OperationRestrictionError(ValueError):
 
 
 def _as_float(value: Any, field_name: str) -> float:
-    """把输入字段解析为有限浮点数。"""
+    """把输入字段解析为有限浮点数。
+
+    Args:
+        value (Any): 待解析的原始输入值。
+        field_name (str): 字段名，用于错误提示。
+
+    Returns:
+        float: 解析后的有限浮点数。
+
+    Raises:
+        OperationRestrictionError: 输入不是数字或不是有限数值。
+    """
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
@@ -35,7 +46,14 @@ def _as_float(value: Any, field_name: str) -> float:
 
 
 def _as_bool(value: Any) -> bool:
-    """兼容布尔值、数字和常见字符串开关。"""
+    """兼容布尔值、数字和常见字符串开关。
+
+    Args:
+        value (Any): 待解析的原始输入值。
+
+    Returns:
+        bool: 输入可视为开启时返回 True。
+    """
     if isinstance(value, bool):
         return value
     if value is None:
@@ -46,7 +64,18 @@ def _as_bool(value: Any) -> bool:
 
 
 def _point_from_any(raw: Any, index: int) -> dict[str, float]:
-    """把前端传入的 dict/list 坐标统一成 lon/lat 字典。"""
+    """把前端传入的 dict/list 坐标统一成 lon/lat 字典。
+
+    Args:
+        raw (Any): 前端传入的单个坐标点。
+        index (int): 坐标点序号，用于错误提示。
+
+    Returns:
+        dict[str, float]: 规范化后的 lon/lat 坐标。
+
+    Raises:
+        OperationRestrictionError: 坐标结构非法或经纬度超出范围。
+    """
     if isinstance(raw, dict):
         lon = raw.get("lon", raw.get("lng", raw.get("longitude", raw.get("x"))))
         lat = raw.get("lat", raw.get("latitude", raw.get("y")))
@@ -65,12 +94,27 @@ def _point_from_any(raw: Any, index: int) -> dict[str, float]:
 
 
 def _same_point(a: dict[str, float], b: dict[str, float]) -> bool:
-    """判断两个经纬度点是否可视为同一点。"""
+    """判断两个经纬度点是否可视为同一点。
+
+    Args:
+        a (dict): 第一个 lon/lat 坐标。
+        b (dict): 第二个 lon/lat 坐标。
+
+    Returns:
+        bool: 两点距离小于误差阈值时返回 True。
+    """
     return abs(a["lon"] - b["lon"]) <= EPSILON and abs(a["lat"] - b["lat"]) <= EPSILON
 
 
 def _format_coord(value: float) -> str:
-    """按高德参数常用精度格式化单个坐标值。"""
+    """按高德参数常用精度格式化单个坐标值。
+
+    Args:
+        value (float): 待格式化坐标值。
+
+    Returns:
+        str: 去掉多余零位后的坐标文本。
+    """
     text = f"{float(value):.6f}".rstrip("0").rstrip(".")
     if text == "-0":
         return "0"
@@ -78,12 +122,26 @@ def _format_coord(value: float) -> str:
 
 
 def coord_to_amap_text(point: dict[str, Any]) -> str:
-    """把点坐标序列化成高德要求的 lon,lat 文本。"""
+    """把点坐标序列化成高德要求的 lon,lat 文本。
+
+    Args:
+        point (dict): 包含 lon/lat 的坐标点。
+
+    Returns:
+        str: 高德 avoidpolygons 使用的 "lon,lat" 文本。
+    """
     return f"{_format_coord(float(point['lon']))},{_format_coord(float(point['lat']))}"
 
 
 def _project_points_km(points: list[dict[str, float]]) -> list[tuple[float, float]]:
-    """把经纬度点近似投影到公里平面，用于面积计算。"""
+    """把经纬度点近似投影到公里平面，用于面积计算。
+
+    Args:
+        points (list[dict]): polygon 顶点坐标。
+
+    Returns:
+        list[tuple[float, float]]: 近似投影后的公里平面坐标。
+    """
     lat0 = math.radians(sum(point["lat"] for point in points) / len(points))
     lon0 = sum(point["lon"] for point in points) / len(points)
     lat_origin = sum(point["lat"] for point in points) / len(points)
@@ -97,7 +155,14 @@ def _project_points_km(points: list[dict[str, float]]) -> list[tuple[float, floa
 
 
 def polygon_area_km2(points: list[dict[str, float]]) -> float:
-    """计算 polygon 近似面积，单位为平方公里。"""
+    """计算 polygon 近似面积。
+
+    Args:
+        points (list[dict]): polygon 顶点坐标。
+
+    Returns:
+        float: 近似面积，单位为平方公里。
+    """
     projected = _project_points_km(points)
     area = 0.0
     for idx, (x1, y1) in enumerate(projected):
@@ -107,12 +172,30 @@ def polygon_area_km2(points: list[dict[str, float]]) -> float:
 
 
 def _orientation(a: dict[str, float], b: dict[str, float], c: dict[str, float]) -> float:
-    """计算三点方向叉积，用于线段相交判定。"""
+    """计算三点方向叉积，用于线段相交判定。
+
+    Args:
+        a (dict): 第一个点。
+        b (dict): 第二个点。
+        c (dict): 第三个点。
+
+    Returns:
+        float: 三点方向叉积。
+    """
     return (b["lon"] - a["lon"]) * (c["lat"] - a["lat"]) - (b["lat"] - a["lat"]) * (c["lon"] - a["lon"])
 
 
 def _on_segment(a: dict[str, float], b: dict[str, float], c: dict[str, float]) -> bool:
-    """判断点 b 是否位于线段 ac 上。"""
+    """判断点 b 是否位于线段 ac 上。
+
+    Args:
+        a (dict): 线段起点。
+        b (dict): 待判断点。
+        c (dict): 线段终点。
+
+    Returns:
+        bool: 点 b 在线段 ac 上时返回 True。
+    """
     if abs(_orientation(a, b, c)) > EPSILON:
         return False
     return (
@@ -127,7 +210,17 @@ def segments_intersect(
     c: dict[str, float],
     d: dict[str, float],
 ) -> bool:
-    """判断两条经纬度线段是否相交或重叠。"""
+    """判断两条经纬度线段是否相交或重叠。
+
+    Args:
+        a (dict): 第一条线段起点。
+        b (dict): 第一条线段终点。
+        c (dict): 第二条线段起点。
+        d (dict): 第二条线段终点。
+
+    Returns:
+        bool: 两条线段相交或重叠时返回 True。
+    """
     o1 = _orientation(a, b, c)
     o2 = _orientation(a, b, d)
     o3 = _orientation(c, d, a)
@@ -149,7 +242,14 @@ def segments_intersect(
 
 
 def _is_self_intersecting(points: list[dict[str, float]]) -> bool:
-    """检测 polygon 是否存在非相邻边自交。"""
+    """检测 polygon 是否存在非相邻边自交。
+
+    Args:
+        points (list[dict]): polygon 顶点坐标。
+
+    Returns:
+        bool: 存在自相交时返回 True。
+    """
     count = len(points)
     for i in range(count):
         a1 = points[i]
@@ -167,7 +267,14 @@ def _is_self_intersecting(points: list[dict[str, float]]) -> bool:
 
 
 def _polygon_bounds(points: list[dict[str, float]]) -> dict[str, float]:
-    """计算 polygon 的经纬度包围盒。"""
+    """计算 polygon 的经纬度包围盒。
+
+    Args:
+        points (list[dict]): polygon 顶点坐标。
+
+    Returns:
+        dict[str, float]: 包含 min_lon、max_lon、min_lat、max_lat 的包围盒。
+    """
     return {
         "min_lon": min(point["lon"] for point in points),
         "max_lon": max(point["lon"] for point in points),
@@ -177,7 +284,18 @@ def _polygon_bounds(points: list[dict[str, float]]) -> dict[str, float]:
 
 
 def _normalize_points(raw_points: Any, polygon_index: int) -> list[dict[str, float]]:
-    """规范化单个 polygon 顶点并执行高德限制校验。"""
+    """规范化单个 polygon 顶点并执行高德限制校验。
+
+    Args:
+        raw_points (Any): 前端传入的 polygon 顶点列表。
+        polygon_index (int): polygon 序号，用于错误提示。
+
+    Returns:
+        list[dict[str, float]]: 去重、去闭合重复点后的顶点列表。
+
+    Raises:
+        OperationRestrictionError: 顶点数量、面积或几何形态不符合要求。
+    """
     if not isinstance(raw_points, list):
         raise OperationRestrictionError(f"polygon[{polygon_index}].points 必须是列表")
     points: list[dict[str, float]] = []
@@ -209,7 +327,17 @@ def _normalize_points(raw_points: Any, polygon_index: int) -> list[dict[str, flo
 
 
 def _raw_polygons_from_payload(payload: dict[str, Any]) -> list[Any]:
-    """从 API 请求体中读取 polygons 或 polygons_json 字段。"""
+    """从 API 请求体中读取 polygons 或 polygons_json 字段。
+
+    Args:
+        payload (dict): 前端传入的策略请求体。
+
+    Returns:
+        list[Any]: 原始 polygon 列表。
+
+    Raises:
+        OperationRestrictionError: polygons_json 不是合法 JSON 或 polygons 不是列表。
+    """
     raw = payload.get("polygons", payload.get("polygons_json", []))
     if isinstance(raw, str):
         try:
@@ -232,6 +360,9 @@ def normalize_policy_payload(payload: dict[str, Any], *, require_identity: bool 
 
     Returns:
         dict: 已规范化、可落库并可直接传给 A* 和高德规划的策略快照。
+
+    Raises:
+        OperationRestrictionError: 策略身份、polygon 数量或 polygon 几何校验失败。
     """
     if not isinstance(payload, dict):
         raise OperationRestrictionError("策略数据必须是对象")
@@ -293,7 +424,14 @@ def normalize_policy_payload(payload: dict[str, Any], *, require_identity: bool 
 
 
 def restriction_signature(policy: dict[str, Any] | None) -> str:
-    """生成禁区策略签名，用于 A* 缓存和路线版本隔离。"""
+    """生成禁区策略签名，用于 A* 缓存和路线版本隔离。
+
+    Args:
+        policy (dict | None): 运营禁区策略快照。
+
+    Returns:
+        str: 稳定策略签名；无策略时返回 "none"。
+    """
     if not policy:
         return "none"
     avoid = str(policy.get("amap_avoidpolygons") or "")
@@ -310,7 +448,15 @@ def restriction_signature(policy: dict[str, Any] | None) -> str:
 
 
 def point_in_polygon(point: dict[str, float], polygon: dict[str, Any]) -> bool:
-    """判断点是否位于禁区 polygon 内部或边界上。"""
+    """判断点是否位于禁区 polygon 内部或边界上。
+
+    Args:
+        point (dict): 待判断 lon/lat 坐标。
+        polygon (dict): 规范化后的禁区 polygon。
+
+    Returns:
+        bool: 点在 polygon 内部或边界上时返回 True。
+    """
     points = polygon.get("points") or []
     if len(points) < 3:
         return False
@@ -336,7 +482,16 @@ def point_in_polygon(point: dict[str, float], polygon: dict[str, Any]) -> bool:
 
 
 def segment_intersects_polygon(a: dict[str, float], b: dict[str, float], polygon: dict[str, Any]) -> bool:
-    """判断路网边线段是否进入或穿过禁区 polygon。"""
+    """判断路网边线段是否进入或穿过禁区 polygon。
+
+    Args:
+        a (dict): 路网边起点。
+        b (dict): 路网边终点。
+        polygon (dict): 规范化后的禁区 polygon。
+
+    Returns:
+        bool: 线段端点在禁区内或线段穿过禁区边界时返回 True。
+    """
     points = polygon.get("points") or []
     if len(points) < 3:
         return False
@@ -350,7 +505,16 @@ def segment_intersects_polygon(a: dict[str, float], b: dict[str, float], polygon
 
 
 def edge_is_restricted(policy: dict[str, Any] | None, start_node: Any, end_node: Any) -> bool:
-    """判断 A* 的一条有向边是否被当前禁区策略禁止通行。"""
+    """判断 A* 的一条有向边是否被当前禁区策略禁止通行。
+
+    Args:
+        policy (dict | None): 当前运营禁区策略快照。
+        start_node (Node): 有向边起点。
+        end_node (Node): 有向边终点。
+
+    Returns:
+        bool: 有向边命中禁区时返回 True。
+    """
     if not policy:
         return False
     polygons = policy.get("polygons") or policy.get("polygons_json") or []
@@ -376,7 +540,14 @@ def edge_is_restricted(policy: dict[str, Any] | None, start_node: Any, end_node:
 
 
 def policy_to_response(policy: dict[str, Any] | None) -> dict[str, Any] | None:
-    """把内部策略快照整理成 API 可返回的结构。"""
+    """把内部策略快照整理成 API 可返回的结构。
+
+    Args:
+        policy (dict | None): 内部策略快照。
+
+    Returns:
+        dict | None: API 响应结构；无策略时返回 None。
+    """
     if not policy:
         return None
     result = dict(policy)

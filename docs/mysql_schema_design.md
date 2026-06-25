@@ -85,7 +85,7 @@
 | `Vehicle.planned_route` | `bus_dispatch_route_step` |
 | `Vehicle.planned_route_point` | `bus_vehicle_route_snapshot.raw_route_points` |
 | `Vehicle.planned_route_grasped_point` | `bus_vehicle_route_snapshot.grasped_route_points` |
-| `Vehicle.planned_route_segment_grasped_point` | `bus_vehicle.segment_route` 和 `bus_dispatch_route_segment.grasped_points` |
+| `Vehicle.planned_route_segment_grasped_point` | `bus_vehicle_runtime.segment_route` 和 `bus_dispatch_route_segment.grasped_points` |
 | `Vehicle.gps` | `bus_vehicle_runtime` 和 `bus_vehicle_location_log` |
 | `Order.estimated_arrival_time` | `bus_order.estimated_arrival_time` |
 | `Order.estimated_dropoff_time` | `bus_order.estimated_dropoff_time` |

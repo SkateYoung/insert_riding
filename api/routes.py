@@ -10,7 +10,7 @@ from . import state
 from . import persistence
 from .auxiliary import AuxiliaryFunctions
 from .core import CoreDispatcher
-from .models import Order, SPEED_MPS
+from .models import Order, SPEED_MPS, Vehicle
 from .restrictions import OperationRestrictionError, normalize_policy_payload, policy_to_response
 
 
@@ -21,7 +21,15 @@ REST_STATUS_TEXT = {
     "preparing_closure": "准备收车中",
     "closing": "收车中",
     "resting": "休息中",
+    "offline": "离线",
+    "maintenance": "维修中",
 }
+
+DRIVER_EMPLOYMENT_STATUSES = ("active", "inactive", "blocked")
+DRIVER_WORK_STATUSES = ("off_duty", "listening", "serving", "resting")
+VEHICLE_OPERATION_STATUSES = ("operating", "resting", "closing", "offline", "maintenance")
+VEHICLE_RUNTIME_STATUSES = {"operating", "resting", "closing"}
+VEHICLE_TYPES = ("bus", "large_bus", "mid_bus", "small_bus")
 
 
 # ============================================================
@@ -131,6 +139,7 @@ def _vehicle_to_dict(v):
         "is_rest_requested": v.is_rest_requested,
         "rest_status": getattr(v, "rest_status", "operating"),
         "rest_status_text": REST_STATUS_TEXT.get(getattr(v, "rest_status", "operating"), "未知"),
+        "operation_status": getattr(v, "operation_status", getattr(v, "rest_status", "operating")),
         "desired_rest_time": getattr(v, "desired_rest_time", None),
         "desired_rest_time_text": (
             state.format_timestamp(v.desired_rest_time)
@@ -192,6 +201,7 @@ def _path_result_to_response(vehicle, path_result):
     return {
         "vehicle": {
             "id": vehicle.id,
+            "vehicle_id": vehicle.vehicle_id,
         },
         "gps": path_result.get("gps"),
         "snap": {
@@ -283,6 +293,362 @@ def _route_test_node(city_map, payload, key):
     return node, dist
 
 
+def _json_error(message, status=400, **extra):
+    """生成统一的 JSON 错误响应。
+
+    Args:
+        message (str): 对外返回的错误信息。
+        status (int): HTTP 状态码。
+        **extra: 需要附加到响应体中的扩展字段。
+
+    Returns:
+        tuple: Flask 响应对象与 HTTP 状态码。
+    """
+    payload = {"error": message}
+    payload.update(extra)
+    return jsonify(payload), status
+
+
+def _normalize_driver_payload(data, *, existing_code=None):
+    """校验并规范化司机档案请求体。
+
+    Args:
+        data (dict): 前端传入的司机档案字段。
+        existing_code (str | None): 更新接口路径中的司机编码；传入时以该值为准。
+
+    Returns:
+        dict: 可直接写入持久化层的司机档案字段。
+
+    Raises:
+        ValueError: 必填字段缺失或枚举值非法。
+    """
+    payload = dict(data or {})
+    driver_code = str(existing_code or payload.get("driver_code") or "").strip()
+    if not driver_code:
+        raise ValueError("driver_code 不能为空")
+    employment_status = str(payload.get("employment_status") or "active").strip()
+    work_status = str(payload.get("work_status") or "off_duty").strip()
+    if employment_status not in DRIVER_EMPLOYMENT_STATUSES:
+        raise ValueError(f"employment_status 必须是 {', '.join(DRIVER_EMPLOYMENT_STATUSES)} 之一")
+    if work_status not in DRIVER_WORK_STATUSES:
+        raise ValueError(f"work_status 必须是 {', '.join(DRIVER_WORK_STATUSES)} 之一")
+    return {
+        "driver_code": driver_code,
+        "driver_no": str(payload.get("driver_no") or "").strip() or None,
+        "driver_name": str(payload.get("driver_name") or payload.get("driver_no") or driver_code).strip(),
+        "phone": str(payload.get("phone") or "").strip() or None,
+        "id_card_no": str(payload.get("id_card_no") or "").strip() or None,
+        "license_no": str(payload.get("license_no") or "").strip() or None,
+        "license_class": str(payload.get("license_class") or "").strip() or None,
+        "license_expire_date": payload.get("license_expire_date") or None,
+        "service_city": str(payload.get("service_city") or "").strip() or None,
+        "employment_status": employment_status,
+        "work_status": work_status,
+        "remark": str(payload.get("remark") or "").strip() or None,
+    }
+
+
+def _extract_position(data):
+    """从请求体中解析车辆经纬度。
+
+    Args:
+        data (dict): 车辆请求体，支持 initial_position、position 或顶层 lon/lat。
+
+    Returns:
+        dict | None: 解析后的 {"lon": float, "lat": float}；未传位置时返回 None。
+
+    Raises:
+        ValueError: 坐标缺失、格式非法或超出经纬度范围。
+    """
+    point = data.get("initial_position") or data.get("position") or {}
+    lon = data.get("lon", data.get("lng", data.get("longitude", point.get("lon", point.get("lng", point.get("longitude"))))))
+    lat = data.get("lat", data.get("latitude", point.get("lat", point.get("latitude"))))
+    if lon in (None, "") and lat in (None, ""):
+        return None
+    if lon in (None, "") or lat in (None, ""):
+        raise ValueError("车辆位置必须同时包含 lon/lat")
+    lon = float(lon)
+    lat = float(lat)
+    if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+        raise ValueError("车辆经纬度超出范围")
+    return {"lon": lon, "lat": lat}
+
+
+def _runtime_payload_from_position(position, operation_status, existing_vehicle=None):
+    """把车辆位置和运营状态转换成运行快照字段。
+
+    Args:
+        position (dict | None): 车辆经纬度；为空时可复用已有车辆运行位置。
+        operation_status (str): 前端指定的车辆运营状态。
+        existing_vehicle (dict | None): 数据库中已有车辆档案。
+
+    Returns:
+        tuple: (runtime_payload, snap_info)，分别表示可落库的运行字段和吸附结果。
+
+    Raises:
+        ValueError: 系统已初始化但车辆位置无法吸附到路网节点。
+    """
+    rest_status = operation_status if operation_status in {"resting", "closing"} else "operating"
+    payload = {
+        "rest_status": rest_status,
+        "can_accept_order": operation_status == "operating",
+    }
+    snap_info = None
+    if position is None and existing_vehicle:
+        if existing_vehicle.get("current_lon") is not None and existing_vehicle.get("current_lat") is not None:
+            position = {"lon": existing_vehicle.get("current_lon"), "lat": existing_vehicle.get("current_lat")}
+    if state.system_initialized and position is not None:
+        node, dist = _nearest_node_from_coords(state.city, position["lon"], position["lat"])
+        if node is None:
+            raise ValueError("车辆位置无法吸附到路网节点")
+        payload.update({
+            "current_lon": position["lon"],
+            "current_lat": position["lat"],
+            "last_node_code": node.id,
+            "next_node_code": node.id,
+            "edge_progress": 0.0,
+        })
+        snap_info = {
+            "node": CoreDispatcher._node_to_path_point(node),
+            "snap_distance_m": dist,
+        }
+    elif position is not None:
+        payload.update({
+            "current_lon": position["lon"],
+            "current_lat": position["lat"],
+        })
+    elif existing_vehicle:
+        payload.update({
+            "current_lon": existing_vehicle.get("current_lon"),
+            "current_lat": existing_vehicle.get("current_lat"),
+            "last_node_code": existing_vehicle.get("last_node_code"),
+            "next_node_code": existing_vehicle.get("next_node_code"),
+            "edge_progress": existing_vehicle.get("edge_progress", 0.0),
+        })
+    return payload, snap_info
+
+
+def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=None):
+    """校验并规范化车辆档案请求体。
+
+    Args:
+        data (dict): 前端传入的车辆档案字段。
+        existing_code (str | None): 更新接口路径中的车辆编码；传入时以该值为准。
+        existing_vehicle (dict | None): 数据库中已有车辆档案，用于复用运行位置。
+
+    Returns:
+        tuple: (payload, snap_info)，payload 可直接写入持久化层。
+
+    Raises:
+        ValueError: 必填字段缺失、枚举非法或可运行车辆缺少位置。
+    """
+    payload = dict(data or {})
+    vehicle_code = str(existing_code or payload.get("vehicle_code") or "").strip()
+    if not vehicle_code:
+        raise ValueError("vehicle_code 不能为空")
+    plate_no = str(payload.get("plate_no") or "").strip()
+    if not plate_no:
+        raise ValueError("plate_no 不能为空")
+    operation_status = str(payload.get("operation_status") or payload.get("status") or "offline").strip()
+    if operation_status not in VEHICLE_OPERATION_STATUSES:
+        raise ValueError(f"operation_status 必须是 {', '.join(VEHICLE_OPERATION_STATUSES)} 之一")
+    vehicle_type = str(payload.get("vehicle_type") or "bus").strip()
+    if vehicle_type not in VEHICLE_TYPES:
+        raise ValueError(f"vehicle_type 必须是 {', '.join(VEHICLE_TYPES)} 之一")
+    current_driver_code = str(payload.get("current_driver_code") or payload.get("driver_code") or "").strip() or None
+    position = _extract_position(payload)
+    if operation_status in VEHICLE_RUNTIME_STATUSES and position is None and not existing_vehicle:
+        raise ValueError("可运行车辆必须提供 initial_position")
+    runtime_payload, snap_info = _runtime_payload_from_position(position, operation_status, existing_vehicle=existing_vehicle)
+    result = {
+        "vehicle_code": vehicle_code,
+        "plate_no": plate_no,
+        "vehicle_type": vehicle_type,
+        "seat_count": int(payload.get("seat_count") or payload.get("max_load_count") or 0),
+        "max_load_count": int(payload.get("max_load_count") or payload.get("seat_count") or 0),
+        "vehicle_color": str(payload.get("vehicle_color") or "").strip() or None,
+        "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
+        "operation_status": operation_status,
+        "operation_mode": str(payload.get("operation_mode") or "dynamic_bus").strip(),
+        "current_driver_code": current_driver_code,
+        "remark": str(payload.get("remark") or "").strip() or None,
+    }
+    result.update(runtime_payload)
+    return result, snap_info
+
+
+def _runtime_vehicle_by_code(vehicle_code):
+    """按车辆业务编码查找当前内存运行车队中的车辆。
+
+    Args:
+        vehicle_code (str): 车辆业务编码。
+
+    Returns:
+        Vehicle | None: 匹配到的运行期车辆对象；未找到时返回 None。
+    """
+    for vehicle in state.fleet or []:
+        if str(getattr(vehicle, "vehicle_id", "")) == str(vehicle_code) or str(getattr(vehicle, "id", "")) == str(vehicle_code):
+            return vehicle
+    return None
+
+
+def _fleet_vehicle_by_vehicle_id(vehicle_id):
+    """按 vehicle_id 查找当前内存运行车队中的车辆。
+
+    Args:
+        vehicle_id (str): URL 路径中的车辆业务 ID。
+
+    Returns:
+        Vehicle | None: 匹配到的运行期车辆对象；未找到时返回 None。
+    """
+    vehicle_id = str(vehicle_id or "")
+    for vehicle in state.fleet or []:
+        if str(getattr(vehicle, "vehicle_id", "")) == vehicle_id:
+            return vehicle
+    return None
+
+
+def _runtime_vehicle_has_tasks(vehicle):
+    """判断运行期车辆是否仍有未完成任务。
+
+    Args:
+        vehicle (Vehicle): 运行期车辆对象。
+
+    Returns:
+        bool: 车辆上有乘客或仍有计划路线时返回 True。
+    """
+    return bool(getattr(vehicle, "on_board_orders", None) or getattr(vehicle, "planned_route", None))
+
+
+def _set_runtime_vehicle_status(vehicle, operation_status):
+    """把运营状态同步到运行期车辆休息状态字段。
+
+    Args:
+        vehicle (Vehicle): 运行期车辆对象。
+        operation_status (str): operating/resting/closing 中的一种。
+
+    Returns:
+        None。
+    """
+    vehicle.operation_status = operation_status
+    if operation_status == "operating":
+        vehicle.is_resting = False
+        vehicle.is_rest_requested = False
+        vehicle.rest_status = "operating"
+    elif operation_status == "resting":
+        vehicle.is_resting = True
+        vehicle.is_rest_requested = True
+        vehicle.rest_status = "resting"
+    elif operation_status == "closing":
+        vehicle.is_resting = False
+        vehicle.is_rest_requested = True
+        vehicle.rest_status = "closing"
+
+
+def _apply_vehicle_record_to_runtime(vehicle_record):
+    """把车辆档案变更应用到内存运行车队。
+
+    Args:
+        vehicle_record (dict): 持久化层返回的车辆档案与运行位置字段。
+
+    Returns:
+        dict: 运行态是否已应用、执行动作以及可选车辆快照。
+
+    Raises:
+        PersistenceConflict: 车辆有未完成任务时不能退出运行车队。
+        ValueError: 可运行车辆缺少可用路网节点。
+    """
+    if not state.system_initialized:
+        return {"runtime_applied": False, "reason": "system_not_initialized"}
+    operation_status = vehicle_record.get("operation_status") or "offline"
+    vehicle_code = vehicle_record.get("vehicle_code")
+    existing = _runtime_vehicle_by_code(vehicle_code)
+    if operation_status not in VEHICLE_RUNTIME_STATUSES:
+        if existing is not None:
+            if _runtime_vehicle_has_tasks(existing):
+                raise persistence.PersistenceConflict("车辆仍有未完成任务，不能退出运营", code="vehicle_has_tasks")
+            state.fleet.remove(existing)
+        return {"runtime_applied": True, "runtime_action": "removed"}
+
+    node_id = vehicle_record.get("next_node_code") or vehicle_record.get("last_node_code")
+    if not node_id and vehicle_record.get("current_lon") is not None and vehicle_record.get("current_lat") is not None:
+        node, _ = _nearest_node_from_coords(state.city, vehicle_record["current_lon"], vehicle_record["current_lat"])
+        node_id = node.id if node else None
+    node = state.city.nodes_map.get(node_id)
+    if node is None:
+        raise ValueError("可运行车辆缺少可用路网节点")
+
+    if existing is None:
+        color = vehicle_record.get("vehicle_color") or "#64748b"
+        capacity = vehicle_record.get("max_load_count") or vehicle_record.get("seat_count") or 10
+        existing = Vehicle(vehicle_code, node.id, color, getattr(node, "zone", None), capacity=capacity)
+        state.fleet.append(existing)
+        action = "created"
+    else:
+        action = "updated"
+
+    existing.id = vehicle_code
+    existing.vehicle_id = vehicle_code
+    existing.plate_no = vehicle_record.get("plate_no") or vehicle_code
+    existing.capacity = vehicle_record.get("max_load_count") or vehicle_record.get("seat_count") or existing.capacity
+    existing.color = vehicle_record.get("vehicle_color") or existing.color
+    existing.driver_id = vehicle_record.get("current_driver_code") or ""
+    existing.driver_no = vehicle_record.get("current_driver_no") or ""
+    existing.gps = {
+        "lon": vehicle_record.get("current_lon"),
+        "lat": vehicle_record.get("current_lat"),
+    }
+    existing.last_node = node.id
+    existing.next_node = node.id
+    existing.progress = float(vehicle_record.get("edge_progress") or 0.0)
+    existing.time = state.now_timestamp()
+    _set_runtime_vehicle_status(existing, operation_status)
+    CoreDispatcher.refresh_vehicle_route_metadata(existing, state.city)
+    persistence.record_vehicle_runtime(existing)
+    return {
+        "runtime_applied": True,
+        "runtime_action": action,
+        "vehicle": _vehicle_to_dict(existing),
+    }
+
+
+def _vehicle_payload_has_runtime_position(vehicle_payload):
+    """判断车辆 payload 是否包含可用于入队的运行位置。
+
+    Args:
+        vehicle_payload (dict): 已规范化的车辆请求字段或运行字段。
+
+    Returns:
+        bool: 包含路网节点或经纬度时返回 True。
+    """
+    return bool(
+        vehicle_payload.get("last_node_code")
+        or vehicle_payload.get("next_node_code")
+        or (
+            vehicle_payload.get("current_lon") is not None
+            and vehicle_payload.get("current_lat") is not None
+        )
+    )
+
+
+def _admin_error_response(exc):
+    """把管理接口内部异常转换为统一 HTTP 响应。
+
+    Args:
+        exc (Exception): 路由处理过程中捕获的异常。
+
+    Returns:
+        tuple: Flask JSON 响应与 HTTP 状态码。
+    """
+    if isinstance(exc, persistence.PersistenceConflict):
+        return jsonify({"error": exc.code, "message": str(exc), "field": exc.field}), 409
+    if isinstance(exc, KeyError) and str(exc).strip("'") == "driver_not_found":
+        return jsonify({"error": "driver_not_found", "message": "司机不存在"}), 404
+    if isinstance(exc, ValueError):
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"error": str(exc)}), 500
+
+
 def _find_order_eta_context(request_id):
     """从订单池、车辆任务和归档池中查找乘客订单上下文。"""
     request_id = str(request_id)
@@ -341,6 +707,7 @@ def _order_eta_response(order, order_status, vehicle):
         "vehicle": (
             {
                 "id": vehicle.id,
+                "vehicle_id": vehicle.vehicle_id,
                 "plate_no": vehicle.plate_no,
             }
             if vehicle is not None
@@ -591,13 +958,20 @@ def cancel_order(request_id):
 
 
 # ============================================================
-# 功能三：车辆状态、实时路径更新与仿真推进接口
-# 相关接口：/fleet、/fleet/<vehicle_id>、/fleet/<vehicle_id>/path、/fleet/<vehicle_id>/rest、/tick、/status
+# 功能三：运营禁区、司机车辆管理与车辆运行接口
+# 相关接口：/operation-restrictions/*、/admin/*、/fleet/*、/tick、/status
 # ============================================================
 
 @bp.route("/operation-restrictions/policies", methods=["GET"])
 def list_operation_restriction_policies():
-    """查询运营禁区策略列表。"""
+    """查询运营禁区策略列表。
+
+    Request:
+        GET /operation-restrictions/policies
+
+    Returns:
+        JSON: 未软删除策略列表，以及当前全局生效策略。
+    """
     policies = persistence.list_operation_restriction_policies()
     return jsonify({
         "policies": [_restriction_policy_response(policy) for policy in policies],
@@ -607,7 +981,18 @@ def list_operation_restriction_policies():
 
 @bp.route("/operation-restrictions/policies", methods=["POST"])
 def create_operation_restriction_policy():
-    """创建运营禁区策略。"""
+    """创建运营禁区策略。
+
+    Request:
+        POST /operation-restrictions/policies
+        Body JSON 字段:
+            policy_code (str): 策略编号，允许重复。
+            policy_name (str): 策略名称，同租户下必须唯一。
+            polygons (list): 禁区 polygon 列表。
+
+    Returns:
+        JSON: 创建后的策略快照；校验失败返回 400。
+    """
     data = request.get_json(silent=True) or {}
     try:
         policy = normalize_policy_payload(data, require_identity=True)
@@ -629,7 +1014,14 @@ def create_operation_restriction_policy():
 
 @bp.route("/operation-restrictions/policies/<policy_identity>", methods=["GET"])
 def get_operation_restriction_policy(policy_identity):
-    """查询单个运营禁区策略。"""
+    """查询单个运营禁区策略。
+
+    Args:
+        policy_identity (str): URL 路径中的策略名称或策略编号。
+
+    Returns:
+        JSON: 策略快照；不存在时返回 404。
+    """
     policy = persistence.get_operation_restriction_policy(policy_identity)
     if policy is None:
         return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
@@ -638,7 +1030,18 @@ def get_operation_restriction_policy(policy_identity):
 
 @bp.route("/operation-restrictions/policies/<policy_identity>", methods=["PUT"])
 def update_operation_restriction_policy(policy_identity):
-    """更新单个运营禁区策略。"""
+    """更新单个运营禁区策略。
+
+    Args:
+        policy_identity (str): URL 路径中的策略名称或策略编号。
+
+    Request:
+        PUT /operation-restrictions/policies/<policy_identity>
+        Body JSON 字段同创建接口；编辑已有策略时不允许修改 policy_name。
+
+    Returns:
+        JSON: 更新后的策略快照；策略不存在返回 404。
+    """
     data = request.get_json(silent=True) or {}
     try:
         policy = normalize_policy_payload(data, require_identity=True)
@@ -664,7 +1067,14 @@ def update_operation_restriction_policy(policy_identity):
 
 @bp.route("/operation-restrictions/policies/<policy_identity>", methods=["DELETE"])
 def delete_operation_restriction_policy(policy_identity):
-    """软删除单个运营禁区策略。"""
+    """软删除单个运营禁区策略。
+
+    Args:
+        policy_identity (str): URL 路径中的策略名称或策略编号。
+
+    Returns:
+        JSON: 删除结果和删除后的当前生效策略；策略不存在返回 404。
+    """
     try:
         deleted = persistence.delete_operation_restriction_policy(policy_identity)
         if not deleted:
@@ -682,7 +1092,14 @@ def delete_operation_restriction_policy(policy_identity):
 
 @bp.route("/operation-restrictions/active", methods=["GET"])
 def get_active_operation_restriction_policy():
-    """查询当前生效的运营禁区策略。"""
+    """查询当前生效的运营禁区策略。
+
+    Request:
+        GET /operation-restrictions/active
+
+    Returns:
+        JSON: 当前全局生效策略；未设置时 policy 为 null。
+    """
     active = persistence.get_active_operation_restriction_policy()
     _sync_active_restriction_policy(active)
     return jsonify({"policy": _restriction_policy_response(active)})
@@ -690,7 +1107,17 @@ def get_active_operation_restriction_policy():
 
 @bp.route("/operation-restrictions/active", methods=["POST"])
 def set_active_operation_restriction_policy():
-    """选择当前生效的禁区策略，或关闭禁区限制。"""
+    """选择当前生效的禁区策略，或关闭禁区限制。
+
+    Request:
+        POST /operation-restrictions/active
+        Body JSON 字段:
+            policy_name (str | null): 策略名称。
+            policy_code (str | null): 策略编号；policy_name 为空时使用。
+
+    Returns:
+        JSON: 切换结果和当前生效策略；策略不存在或禁用时返回 404。
+    """
     data = request.get_json(silent=True) or {}
     policy_identity = data.get("policy_name")
     if policy_identity in (None, ""):
@@ -709,6 +1136,308 @@ def set_active_operation_restriction_policy():
         })
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@bp.route("/admin/driver-vehicle/options", methods=["GET"])
+def admin_driver_vehicle_options():
+    """返回司机车辆管理表单选项和当前档案。
+
+    Request:
+        GET /admin/driver-vehicle/options
+
+    Returns:
+        JSON: 司机状态枚举、车辆状态枚举、车辆类型枚举，以及当前司机/车辆列表。
+    """
+    return jsonify({
+        "driver_employment_statuses": list(DRIVER_EMPLOYMENT_STATUSES),
+        "driver_work_statuses": list(DRIVER_WORK_STATUSES),
+        "vehicle_operation_statuses": list(VEHICLE_OPERATION_STATUSES),
+        "vehicle_types": list(VEHICLE_TYPES),
+        "drivers": persistence.list_drivers(),
+        "vehicles": persistence.list_vehicles(),
+    })
+
+
+@bp.route("/admin/drivers", methods=["GET"])
+def admin_list_drivers():
+    """查询司机档案列表。
+
+    Request:
+        GET /admin/drivers
+
+    Returns:
+        JSON: 未软删除司机档案列表。
+    """
+    return jsonify({"drivers": persistence.list_drivers()})
+
+
+@bp.route("/admin/drivers", methods=["POST"])
+def admin_create_driver():
+    """创建司机档案。
+
+    Request:
+        POST /admin/drivers
+        Body JSON 字段:
+            driver_code (str): 司机业务编码，创建后不可修改。
+            driver_no (str): 司机工号，同租户下唯一。
+            driver_name (str): 司机姓名；未传时回退为工号或编码。
+
+    Returns:
+        JSON: 创建后的司机档案；唯一约束冲突返回 409。
+    """
+    try:
+        payload = _normalize_driver_payload(request.get_json(silent=True) or {})
+        return jsonify({"driver": persistence.save_driver(payload, create=True)}), 201
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/drivers/<driver_code>", methods=["GET"])
+def admin_get_driver(driver_code):
+    """查询单个司机档案。
+
+    Args:
+        driver_code (str): URL 路径中的司机业务编码。
+
+    Returns:
+        JSON: 司机档案；不存在时返回 404。
+    """
+    driver = persistence.get_driver(driver_code)
+    if driver is None:
+        return jsonify({"error": "driver_not_found", "driver_code": str(driver_code)}), 404
+    return jsonify({"driver": driver})
+
+
+@bp.route("/admin/drivers/<driver_code>", methods=["PUT"])
+def admin_update_driver(driver_code):
+    """更新司机档案。
+
+    Args:
+        driver_code (str): URL 路径中的司机业务编码，更新时不可修改。
+
+    Request:
+        PUT /admin/drivers/<driver_code>
+        Body JSON 字段同创建接口；driver_code 以路径参数为准。
+
+    Returns:
+        JSON: 更新后的司机档案；不存在时返回 404，唯一约束冲突返回 409。
+    """
+    try:
+        payload = _normalize_driver_payload(request.get_json(silent=True) or {}, existing_code=driver_code)
+        driver = persistence.save_driver(payload, create=False)
+        if driver is None:
+            return jsonify({"error": "driver_not_found", "driver_code": str(driver_code)}), 404
+        return jsonify({"driver": driver})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/drivers/<driver_code>", methods=["DELETE"])
+def admin_delete_driver(driver_code):
+    """软删除司机档案。
+
+    Args:
+        driver_code (str): URL 路径中的司机业务编码。
+
+    Returns:
+        JSON: 删除结果；司机仍被车辆绑定时返回 409。
+    """
+    try:
+        deleted = persistence.delete_driver(driver_code)
+        if not deleted:
+            return jsonify({"error": "driver_not_found", "driver_code": str(driver_code)}), 404
+        return jsonify({"status": "deleted", "driver_code": str(driver_code)})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/vehicles", methods=["GET"])
+def admin_list_vehicles():
+    """查询车辆档案列表。
+
+    Request:
+        GET /admin/vehicles
+
+    Returns:
+        JSON: 未软删除车辆档案列表，包含当前司机和运行位置字段。
+    """
+    return jsonify({"vehicles": persistence.list_vehicles()})
+
+
+@bp.route("/admin/vehicles", methods=["POST"])
+def admin_create_vehicle():
+    """创建车辆档案并按状态同步运行车队。
+
+    Request:
+        POST /admin/vehicles
+        Body JSON 字段:
+            vehicle_code (str): 车辆业务编码，创建后不可修改。
+            plate_no (str): 车牌号，同租户下唯一。
+            operation_status (str): operating/resting/closing/offline/maintenance。
+            initial_position (dict): 新增可运行车辆时必填，包含 lon/lat。
+
+    Returns:
+        JSON: 创建后的车辆档案、运行态同步结果和路网吸附结果。
+    """
+    try:
+        with state.state_lock:
+            payload, snap_info = _normalize_vehicle_payload(request.get_json(silent=True) or {})
+            vehicle = persistence.save_vehicle(payload, create=True)
+            runtime = _apply_vehicle_record_to_runtime(vehicle)
+        return jsonify({"vehicle": vehicle, "runtime": runtime, "snap": snap_info}), 201
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/vehicles/<vehicle_code>", methods=["GET"])
+def admin_get_vehicle(vehicle_code):
+    """查询单个车辆档案。
+
+    Args:
+        vehicle_code (str): URL 路径中的车辆业务编码。
+
+    Returns:
+        JSON: 车辆档案；不存在时返回 404。
+    """
+    vehicle = persistence.get_vehicle(vehicle_code)
+    if vehicle is None:
+        return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+    return jsonify({"vehicle": vehicle})
+
+
+@bp.route("/admin/vehicles/<vehicle_code>", methods=["PUT"])
+def admin_update_vehicle(vehicle_code):
+    """更新车辆档案并按状态同步运行车队。
+
+    Args:
+        vehicle_code (str): URL 路径中的车辆业务编码，更新时不可修改。
+
+    Request:
+        PUT /admin/vehicles/<vehicle_code>
+        Body JSON 字段同创建接口；vehicle_code 以路径参数为准。
+
+    Returns:
+        JSON: 更新后的车辆档案、运行态同步结果和可选吸附结果。
+    """
+    try:
+        with state.state_lock:
+            existing = persistence.get_vehicle(vehicle_code)
+            if existing is None:
+                return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+            payload, snap_info = _normalize_vehicle_payload(
+                request.get_json(silent=True) or {},
+                existing_code=vehicle_code,
+                existing_vehicle=existing,
+            )
+            runtime_vehicle = _runtime_vehicle_by_code(vehicle_code) if state.system_initialized else None
+            if payload["operation_status"] not in VEHICLE_RUNTIME_STATUSES and runtime_vehicle and _runtime_vehicle_has_tasks(runtime_vehicle):
+                raise persistence.PersistenceConflict("车辆仍有未完成任务，不能退出运营", code="vehicle_has_tasks")
+            if payload["operation_status"] in VEHICLE_RUNTIME_STATUSES and state.system_initialized and not _vehicle_payload_has_runtime_position(payload):
+                raise ValueError("可运行车辆必须提供 initial_position 或已有运行位置")
+            vehicle = persistence.save_vehicle(payload, create=False)
+            runtime = _apply_vehicle_record_to_runtime(vehicle)
+        return jsonify({"vehicle": vehicle, "runtime": runtime, "snap": snap_info})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/vehicles/<vehicle_code>", methods=["DELETE"])
+def admin_delete_vehicle(vehicle_code):
+    """软删除车辆档案并从运行车队移除。
+
+    Args:
+        vehicle_code (str): URL 路径中的车辆业务编码。
+
+    Returns:
+        JSON: 删除结果；车辆仍有未完成任务时返回 409。
+    """
+    try:
+        with state.state_lock:
+            runtime_vehicle = _runtime_vehicle_by_code(vehicle_code) if state.system_initialized else None
+            if runtime_vehicle and _runtime_vehicle_has_tasks(runtime_vehicle):
+                raise persistence.PersistenceConflict("车辆仍有未完成任务，不能删除", code="vehicle_has_tasks")
+            if runtime_vehicle and state.fleet is not None:
+                state.fleet.remove(runtime_vehicle)
+            deleted = persistence.delete_vehicle(vehicle_code)
+        if not deleted:
+            return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+        return jsonify({"status": "deleted", "vehicle_code": str(vehicle_code)})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/vehicles/<vehicle_code>/status", methods=["POST"])
+def admin_update_vehicle_status(vehicle_code):
+    """更新车辆运营状态。
+
+    Args:
+        vehicle_code (str): URL 路径中的车辆业务编码。
+
+    Request:
+        POST /admin/vehicles/<vehicle_code>/status
+        Body JSON 字段:
+            operation_status (str): 目标运营状态。
+            initial_position (dict): 激活可运行状态时可选提供的 lon/lat。
+
+    Returns:
+        JSON: 更新后的车辆档案、运行态同步结果和可选吸附结果。
+    """
+    data = request.get_json(silent=True) or {}
+    operation_status = str(data.get("operation_status") or data.get("status") or "").strip()
+    if operation_status not in VEHICLE_OPERATION_STATUSES:
+        return jsonify({"error": f"operation_status 必须是 {', '.join(VEHICLE_OPERATION_STATUSES)} 之一"}), 400
+    try:
+        with state.state_lock:
+            existing = persistence.get_vehicle(vehicle_code)
+            if existing is None:
+                return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+            runtime_vehicle = _runtime_vehicle_by_code(vehicle_code) if state.system_initialized else None
+            if operation_status not in VEHICLE_RUNTIME_STATUSES and runtime_vehicle and _runtime_vehicle_has_tasks(runtime_vehicle):
+                raise persistence.PersistenceConflict("车辆仍有未完成任务，不能退出运营", code="vehicle_has_tasks")
+            runtime_payload, snap_info = _runtime_payload_from_position(
+                _extract_position(data),
+                operation_status,
+                existing_vehicle=existing,
+            )
+            if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and not _vehicle_payload_has_runtime_position(runtime_payload):
+                raise ValueError("可运行车辆必须提供 initial_position 或已有运行位置")
+            vehicle = persistence.update_vehicle_status(vehicle_code, operation_status, runtime_payload=runtime_payload)
+            runtime = _apply_vehicle_record_to_runtime(vehicle)
+        return jsonify({"vehicle": vehicle, "runtime": runtime, "snap": snap_info})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/vehicles/<vehicle_code>/bind-driver", methods=["POST"])
+def admin_bind_vehicle_driver(vehicle_code):
+    """绑定或解绑车辆司机。
+
+    Args:
+        vehicle_code (str): URL 路径中的车辆业务编码。
+
+    Request:
+        POST /admin/vehicles/<vehicle_code>/bind-driver
+        Body JSON 字段:
+            driver_code (str | null): 司机业务编码；为空表示解绑。
+            operator (str | None): 可选操作人标识。
+
+    Returns:
+        JSON: 更新后的车辆档案和运行态同步结果。
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        with state.state_lock:
+            vehicle = persistence.bind_vehicle_driver(
+                vehicle_code,
+                data.get("driver_code"),
+                operator=data.get("operator"),
+            )
+            if vehicle is None:
+                return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+            runtime = _apply_vehicle_record_to_runtime(vehicle)
+        return jsonify({"vehicle": vehicle, "runtime": runtime})
+    except Exception as exc:
+        return _admin_error_response(exc)
 
 
 @bp.route("/fleet", methods=["GET"])
@@ -740,9 +1469,9 @@ def get_vehicle(vehicle_id):
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     with state.state_lock:
-        for v in state.fleet:
-            if v.id == vehicle_id:
-                return jsonify(_vehicle_to_dict(v))
+        vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
+        if vehicle is not None:
+            return jsonify(_vehicle_to_dict(vehicle))
     return jsonify({"error": "车辆未找到"}), 404
 
 
@@ -778,11 +1507,7 @@ def update_vehicle_path(vehicle_id):
         return jsonify({"error": "lon/lat 必须是数字"}), 400
 
     with state.state_lock:
-        target_vehicle = None
-        for v in state.fleet:
-            if v.id == vehicle_id:
-                target_vehicle = v
-                break
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
@@ -820,11 +1545,7 @@ def request_vehicle_rest(vehicle_id):
 
     data = request.get_json(silent=True) or {}
     with state.state_lock:
-        target_vehicle = None
-        for v in state.fleet:
-            if v.id == vehicle_id:
-                target_vehicle = v
-                break
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
@@ -845,7 +1566,7 @@ def request_vehicle_rest(vehicle_id):
         persistence.record_rest_request(target_vehicle, result)
         estimated_finish_time = result.get("estimated_finish_time")
         return jsonify({
-            "vehicle_id": target_vehicle.id,
+            "vehicle_id": target_vehicle.vehicle_id,
             "decision": result.get("decision"),
             "rest_status": result.get("status"),
             "rest_status_text": REST_STATUS_TEXT.get(result.get("status"), "未知"),

@@ -4,6 +4,7 @@
 """
 
 import copy
+import hashlib
 import os
 import threading
 import time
@@ -51,6 +52,18 @@ class CoreDispatcher:
     route_grasp_inflight_lock = threading.Lock()
     operation_restriction_policy = None
     operation_restriction_lock = threading.Lock()
+
+    @staticmethod
+    def _vehicle_identity(vehicle):
+        """返回车辆业务标识，优先使用 vehicle_id。"""
+        return str(getattr(vehicle, "vehicle_id", None) or getattr(vehicle, "id", ""))
+
+    @staticmethod
+    def _short_route_version(prefix, parts):
+        """把路线关键字段压缩成稳定短版本号，避免数据库 route_version 超长。"""
+        raw = "|".join(str(part) for part in parts)
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
+        return f"{prefix}:v1:{digest}"
 
     @classmethod
     def set_operation_restriction_policy(cls, policy):
@@ -752,7 +765,7 @@ class CoreDispatcher:
                     "status": "rejected",
                     "code": "already_on_board",
                     "request_id": request_id,
-                    "vehicle_id": vehicle.id,
+                    "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
                     "message": "乘客已上车，乘客端取消订单被拒绝。",
                 }
 
@@ -768,7 +781,7 @@ class CoreDispatcher:
                     "status": "rejected",
                     "code": "origin_step_missing",
                     "request_id": request_id,
-                    "vehicle_id": vehicle.id,
+                    "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
                     "message": "订单已进入上车后的送达阶段，无法按乘客未上车取消处理。",
                 }
 
@@ -786,7 +799,7 @@ class CoreDispatcher:
                 "status": "cancelled",
                 "request_id": request_id,
                 "source": "vehicle_route",
-                "vehicle_id": vehicle.id,
+                "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
                 "planned_route": [
                     {
                         "type": step["type"],
@@ -1775,7 +1788,7 @@ class CoreDispatcher:
             GPS 行进只裁剪既有规划路线，不触发新的高德规划请求。
         """
         parts = [
-            str(vehicle.id),
+            CoreDispatcher._vehicle_identity(vehicle),
             f"RESTRICT:{getattr(vehicle, 'operation_restriction_policy_signature', None) or 'none'}",
         ]
         if getattr(vehicle, "planned_route", None):
@@ -1788,7 +1801,7 @@ class CoreDispatcher:
             parts.append(f"IDLE:{target.get('node_id')}:{target.get('generated_at')}")
         else:
             parts.append("EMPTY")
-        return "|".join(parts)
+        return CoreDispatcher._short_route_version("grasp", parts)
 
     @staticmethod
     def _route_result_to_grasp_raw_segments(result):
@@ -2051,7 +2064,7 @@ class CoreDispatcher:
                 grasp_meta = {"ok": False, "error": "trim_fallback"}
             else:
                 source = (
-                    f"{previous.get('source', 'driving_plan')}_trimmed"
+                    f"driving_plan_trimmed"
                     if previous is not None
                     else "Amap_Driving"
                 )
@@ -2110,7 +2123,8 @@ class CoreDispatcher:
 
         Side Effects:
             更新 planned_route_segment_raw_point，并在已有规划路线时同步缩短
-            planned_route_segment_grasped_point/planned_route_grasped_point。
+            planned_route_segment_grasped_point/planned_route_grasped_point，
+            同时把裁剪后的分段路线写入 bus_vehicle_runtime.segment_route。
         """
         raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
         if not raw_segments:
@@ -2138,6 +2152,7 @@ class CoreDispatcher:
         if trimmed_segments:
             vehicle.planned_route_segment_grasped_point = trimmed_segments
             vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(trimmed_segments)
+            persistence.record_vehicle_runtime(vehicle)
         return True
 
     @classmethod
@@ -2216,7 +2231,7 @@ class CoreDispatcher:
             vehicle.planned_route_grasp_error = "route_version_changed"
             return None
         return {
-            "vehicle_id": str(vehicle.id),
+            "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
             "route_version": route_version,
             "segments": copy.deepcopy(raw_segments),
             "restriction_policy": CoreDispatcher._vehicle_restriction_policy(vehicle),
@@ -2878,7 +2893,7 @@ class CoreDispatcher:
         """
         target_vehicle = None
         for vehicle in fleet or []:
-            if str(vehicle.id) == job["vehicle_id"]:
+            if CoreDispatcher._vehicle_identity(vehicle) == job["vehicle_id"]:
                 target_vehicle = vehicle
                 break
         if target_vehicle is None:
@@ -2902,7 +2917,7 @@ class CoreDispatcher:
         """
         if target_vehicle is None:
             return 0
-        if str(target_vehicle.id) != job["vehicle_id"]:
+        if CoreDispatcher._vehicle_identity(target_vehicle) != job["vehicle_id"]:
             return 0
         # 写回前再次校验车辆当前路线版本，避免异步返回的旧结果覆盖新路线。
         if CoreDispatcher._vehicle_grasp_route_version(target_vehicle) != job["route_version"]:
@@ -2929,6 +2944,7 @@ class CoreDispatcher:
             target_vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(segments)
             target_vehicle.planned_route_grasp_status = "ready"
             target_vehicle.planned_route_grasp_error = None
+            # record_route_grasp 会同步刷新 bus_vehicle_runtime.segment_route。
             persistence.record_route_grasp(target_vehicle)
             return 1
 
@@ -3059,7 +3075,7 @@ class CoreDispatcher:
     def _vehicle_eta_route_version(vehicle):
         """生成路线版本签名；路线或车辆所在边变化时丢弃旧 ETA 结果。"""
         parts = [
-            str(vehicle.id),
+            CoreDispatcher._vehicle_identity(vehicle),
             str(getattr(vehicle, "next_node", "")),
             f"{float(getattr(vehicle, 'progress', 0.0) or 0.0):.6f}",
         ]
@@ -3067,7 +3083,7 @@ class CoreDispatcher:
             order = step.get("order")
             request_id = getattr(order, "request_id", "")
             parts.append(f"{step.get('type')}:{request_id}")
-        return "|".join(parts)
+        return CoreDispatcher._short_route_version("eta", parts)
 
     @staticmethod
     def _build_vehicle_eta_job(vehicle, city_map, current_timestamp):
@@ -3134,13 +3150,14 @@ class CoreDispatcher:
         if not order_ids and not is_idle:
             return None
 
+        vehicle_id = CoreDispatcher._vehicle_identity(vehicle)
         return {
-            "vehicle_id": str(vehicle.id),
+            "vehicle_id": vehicle_id,
             "route_version": route_version,
             "order_ids": order_ids,
             "is_idle": is_idle,
             "payload": {
-                "vehicleId": str(vehicle.id),
+                "vehicleId": vehicle_id,
                 "routeVersion": route_version,
                 "speedMps": SPEED_MPS,
                 "vehiclePosition": position,
@@ -3332,7 +3349,7 @@ class CoreDispatcher:
         """校验路线版本并把单车 ETA 结果写回订单。"""
         target_vehicle = None
         for vehicle in fleet or []:
-            if str(vehicle.id) == job["vehicle_id"]:
+            if CoreDispatcher._vehicle_identity(vehicle) == job["vehicle_id"]:
                 target_vehicle = vehicle
                 break
         if target_vehicle is None:

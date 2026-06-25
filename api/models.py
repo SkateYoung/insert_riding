@@ -208,11 +208,11 @@ class CityGraph:
         prefixes = ["科技园", "大学城", "商业街", "创新大厦", "体育馆", "图书馆", "地铁站", "公寓区", "实验楼", "中心广场"]
         secondary = ["南门", "北门", "东门", "西门", "A座", "B座", "二期", "分馆", "广场", "枢纽"]
         
-        random.seed(42) # 保证名称在不同运行间保持一致
+        rng = random.Random(42) # 保证名称在不同运行间保持一致，且不影响车辆起点随机。
         p_list = prefixes.copy()
         s_list = secondary.copy()
-        random.shuffle(p_list)
-        random.shuffle(s_list)
+        rng.shuffle(p_list)
+        rng.shuffle(s_list)
         
         for i, poi in enumerate(self.pois):
             p = prefixes[i % len(prefixes)]

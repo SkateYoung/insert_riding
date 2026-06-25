@@ -8,6 +8,7 @@
 """
 
 import copy
+import hashlib
 import json
 import os
 import queue
@@ -29,6 +30,15 @@ except Exception:  # pragma: no cover - keeps module importable in isolation.
 DEFAULT_QUEUE_SIZE = 10000
 DEFAULT_TENANT_ID = "000000"
 DEFAULT_FORECAST_HISTORY_LIMIT = 5000
+
+
+class PersistenceConflict(ValueError):
+    """持久化层业务冲突，用于接口层转换为 409 响应。"""
+
+    def __init__(self, message, code="conflict", field=None):
+        super().__init__(message)
+        self.code = code
+        self.field = field
 
 
 # ============================================================
@@ -119,6 +129,13 @@ def _point_from_mapping(point):
     }
 
 
+def _short_route_version(prefix, parts):
+    """把路线关键字段压缩成稳定短版本号，避免 route_version 超过数据库字段长度。"""
+    raw = "|".join(str(part) for part in parts)
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
+    return f"{prefix}:v1:{digest}"
+
+
 def _forecast_order_from_row(row):
     """把 bus_order 查询行转换为 OD 预测模块可消费的轻量订单。"""
     if not isinstance(row, dict):
@@ -195,7 +212,10 @@ def _route_version(vehicle):
     """
     version = getattr(vehicle, "planned_route_grasp_route_version", None)
     if version:
-        return str(version)
+        version = str(version)
+        if len(version) <= 120:
+            return version
+        return _short_route_version("route", [version])
     parts = [
         str(getattr(vehicle, "id", "")),
         f"RESTRICT:{getattr(vehicle, 'operation_restriction_policy_signature', None) or 'none'}",
@@ -208,7 +228,7 @@ def _route_version(vehicle):
         parts.append(f"IDLE:{idle_target.get('node_id')}:{idle_target.get('generated_at')}")
     if len(parts) == 2:
         parts.append("EMPTY")
-    return "|".join(parts)
+    return _short_route_version("route", parts)
 
 
 def _operation_status(vehicle):
@@ -428,6 +448,9 @@ class MySqlPersistence:
         self._lock = threading.Lock()
         self._restriction_memory = {}
         self._restriction_memory_active = None
+        self._driver_memory = {}
+        self._vehicle_memory = {}
+        self._vehicle_bind_memory = []
 
     @classmethod
     def from_env(cls):
@@ -618,6 +641,95 @@ class MySqlPersistence:
         except Exception:
             policy["policy_signature"] = None
         return policy
+
+    @staticmethod
+    def _driver_from_row(row):
+        """把司机表记录转换成接口响应字典。
+
+        Args:
+            row (dict | None): PyMySQL 查询返回的一行司机记录。
+
+        Returns:
+            dict | None: API 可直接返回的司机档案；空记录返回 None。
+        """
+        if not row:
+            return None
+        return {
+            "id": row.get("id"),
+            "driver_code": row.get("driver_code"),
+            "driver_no": row.get("driver_no"),
+            "driver_name": row.get("driver_name"),
+            "phone": row.get("phone"),
+            "id_card_no": row.get("id_card_no"),
+            "license_no": row.get("license_no"),
+            "license_class": row.get("license_class"),
+            "license_expire_date": (
+                row.get("license_expire_date").isoformat()
+                if hasattr(row.get("license_expire_date"), "isoformat")
+                else row.get("license_expire_date")
+            ),
+            "service_city": row.get("service_city"),
+            "employment_status": row.get("employment_status") or "active",
+            "work_status": row.get("work_status") or "off_duty",
+            "remark": row.get("remark"),
+            "tenant_id": row.get("tenant_id"),
+            "created_at": row.get("created_at").isoformat(sep=" ") if isinstance(row.get("created_at"), datetime) else row.get("created_at"),
+            "updated_at": row.get("updated_at").isoformat(sep=" ") if isinstance(row.get("updated_at"), datetime) else row.get("updated_at"),
+        }
+
+    @staticmethod
+    def _vehicle_from_row(row):
+        """把车辆表与运行表联查记录转换成接口响应字典。
+
+        Args:
+            row (dict | None): 车辆档案、司机档案和运行表联查返回的一行记录。
+
+        Returns:
+            dict | None: API 可直接返回的车辆档案；空记录返回 None。
+        """
+        if not row:
+            return None
+        segment_route = row.get("runtime_segment_route", row.get("segment_route"))
+        if isinstance(segment_route, str):
+            try:
+                segment_route = json.loads(segment_route)
+            except json.JSONDecodeError:
+                segment_route = []
+        return {
+            "id": row.get("id"),
+            "vehicle_code": row.get("vehicle_code"),
+            "plate_no": row.get("plate_no"),
+            "vehicle_type": row.get("vehicle_type") or "bus",
+            "seat_count": int(row.get("seat_count") or 0),
+            "max_load_count": int(row.get("max_load_count") or 0),
+            "vehicle_color": row.get("vehicle_color"),
+            "vehicle_length_m": float(row.get("vehicle_length_m")) if row.get("vehicle_length_m") is not None else None,
+            "vehicle_model": row.get("vehicle_model"),
+            "manufacturer": row.get("manufacturer"),
+            "registration_date": (
+                row.get("registration_date").isoformat()
+                if hasattr(row.get("registration_date"), "isoformat")
+                else row.get("registration_date")
+            ),
+            "operation_status": row.get("operation_status") or "offline",
+            "operation_mode": row.get("operation_mode") or "dynamic_bus",
+            "current_driver_code": row.get("current_driver_code"),
+            "current_driver_no": row.get("current_driver_no"),
+            "current_driver_name": row.get("current_driver_name"),
+            "segment_route": segment_route or [],
+            "remark": row.get("remark"),
+            "tenant_id": row.get("tenant_id"),
+            "current_lon": float(row.get("current_lon")) if row.get("current_lon") is not None else None,
+            "current_lat": float(row.get("current_lat")) if row.get("current_lat") is not None else None,
+            "last_node_code": row.get("last_node_code"),
+            "next_node_code": row.get("next_node_code"),
+            "edge_progress": float(row.get("edge_progress")) if row.get("edge_progress") is not None else None,
+            "rest_status": row.get("rest_status"),
+            "can_accept_order": bool(row.get("can_accept_order")) if row.get("can_accept_order") is not None else None,
+            "reported_at": row.get("reported_at").isoformat(sep=" ") if isinstance(row.get("reported_at"), datetime) else row.get("reported_at"),
+            "created_at": row.get("created_at").isoformat(sep=" ") if isinstance(row.get("created_at"), datetime) else row.get("created_at"),
+            "updated_at": row.get("updated_at").isoformat(sep=" ") if isinstance(row.get("updated_at"), datetime) else row.get("updated_at"),
+        }
 
     def _memory_policy_list(self):
         """读取内存兜底模式下的禁区策略列表。"""
@@ -918,6 +1030,641 @@ class MySqlPersistence:
                 connection.close()
         return self.get_active_operation_restriction_policy()
 
+    def list_drivers(self):
+        """读取司机档案列表。
+
+        Returns:
+            list[dict]: 当前租户下未软删除的司机档案列表。
+        """
+        if not self.enabled or pymysql is None:
+            return sorted(
+                [copy.deepcopy(driver) for driver in self._driver_memory.values()],
+                key=lambda item: item.get("driver_code") or "",
+            )
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_driver
+                    WHERE tenant_id=%s AND deleted=0
+                    ORDER BY updated_at DESC, id DESC
+                """, (self.tenant_id,))
+                return [self._driver_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_driver(self, driver_code):
+        """按司机业务编码读取司机档案。
+
+        Args:
+            driver_code (str): 司机业务编码。
+
+        Returns:
+            dict | None: 司机档案；不存在或编码为空时返回 None。
+        """
+        driver_code = str(driver_code or "").strip()
+        if not driver_code:
+            return None
+        if not self.enabled or pymysql is None:
+            driver = self._driver_memory.get(driver_code)
+            return copy.deepcopy(driver) if driver else None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_driver
+                    WHERE tenant_id=%s AND driver_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, driver_code))
+                return self._driver_from_row(cursor.fetchone())
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _check_driver_conflict(self, driver_code, driver_no):
+        """检查司机工号唯一性。
+
+        Args:
+            driver_code (str): 当前司机业务编码。
+            driver_no (str | None): 待保存的司机工号。
+
+        Returns:
+            None。
+
+        Raises:
+            PersistenceConflict: 同租户下其他司机已使用相同工号。
+        """
+        if not driver_no:
+            return
+        if not self.enabled or pymysql is None:
+            for driver in self._driver_memory.values():
+                if driver.get("driver_no") == driver_no and driver.get("driver_code") != driver_code:
+                    raise PersistenceConflict("司机工号已存在", code="driver_no_exists", field="driver_no")
+            return
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT driver_code
+                    FROM bus_driver
+                    WHERE tenant_id=%s AND driver_no=%s AND driver_code<>%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, driver_no, driver_code))
+                if cursor.fetchone():
+                    raise PersistenceConflict("司机工号已存在", code="driver_no_exists", field="driver_no")
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_driver(self, driver, *, create=False):
+        """同步创建或更新司机档案。
+
+        Args:
+            driver (dict): 已规范化的司机档案字段。
+            create (bool): True 表示创建，False 表示更新。
+
+        Returns:
+            dict | None: 保存后的司机档案；更新不存在司机时返回 None。
+
+        Raises:
+            ValueError: 司机编码为空。
+            PersistenceConflict: 司机编码或工号违反唯一约束。
+        """
+        payload = copy.deepcopy(driver or {})
+        driver_code = str(payload.get("driver_code") or "").strip()
+        driver_no = str(payload.get("driver_no") or "").strip() or None
+        if not driver_code:
+            raise ValueError("driver_code 不能为空")
+        if create and self.get_driver(driver_code):
+            raise PersistenceConflict("司机编码已存在", code="driver_code_exists", field="driver_code")
+        if not create and self.get_driver(driver_code) is None:
+            return None
+        self._check_driver_conflict(driver_code, driver_no)
+        normalized = {
+            "driver_code": driver_code,
+            "driver_no": driver_no,
+            "driver_name": str(payload.get("driver_name") or driver_no or driver_code).strip(),
+            "phone": str(payload.get("phone") or "").strip() or None,
+            "id_card_no": str(payload.get("id_card_no") or "").strip() or None,
+            "license_no": str(payload.get("license_no") or "").strip() or None,
+            "license_class": str(payload.get("license_class") or "").strip() or None,
+            "license_expire_date": payload.get("license_expire_date") or None,
+            "service_city": str(payload.get("service_city") or "").strip() or None,
+            "employment_status": str(payload.get("employment_status") or "active").strip(),
+            "work_status": str(payload.get("work_status") or "off_duty").strip(),
+            "remark": str(payload.get("remark") or "").strip() or None,
+            "tenant_id": self.tenant_id,
+        }
+        if not self.enabled or pymysql is None:
+            self._driver_memory[driver_code] = normalized
+            return copy.deepcopy(normalized)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                if create:
+                    cursor.execute("""
+                        INSERT INTO bus_driver
+                            (driver_code, driver_no, driver_name, phone, id_card_no, license_no,
+                             license_class, license_expire_date, service_city, employment_status,
+                             work_status, remark, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        normalized["driver_code"], normalized["driver_no"], normalized["driver_name"],
+                        normalized["phone"], normalized["id_card_no"], normalized["license_no"],
+                        normalized["license_class"], normalized["license_expire_date"], normalized["service_city"],
+                        normalized["employment_status"], normalized["work_status"], normalized["remark"],
+                        self.tenant_id,
+                    ))
+                else:
+                    cursor.execute("""
+                        UPDATE bus_driver
+                        SET driver_no=%s, driver_name=%s, phone=%s, id_card_no=%s, license_no=%s,
+                            license_class=%s, license_expire_date=%s, service_city=%s,
+                            employment_status=%s, work_status=%s, remark=%s,
+                            updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND driver_code=%s AND deleted=0
+                    """, (
+                        normalized["driver_no"], normalized["driver_name"], normalized["phone"],
+                        normalized["id_card_no"], normalized["license_no"], normalized["license_class"],
+                        normalized["license_expire_date"], normalized["service_city"],
+                        normalized["employment_status"], normalized["work_status"], normalized["remark"],
+                        self.tenant_id, driver_code,
+                    ))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_driver(driver_code)
+
+    def delete_driver(self, driver_code):
+        """软删除司机档案。
+
+        Args:
+            driver_code (str): 司机业务编码。
+
+        Returns:
+            bool: 成功删除返回 True；司机不存在或编码为空返回 False。
+
+        Raises:
+            PersistenceConflict: 司机仍被车辆绑定时抛出。
+        """
+        driver_code = str(driver_code or "").strip()
+        if not driver_code:
+            return False
+        if not self.enabled or pymysql is None:
+            if any(v.get("current_driver_code") == driver_code for v in self._vehicle_memory.values()):
+                raise PersistenceConflict("司机仍被车辆绑定，不能删除", code="driver_bound", field="driver_code")
+            return self._driver_memory.pop(driver_code, None) is not None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                driver_id = self._fetch_id(cursor, "bus_driver", "driver_code", driver_code, self.tenant_id)
+                if driver_id is None:
+                    connection.rollback()
+                    return False
+                cursor.execute("""
+                    SELECT vehicle_code
+                    FROM bus_vehicle
+                    WHERE tenant_id=%s AND current_driver_id=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, driver_id))
+                if cursor.fetchone():
+                    connection.rollback()
+                    raise PersistenceConflict("司机仍被车辆绑定，不能删除", code="driver_bound", field="driver_code")
+                cursor.execute("""
+                    UPDATE bus_driver
+                    SET deleted=1, work_status='off_duty', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND driver_code=%s AND deleted=0
+                """, (self.tenant_id, driver_code))
+            connection.commit()
+            return True
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_vehicles(self):
+        """读取车辆档案列表。
+
+        Returns:
+            list[dict]: 当前租户下未软删除的车辆档案列表，包含运行位置和司机信息。
+        """
+        if not self.enabled or pymysql is None:
+            return sorted(
+                [copy.deepcopy(vehicle) for vehicle in self._vehicle_memory.values()],
+                key=lambda item: item.get("vehicle_code") or "",
+            )
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT v.*,
+                           d.driver_code AS current_driver_code,
+                           d.driver_no AS current_driver_no,
+                           d.driver_name AS current_driver_name,
+                           r.current_lon, r.current_lat, r.last_node_code, r.next_node_code,
+                           r.segment_route AS runtime_segment_route,
+                           r.edge_progress, r.rest_status, r.can_accept_order, r.reported_at
+                    FROM bus_vehicle v
+                    LEFT JOIN bus_driver d ON d.id=v.current_driver_id
+                    LEFT JOIN bus_vehicle_runtime r ON r.vehicle_id=v.id AND r.tenant_id=v.tenant_id AND r.deleted=0
+                    WHERE v.tenant_id=%s AND v.deleted=0
+                    ORDER BY v.updated_at DESC, v.id DESC
+                """, (self.tenant_id,))
+                return [self._vehicle_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_vehicle(self, vehicle_code):
+        """按车辆业务编码读取车辆档案。
+
+        Args:
+            vehicle_code (str): 车辆业务编码。
+
+        Returns:
+            dict | None: 车辆档案；不存在或编码为空时返回 None。
+        """
+        vehicle_code = str(vehicle_code or "").strip()
+        if not vehicle_code:
+            return None
+        if not self.enabled or pymysql is None:
+            vehicle = self._vehicle_memory.get(vehicle_code)
+            return copy.deepcopy(vehicle) if vehicle else None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT v.*,
+                           d.driver_code AS current_driver_code,
+                           d.driver_no AS current_driver_no,
+                           d.driver_name AS current_driver_name,
+                           r.current_lon, r.current_lat, r.last_node_code, r.next_node_code,
+                           r.segment_route AS runtime_segment_route,
+                           r.edge_progress, r.rest_status, r.can_accept_order, r.reported_at
+                    FROM bus_vehicle v
+                    LEFT JOIN bus_driver d ON d.id=v.current_driver_id
+                    LEFT JOIN bus_vehicle_runtime r ON r.vehicle_id=v.id AND r.tenant_id=v.tenant_id AND r.deleted=0
+                    WHERE v.tenant_id=%s AND v.vehicle_code=%s AND v.deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, vehicle_code))
+                return self._vehicle_from_row(cursor.fetchone())
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _check_vehicle_conflict(self, vehicle_code, plate_no):
+        """检查车辆编码和车牌号唯一性。
+
+        Args:
+            vehicle_code (str): 待创建车辆业务编码。
+            plate_no (str): 待创建车辆车牌号。
+
+        Returns:
+            None。
+
+        Raises:
+            PersistenceConflict: 车辆编码或车牌号已存在。
+        """
+        if not self.enabled or pymysql is None:
+            if vehicle_code in self._vehicle_memory:
+                raise PersistenceConflict("车辆编码已存在", code="vehicle_code_exists", field="vehicle_code")
+            for vehicle in self._vehicle_memory.values():
+                if vehicle.get("plate_no") == plate_no:
+                    raise PersistenceConflict("车牌号已存在", code="plate_no_exists", field="plate_no")
+            return
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT vehicle_code
+                    FROM bus_vehicle
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, vehicle_code))
+                if cursor.fetchone():
+                    raise PersistenceConflict("车辆编码已存在", code="vehicle_code_exists", field="vehicle_code")
+                cursor.execute("""
+                    SELECT vehicle_code
+                    FROM bus_vehicle
+                    WHERE tenant_id=%s AND plate_no=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, plate_no))
+                if cursor.fetchone():
+                    raise PersistenceConflict("车牌号已存在", code="plate_no_exists", field="plate_no")
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _resolve_driver_id(self, cursor, driver_code):
+        """把司机业务编码解析为数据库主键。
+
+        Args:
+            cursor: 当前同步数据库游标。
+            driver_code (str | None): 司机业务编码；为空表示解绑。
+
+        Returns:
+            int | None: 司机主键；未绑定司机时返回 None。
+
+        Raises:
+            KeyError: 指定司机不存在。
+        """
+        if driver_code in (None, ""):
+            return None
+        driver_id = self._fetch_id(cursor, "bus_driver", "driver_code", driver_code, self.tenant_id)
+        if driver_id is None:
+            raise KeyError("driver_not_found")
+        return driver_id
+
+    def _sync_vehicle_binding(self, cursor, vehicle_id, driver_id, operator=None):
+        """同步车辆司机绑定历史。
+
+        Args:
+            cursor: 当前同步数据库游标。
+            vehicle_id (int): 车辆主键。
+            driver_id (int | None): 司机主键；为空表示解绑。
+            operator (str | None): 可选操作人标识。
+
+        Returns:
+            None。
+        """
+        cursor.execute("""
+            UPDATE bus_vehicle_driver_bind
+            SET bind_status='inactive', unbind_at=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)
+            WHERE vehicle_id=%s AND bind_status='active' AND deleted=0
+        """, (vehicle_id,))
+        if driver_id is not None:
+            cursor.execute("""
+                INSERT INTO bus_vehicle_driver_bind
+                    (vehicle_id, driver_id, bind_status, bind_at, operator, tenant_id)
+                VALUES (%s, %s, 'active', CURRENT_TIMESTAMP(3), %s, %s)
+            """, (vehicle_id, driver_id, operator, self.tenant_id))
+
+    def _upsert_vehicle_runtime_sync(self, cursor, payload, vehicle_id, driver_id):
+        """同步写入车辆运行快照。
+
+        Args:
+            cursor: 当前同步数据库游标。
+            payload (dict): 车辆档案中的运行位置和状态字段。
+            vehicle_id (int): 车辆主键。
+            driver_id (int | None): 当前司机主键。
+
+        Returns:
+            None。
+        """
+        runtime_keys = {"current_lon", "current_lat", "last_node_code", "next_node_code", "edge_progress", "rest_status"}
+        if not any(payload.get(key) is not None for key in runtime_keys):
+            return
+        cursor.execute("""
+            INSERT INTO bus_vehicle_runtime
+                (vehicle_id, driver_id, current_lon, current_lat, last_node_code, next_node_code,
+                 edge_progress, on_board_count, on_board_order_ids, planned_step_count, segment_route,
+                 rest_status, can_accept_order, reported_at, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, 0, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                driver_id=VALUES(driver_id), current_lon=VALUES(current_lon), current_lat=VALUES(current_lat),
+                last_node_code=VALUES(last_node_code), next_node_code=VALUES(next_node_code),
+                edge_progress=VALUES(edge_progress), rest_status=VALUES(rest_status),
+                segment_route=COALESCE(VALUES(segment_route), segment_route),
+                can_accept_order=VALUES(can_accept_order), reported_at=VALUES(reported_at),
+                updated_at=CURRENT_TIMESTAMP(3)
+        """, (
+            vehicle_id,
+            driver_id,
+            payload.get("current_lon"),
+            payload.get("current_lat"),
+            payload.get("last_node_code"),
+            payload.get("next_node_code"),
+            payload.get("edge_progress", 0.0),
+            _json([]),
+            _json(payload.get("segment_route")) if payload.get("segment_route") is not None else None,
+            payload.get("rest_status") or "operating",
+            1 if payload.get("can_accept_order", True) else 0,
+            _to_datetime(payload.get("reported_at")) or _now_dt(),
+            self.tenant_id,
+        ))
+
+    def save_vehicle(self, vehicle, *, create=False):
+        """同步创建或更新车辆档案。
+
+        Args:
+            vehicle (dict): 已规范化的车辆档案和运行位置字段。
+            create (bool): True 表示创建，False 表示更新。
+
+        Returns:
+            dict | None: 保存后的车辆档案；更新不存在车辆时返回 None。
+
+        Raises:
+            ValueError: 车辆编码或车牌号为空。
+            PersistenceConflict: 车辆编码或车牌号违反唯一约束。
+            KeyError: 指定绑定司机不存在。
+        """
+        payload = copy.deepcopy(vehicle or {})
+        vehicle_code = str(payload.get("vehicle_code") or "").strip()
+        plate_no = str(payload.get("plate_no") or "").strip()
+        if not vehicle_code:
+            raise ValueError("vehicle_code 不能为空")
+        if not plate_no:
+            raise ValueError("plate_no 不能为空")
+        if create:
+            self._check_vehicle_conflict(vehicle_code, plate_no)
+        else:
+            existing = self.get_vehicle(vehicle_code)
+            if existing is None:
+                return None
+            if plate_no != existing.get("plate_no"):
+                for item in self.list_vehicles():
+                    if item.get("plate_no") == plate_no and item.get("vehicle_code") != vehicle_code:
+                        raise PersistenceConflict("车牌号已存在", code="plate_no_exists", field="plate_no")
+        driver_code = str(payload.get("current_driver_code") or payload.get("driver_code") or "").strip() or None
+        if driver_code and not self.get_driver(driver_code):
+            raise KeyError("driver_not_found")
+        normalized = {
+            "vehicle_code": vehicle_code,
+            "plate_no": plate_no,
+            "vehicle_type": str(payload.get("vehicle_type") or "bus").strip(),
+            "seat_count": int(payload.get("seat_count") or payload.get("max_load_count") or 0),
+            "max_load_count": int(payload.get("max_load_count") or payload.get("seat_count") or 0),
+            "vehicle_color": str(payload.get("vehicle_color") or "").strip() or None,
+            "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
+            "operation_status": str(payload.get("operation_status") or "offline").strip(),
+            "operation_mode": str(payload.get("operation_mode") or "dynamic_bus").strip(),
+            "current_driver_code": driver_code,
+            "remark": str(payload.get("remark") or "").strip() or None,
+            "tenant_id": self.tenant_id,
+            "current_lon": payload.get("current_lon"),
+            "current_lat": payload.get("current_lat"),
+            "last_node_code": payload.get("last_node_code"),
+            "next_node_code": payload.get("next_node_code"),
+            "edge_progress": payload.get("edge_progress", 0.0),
+            "rest_status": payload.get("rest_status"),
+            "can_accept_order": payload.get("can_accept_order"),
+        }
+        if not self.enabled or pymysql is None:
+            driver = self.get_driver(driver_code) if driver_code else None
+            normalized["current_driver_no"] = driver.get("driver_no") if driver else None
+            normalized["current_driver_name"] = driver.get("driver_name") if driver else None
+            self._vehicle_memory[vehicle_code] = normalized
+            self._vehicle_bind_memory.append({
+                "vehicle_code": vehicle_code,
+                "driver_code": driver_code,
+                "bind_status": "active" if driver_code else "inactive",
+            })
+            return copy.deepcopy(normalized)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                driver_id = self._resolve_driver_id(cursor, driver_code)
+                if create:
+                    cursor.execute("""
+                        INSERT INTO bus_vehicle
+                            (vehicle_code, plate_no, vehicle_type, seat_count, max_load_count,
+                             vehicle_color, vehicle_model, operation_status, operation_mode,
+                             current_driver_id, remark, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        normalized["vehicle_code"], normalized["plate_no"], normalized["vehicle_type"],
+                        normalized["seat_count"], normalized["max_load_count"], normalized["vehicle_color"],
+                        normalized["vehicle_model"], normalized["operation_status"], normalized["operation_mode"],
+                        driver_id, normalized["remark"], self.tenant_id,
+                    ))
+                    vehicle_id = cursor.lastrowid
+                else:
+                    vehicle_id = self._fetch_id(cursor, "bus_vehicle", "vehicle_code", vehicle_code, self.tenant_id)
+                    cursor.execute("""
+                        UPDATE bus_vehicle
+                        SET plate_no=%s, vehicle_type=%s, seat_count=%s, max_load_count=%s,
+                            vehicle_color=%s, vehicle_model=%s, operation_status=%s,
+                            operation_mode=%s, current_driver_id=%s, remark=%s,
+                            updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                    """, (
+                        normalized["plate_no"], normalized["vehicle_type"], normalized["seat_count"],
+                        normalized["max_load_count"], normalized["vehicle_color"], normalized["vehicle_model"],
+                        normalized["operation_status"], normalized["operation_mode"], driver_id,
+                        normalized["remark"], self.tenant_id, vehicle_code,
+                    ))
+                self._sync_vehicle_binding(cursor, vehicle_id, driver_id, payload.get("operator"))
+                self._upsert_vehicle_runtime_sync(cursor, normalized, vehicle_id, driver_id)
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_vehicle(vehicle_code)
+
+    def update_vehicle_status(self, vehicle_code, operation_status, runtime_payload=None):
+        """更新车辆运营状态并按需写入运行位置。
+
+        Args:
+            vehicle_code (str): 车辆业务编码。
+            operation_status (str): 目标运营状态。
+            runtime_payload (dict | None): 可选运行位置和休息状态字段。
+
+        Returns:
+            dict | None: 更新后的车辆档案；车辆不存在时返回 None。
+        """
+        vehicle = self.get_vehicle(vehicle_code)
+        if vehicle is None:
+            return None
+        payload = copy.deepcopy(vehicle)
+        payload.update(runtime_payload or {})
+        payload["operation_status"] = operation_status
+        return self.save_vehicle(payload, create=False)
+
+    def bind_vehicle_driver(self, vehicle_code, driver_code, operator=None):
+        """给车辆绑定或解绑司机。
+
+        Args:
+            vehicle_code (str): 车辆业务编码。
+            driver_code (str | None): 司机业务编码；为空表示解绑。
+            operator (str | None): 可选操作人标识。
+
+        Returns:
+            dict | None: 更新后的车辆档案；车辆不存在时返回 None。
+
+        Raises:
+            KeyError: 指定司机不存在。
+        """
+        vehicle = self.get_vehicle(vehicle_code)
+        if vehicle is None:
+            return None
+        if driver_code not in (None, "") and self.get_driver(driver_code) is None:
+            raise KeyError("driver_not_found")
+        vehicle["current_driver_code"] = str(driver_code or "").strip() or None
+        vehicle["operator"] = operator
+        return self.save_vehicle(vehicle, create=False)
+
+    def delete_vehicle(self, vehicle_code):
+        """软删除车辆档案。
+
+        Args:
+            vehicle_code (str): 车辆业务编码。
+
+        Returns:
+            bool: 成功删除返回 True；车辆不存在或编码为空返回 False。
+        """
+        vehicle_code = str(vehicle_code or "").strip()
+        if not vehicle_code:
+            return False
+        if not self.enabled or pymysql is None:
+            return self._vehicle_memory.pop(vehicle_code, None) is not None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                vehicle_id = self._fetch_id(cursor, "bus_vehicle", "vehicle_code", vehicle_code, self.tenant_id)
+                if vehicle_id is None:
+                    connection.rollback()
+                    return False
+                cursor.execute("""
+                    UPDATE bus_vehicle_driver_bind
+                    SET bind_status='inactive', unbind_at=CURRENT_TIMESTAMP(3), updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE vehicle_id=%s AND bind_status='active' AND deleted=0
+                """, (vehicle_id,))
+                cursor.execute("""
+                    UPDATE bus_vehicle_runtime
+                    SET deleted=1, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND vehicle_id=%s AND deleted=0
+                """, (self.tenant_id, vehicle_id))
+                cursor.execute("""
+                    UPDATE bus_vehicle
+                    SET deleted=1, operation_status='offline', current_driver_id=NULL,
+                        updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                """, (self.tenant_id, vehicle_code))
+            connection.commit()
+            return True
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
     def start(self):
         """按需启动后台写库线程。
 
@@ -1147,12 +1894,12 @@ class MySqlPersistence:
         self._execute(cursor, """
             INSERT INTO bus_vehicle
                 (vehicle_code, plate_no, vehicle_type, seat_count, max_load_count, vehicle_color,
-                 operation_status, operation_mode, current_driver_id, segment_route, tenant_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 operation_status, operation_mode, current_driver_id, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 plate_no=VALUES(plate_no), seat_count=VALUES(seat_count), max_load_count=VALUES(max_load_count),
                 vehicle_color=VALUES(vehicle_color), operation_status=VALUES(operation_status),
-                current_driver_id=VALUES(current_driver_id), segment_route=VALUES(segment_route),
+                current_driver_id=VALUES(current_driver_id),
                 updated_at=CURRENT_TIMESTAMP(3)
         """, (
             payload["vehicle_code"],
@@ -1164,7 +1911,6 @@ class MySqlPersistence:
             payload.get("operation_status") or "idle",
             payload.get("operation_mode") or "dynamic_bus",
             driver_id,
-            _json(payload.get("segment_route")),
             tenant_id,
         ))
 
@@ -1407,15 +2153,16 @@ class MySqlPersistence:
             INSERT INTO bus_vehicle_runtime
                 (vehicle_id, driver_id, current_lon, current_lat, speed_kmh, heading, last_node_code,
                  next_node_code, edge_progress, on_board_count, on_board_order_ids, planned_step_count,
-                 rest_status, can_accept_order, route_version, route_grasp_status, route_grasp_error,
+                 segment_route, rest_status, can_accept_order, route_version, route_grasp_status, route_grasp_error,
                  idle_target_poi_id, idle_target_lon, idle_target_lat, idle_target_eta_seconds,
                  idle_target_eta_time, idle_target_eta_status, reported_at, tenant_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 driver_id=VALUES(driver_id), current_lon=VALUES(current_lon), current_lat=VALUES(current_lat),
                 last_node_code=VALUES(last_node_code), next_node_code=VALUES(next_node_code),
                 edge_progress=VALUES(edge_progress), on_board_count=VALUES(on_board_count),
                 on_board_order_ids=VALUES(on_board_order_ids), planned_step_count=VALUES(planned_step_count),
+                segment_route=VALUES(segment_route),
                 rest_status=VALUES(rest_status), can_accept_order=VALUES(can_accept_order),
                 route_version=VALUES(route_version), route_grasp_status=VALUES(route_grasp_status),
                 route_grasp_error=VALUES(route_grasp_error), idle_target_poi_id=VALUES(idle_target_poi_id),
@@ -1437,6 +2184,7 @@ class MySqlPersistence:
             payload.get("on_board_count") or 0,
             _json(payload.get("on_board_order_ids")),
             payload.get("planned_step_count") or 0,
+            _json(payload.get("segment_route")),
             payload.get("rest_status") or "operating",
             1 if payload.get("can_accept_order", True) else 0,
             payload.get("route_version"),
@@ -1630,6 +2378,126 @@ def set_active_operation_restriction_policy(policy_code):
     return _manager.set_active_operation_restriction_policy(policy_code)
 
 
+def list_drivers():
+    """读取司机档案列表。
+
+    Returns:
+        list[dict]: 当前租户下未软删除的司机档案列表。
+    """
+    return _manager.list_drivers()
+
+
+def get_driver(driver_code):
+    """按业务编码读取司机档案。
+
+    Args:
+        driver_code (str): 司机业务编码。
+
+    Returns:
+        dict | None: 司机档案；不存在时返回 None。
+    """
+    return _manager.get_driver(driver_code)
+
+
+def save_driver(driver, *, create=False):
+    """创建或更新司机档案。
+
+    Args:
+        driver (dict): 司机档案字段。
+        create (bool): True 表示创建，False 表示更新。
+
+    Returns:
+        dict | None: 保存后的司机档案；更新不存在司机时返回 None。
+    """
+    return _manager.save_driver(driver, create=create)
+
+
+def delete_driver(driver_code):
+    """软删除司机档案。
+
+    Args:
+        driver_code (str): 司机业务编码。
+
+    Returns:
+        bool: 成功删除返回 True；不存在时返回 False。
+    """
+    return _manager.delete_driver(driver_code)
+
+
+def list_vehicles():
+    """读取车辆档案列表。
+
+    Returns:
+        list[dict]: 当前租户下未软删除的车辆档案列表。
+    """
+    return _manager.list_vehicles()
+
+
+def get_vehicle(vehicle_code):
+    """按业务编码读取车辆档案。
+
+    Args:
+        vehicle_code (str): 车辆业务编码。
+
+    Returns:
+        dict | None: 车辆档案；不存在时返回 None。
+    """
+    return _manager.get_vehicle(vehicle_code)
+
+
+def save_vehicle(vehicle, *, create=False):
+    """创建或更新车辆档案。
+
+    Args:
+        vehicle (dict): 车辆档案和运行位置字段。
+        create (bool): True 表示创建，False 表示更新。
+
+    Returns:
+        dict | None: 保存后的车辆档案；更新不存在车辆时返回 None。
+    """
+    return _manager.save_vehicle(vehicle, create=create)
+
+
+def update_vehicle_status(vehicle_code, operation_status, runtime_payload=None):
+    """更新车辆运营状态。
+
+    Args:
+        vehicle_code (str): 车辆业务编码。
+        operation_status (str): 目标运营状态。
+        runtime_payload (dict | None): 可选运行位置和状态字段。
+
+    Returns:
+        dict | None: 更新后的车辆档案；车辆不存在时返回 None。
+    """
+    return _manager.update_vehicle_status(vehicle_code, operation_status, runtime_payload=runtime_payload)
+
+
+def bind_vehicle_driver(vehicle_code, driver_code, operator=None):
+    """绑定或解绑车辆司机。
+
+    Args:
+        vehicle_code (str): 车辆业务编码。
+        driver_code (str | None): 司机业务编码；为空表示解绑。
+        operator (str | None): 可选操作人标识。
+
+    Returns:
+        dict | None: 更新后的车辆档案；车辆不存在时返回 None。
+    """
+    return _manager.bind_vehicle_driver(vehicle_code, driver_code, operator=operator)
+
+
+def delete_vehicle(vehicle_code):
+    """软删除车辆档案。
+
+    Args:
+        vehicle_code (str): 车辆业务编码。
+
+    Returns:
+        bool: 成功删除返回 True；不存在时返回 False。
+    """
+    return _manager.delete_vehicle(vehicle_code)
+
+
 def start():
     """启动模块级后台写库线程。"""
     return _manager.start()
@@ -1670,24 +2538,25 @@ def record_initial_state(city_map, fleet):
         fleet (list[Vehicle]): 当前车辆列表。
     """
     enqueue("tenant", {"tenant_name": os.getenv("BUS_DB_TENANT_NAME") or _manager.tenant_id})
-    for node in getattr(city_map, "nodes_map", {}).values():
-        enqueue("road_node", {
-            "node_code": node.id,
-            "node_name": getattr(node, "name", None),
-            "longitude": getattr(node, "lon", None),
-            "latitude": getattr(node, "lat", None),
-            "zone": getattr(node, "zone", None),
-            "is_poi": bool(getattr(node, "is_poi", False)),
-        })
-    for poi in getattr(city_map, "pois", []) or []:
-        enqueue("poi", {
-            "poi_code": poi.id,
-            "poi_name": getattr(poi, "name", None) or poi.id,
-            "longitude": getattr(poi, "lon", None),
-            "latitude": getattr(poi, "lat", None),
-            "zone": getattr(poi, "zone", None),
-            "node_code": poi.id,
-        })
+    # 临时跳过静态路网节点与 POI 入队写库；当前数据库已预置 map_road_node/map_poi。
+    # for node in getattr(city_map, "nodes_map", {}).values():
+    #     enqueue("road_node", {
+    #         "node_code": node.id,
+    #         "node_name": getattr(node, "name", None),
+    #         "longitude": getattr(node, "lon", None),
+    #         "latitude": getattr(node, "lat", None),
+    #         "zone": getattr(node, "zone", None),
+    #         "is_poi": bool(getattr(node, "is_poi", False)),
+    #     })
+    # for poi in getattr(city_map, "pois", []) or []:
+    #     enqueue("poi", {
+    #         "poi_code": poi.id,
+    #         "poi_name": getattr(poi, "name", None) or poi.id,
+    #         "longitude": getattr(poi, "lon", None),
+    #         "latitude": getattr(poi, "lat", None),
+    #         "zone": getattr(poi, "zone", None),
+    #         "node_code": poi.id,
+    #     })
     for vehicle in fleet or []:
         record_driver(vehicle)
         record_vehicle(vehicle)
@@ -1723,7 +2592,6 @@ def record_vehicle(vehicle):
         "vehicle_color": getattr(vehicle, "color", None),
         "operation_status": _operation_status(vehicle),
         "driver_code": _driver_code(vehicle),
-        "segment_route": getattr(vehicle, "planned_route_segment_grasped_point", None),
     })
 
 
@@ -1747,6 +2615,7 @@ def record_vehicle_runtime(vehicle, report_time=None):
         "on_board_count": sum(getattr(o, "passenger_count", 0) for o in getattr(vehicle, "on_board_orders", []) or []),
         "on_board_order_ids": [str(getattr(o, "request_id", "")) for o in getattr(vehicle, "on_board_orders", []) or []],
         "planned_step_count": len(getattr(vehicle, "planned_route", []) or []),
+        "segment_route": getattr(vehicle, "planned_route_segment_grasped_point", None),
         "rest_status": getattr(vehicle, "rest_status", "operating"),
         "can_accept_order": (
             not getattr(vehicle, "is_rest_requested", False)

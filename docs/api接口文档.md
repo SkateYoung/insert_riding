@@ -1146,17 +1146,125 @@ $env:AMAP_API_KEY="你的高德Web服务Key"
 
 策略切换只影响后续新路线计算，不会主动重算已有车辆路线。
 
-### `POST /operation-restrictions/route-test`
+## 司机车辆管理
 
-在选定策略下执行本地 A* 与可选高德驾车路线测试：
+该组接口用于前端动态维护司机档案、车辆档案、车辆状态和车辆司机绑定。删除均为软删除。
+
+### `GET /admin/driver-vehicle/options`
+
+返回司机车辆管理表单所需枚举，以及当前司机和车辆列表：
 
 ```json
 {
-  "origin": {"lon": 113.4001, "lat": 23.0501},
-  "destination": {"lon": 113.4101, "lat": 23.0551},
-  "policy_code": "campus-block",
-  "include_amap": true
+  "driver_employment_statuses": ["active", "inactive", "blocked"],
+  "driver_work_statuses": ["off_duty", "listening", "serving", "resting"],
+  "vehicle_operation_statuses": ["operating", "resting", "closing", "offline", "maintenance"],
+  "vehicle_types": ["bus", "large_bus", "mid_bus", "small_bus"],
+  "drivers": [],
+  "vehicles": []
 }
 ```
 
-也可以使用 `origin_node_id` 和 `destination_node_id` 直接指定路网节点。
+### `GET /admin/drivers`
+
+查询未软删除的司机档案列表。
+
+### `POST /admin/drivers`
+
+创建司机档案。`driver_code` 为路径身份字段，创建后不可修改；`driver_no` 按数据库唯一约束检测，冲突返回 `409`。
+
+```json
+{
+  "driver_code": "driver-001",
+  "driver_no": "D001",
+  "driver_name": "张三",
+  "phone": "13800000000",
+  "id_card_no": "",
+  "license_no": "",
+  "license_class": "A1",
+  "license_expire_date": "2028-12-31",
+  "service_city": "广州",
+  "employment_status": "active",
+  "work_status": "off_duty",
+  "remark": ""
+}
+```
+
+### `GET /admin/drivers/<driver_code>`
+
+查询单个司机档案。
+
+### `PUT /admin/drivers/<driver_code>`
+
+更新司机档案。`driver_code` 以路径为准，请求体中的 `driver_code` 会被忽略。
+
+### `DELETE /admin/drivers/<driver_code>`
+
+软删除司机档案；如果司机仍被车辆绑定，返回 `409`。
+
+### `GET /admin/vehicles`
+
+查询未软删除的车辆档案列表。
+
+### `POST /admin/vehicles`
+
+创建车辆档案。`vehicle_code` 为路径身份字段，创建后不可修改；`plate_no` 按数据库唯一约束检测，冲突返回 `409`。
+
+```json
+{
+  "vehicle_code": "bus-001",
+  "plate_no": "粤A00001",
+  "vehicle_type": "bus",
+  "seat_count": 10,
+  "max_load_count": 10,
+  "vehicle_color": "#64748b",
+  "vehicle_model": "EV-BUS",
+  "operation_status": "operating",
+  "operation_mode": "dynamic_bus",
+  "current_driver_code": "driver-001",
+  "initial_position": {"lon": 113.4001, "lat": 23.0501},
+  "remark": ""
+}
+```
+
+新增或激活为 `operating`、`resting`、`closing` 时必须提供 `initial_position`，或车辆已有运行位置。后端会吸附到最近路网节点，并返回 `snap.node` 和 `snap.snap_distance_m`。
+
+### `GET /admin/vehicles/<vehicle_code>`
+
+查询单个车辆档案。
+
+### `PUT /admin/vehicles/<vehicle_code>`
+
+更新车辆档案并同步运行态车队。
+
+### `DELETE /admin/vehicles/<vehicle_code>`
+
+软删除车辆档案；如果车辆仍有 `on_board_orders` 或 `planned_route`，返回 `409`。
+
+### `POST /admin/vehicles/<vehicle_code>/status`
+
+更新车辆运营状态：
+
+```json
+{
+  "operation_status": "offline"
+}
+```
+
+状态规则：
+- `operating`：加入或更新运行车队，可参与派单。
+- `resting`：保留展示，但不接新单。
+- `closing`：停止接新单，允许完成已有任务。
+- `offline` / `maintenance`：无任务时从运行车队移除；有未完成任务时返回 `409`。
+
+### `POST /admin/vehicles/<vehicle_code>/bind-driver`
+
+绑定或解绑车辆司机：
+
+```json
+{"driver_code": "driver-001"}
+```
+
+```json
+{"driver_code": null}
+```

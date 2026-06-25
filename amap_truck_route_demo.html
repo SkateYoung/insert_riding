@@ -708,12 +708,16 @@
             vehicleSelect.innerHTML = "";
 
             for (const vehicle of fleet) {
-                fleetById.set(vehicle.id, vehicle);
+                const vehicleId = vehicle.vehicle_id;
+                if (!vehicleId) {
+                    continue;
+                }
+                fleetById.set(vehicleId, vehicle);
                 const option = document.createElement("option");
                 const gps = vehicle.gps || {};
                 const hasGps = Number.isFinite(Number(gps.lon)) && Number.isFinite(Number(gps.lat));
-                option.value = vehicle.id;
-                option.textContent = `${vehicle.id}${hasGps ? "" : "（无 GPS）"}`;
+                option.value = vehicleId;
+                option.textContent = `${vehicleId}${hasGps ? "" : "（无 GPS）"}`;
                 vehicleSelect.appendChild(option);
             }
         }
@@ -772,9 +776,10 @@
         async function requestBackendPath() {
             const apiBase = getApiBase();
             const { vehicle, lon, lat } = getSelectedVehicle();
+            const vehicleId = vehicle.vehicle_id;
 
-            setStatus(`正在请求车辆 ${vehicle.id} 的后端算法路线...`);
-            const response = await fetch(`${apiBase}/fleet/${encodeURIComponent(vehicle.id)}/path`, {
+            setStatus(`正在请求车辆 ${vehicleId} 的后端算法路线...`);
+            const response = await fetch(`${apiBase}/fleet/${encodeURIComponent(vehicleId)}/path`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ lon, lat })
@@ -821,7 +826,7 @@
                 const fallbackReasons = [];
                 for (let i = 0; i < groups.length; i += 1) {
                     setStatus([
-                        `车辆 ${vehicle.id} 后端路线已获取`,
+                        `车辆 ${vehicleId} 后端路线已获取`,
                         `后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`,
                         `后端轨迹点：${rawPoints.length}`,
                         `高德控制点：${controlPoints.length}`,
@@ -842,7 +847,7 @@
                 const truckSegmentCount = segmentResults.filter(segment => segment.mode === "truck").length;
                 const fallbackSegmentCount = segmentResults.length - truckSegmentCount;
                 setStatus([
-                    `车辆 ${vehicle.id} 货车路线重构完成`,
+                    `车辆 ${vehicleId} 货车路线重构完成`,
                     `后端 GPS：${lon.toFixed(6)}, ${lat.toFixed(6)}`,
                     `后端轨迹点：${rawPoints.length}`,
                     `高德控制点：${controlPoints.length}`,

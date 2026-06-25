@@ -472,6 +472,28 @@ class EtaBackgroundTest(unittest.TestCase):
             ["O", "D"],
         )
 
+    def test_route_versions_use_short_hashes(self):
+        orders = [
+            make_order(self.city, request_id=f"order-{index:02d}-very-long-request-id-for-route-version")
+            for index in range(20)
+        ]
+        self.vehicle.planned_route = [
+            {"type": step_type, "order": order}
+            for order in orders
+            for step_type in ("O", "D")
+        ]
+
+        grasp_version = CoreDispatcher._vehicle_grasp_route_version(self.vehicle)
+        eta_version = CoreDispatcher._vehicle_eta_route_version(self.vehicle)
+        persistence_version = persistence._route_version(self.vehicle)
+
+        self.assertTrue(grasp_version.startswith("grasp:v1:"))
+        self.assertTrue(eta_version.startswith("eta:v1:"))
+        self.assertTrue(persistence_version.startswith("route:v1:"))
+        self.assertLessEqual(len(grasp_version), 128)
+        self.assertLessEqual(len(eta_version), 128)
+        self.assertLessEqual(len(persistence_version), 128)
+
     def test_amap_grasp_payload_matches_frontend_time_shape(self):
         client = AmapEtaCorrectClient(api_key="test-key")
         payload = client._build_grasp_payload(
@@ -805,11 +827,17 @@ class EtaBackgroundTest(unittest.TestCase):
             ],
         }
 
-        CoreDispatcher._trim_vehicle_grasped_route_from_result(
-            self.vehicle,
-            result,
-            start_point=current,
-        )
+        runtime_records = []
+        original_record_runtime = persistence.record_vehicle_runtime
+        persistence.record_vehicle_runtime = lambda vehicle_obj, report_time=None: runtime_records.append(vehicle_obj)
+        try:
+            CoreDispatcher._trim_vehicle_grasped_route_from_result(
+                self.vehicle,
+                result,
+                start_point=current,
+            )
+        finally:
+            persistence.record_vehicle_runtime = original_record_runtime
 
         self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
         self.assertEqual(self.vehicle.planned_route_grasped_point[0]["id"], "cur")
@@ -817,6 +845,7 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertTrue(self.vehicle.planned_route_grasped_point[0]["is_grasp_projection"])
         self.assertLess(len(self.vehicle.planned_route_grasped_point), 4)
         self.assertIn("trimmed", self.vehicle.planned_route_segment_grasped_point[0]["source"])
+        self.assertEqual(runtime_records, [self.vehicle])
 
     def test_pending_grasp_route_does_not_build_eta_job(self):
         order = make_order(self.city)

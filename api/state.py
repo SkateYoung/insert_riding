@@ -6,6 +6,7 @@
 
 import threading
 import time
+import random
 from datetime import datetime, timedelta, timezone
 
 from . import persistence
@@ -31,6 +32,7 @@ BUSINESS_TIMEZONE = timezone(timedelta(hours=8), TIMEZONE_NAME)
 TIME_MODE = "real_time"
 CLOCK_INTERVAL_SECONDS = 1.0
 ETA_REFRESH_INTERVAL_SECONDS = CoreDispatcher.ETA_REFRESH_INTERVAL_SECONDS
+runtime_random = random.SystemRandom()
 clock_last_timestamp = None
 clock_last_dt = 0.0
 clock_tick_count = 0
@@ -223,10 +225,127 @@ def start_route_grasp_thread():
 
 
 def load_active_operation_restriction_policy():
-    """从持久化层加载当前生效的运营禁区策略。"""
+    """从持久化层加载当前生效的运营禁区策略。
+
+    Returns:
+        dict | None: 当前生效策略；未配置或读取失败时返回 None。
+    """
     policy = persistence.get_active_operation_restriction_policy()
     CoreDispatcher.set_operation_restriction_policy(policy)
     return policy
+
+
+def _nearest_node_from_coords(city_map, lon, lat):
+    """按经纬度查找最近路网节点。
+
+    Args:
+        city_map (CityGraph): 当前路网对象。
+        lon (float): 经度。
+        lat (float): 纬度。
+
+    Returns:
+        Node | None: 最近的路网节点；路网为空时返回 None。
+    """
+    best_node = None
+    best_dist = float("inf")
+    for node in city_map.nodes_map.values():
+        dx = float(lon) - float(node.lon)
+        dy = float(lat) - float(node.lat)
+        dist = dx * dx + dy * dy
+        if dist < best_dist:
+            best_dist = dist
+            best_node = node
+    return best_node
+
+
+def _random_poi_node(city_map):
+    """从当前路网 POI 中随机选择一个车辆起始节点。"""
+    pois = list(getattr(city_map, "pois", []) or [])
+    if not pois:
+        return None
+    return runtime_random.choice(pois)
+
+
+def _vehicle_from_db_record(record, city_map, current_timestamp):
+    """把数据库车辆档案转换成运行期 Vehicle 对象。
+
+    Args:
+        record (dict): 持久化层读取的车辆档案与运行位置字段。
+        city_map (CityGraph): 当前路网对象。
+        current_timestamp (float): 初始化时统一使用的仿真时间戳。
+
+    Returns:
+        Vehicle | None: 可进入运行车队的车辆对象；离线、维修或缺少位置时返回 None。
+    """
+    operation_status = record.get("operation_status") or "offline"
+    if operation_status not in {"operating", "resting", "closing", "idle", "serving"}:
+        return None
+    node = None
+    # node = city_map.nodes_map.get(record.get("next_node_code") or record.get("last_node_code"))
+    # if node is None and record.get("current_lon") is not None and record.get("current_lat") is not None:
+    #     node = _nearest_node_from_coords(city_map, record["current_lon"], record["current_lat"])
+    if node is None:
+        node = _random_poi_node(city_map)
+    if node is None:
+        return None
+    vehicle_code = record.get("vehicle_code")
+    capacity = record.get("max_load_count") or record.get("seat_count") or 10
+    vehicle = Vehicle(
+        vehicle_code,
+        node.id,
+        record.get("vehicle_color") or "#64748b",
+        getattr(node, "zone", None),
+        capacity=capacity,
+    )
+    vehicle.time = current_timestamp
+    vehicle.vehicle_id = vehicle_code
+    vehicle.plate_no = record.get("plate_no") or vehicle_code
+    vehicle.driver_id = record.get("current_driver_code") or ""
+    vehicle.driver_no = record.get("current_driver_no") or ""
+    # vehicle.gps = {
+    #     "lon": record.get("current_lon") if record.get("current_lon") is not None else node.lon,
+    #     "lat": record.get("current_lat") if record.get("current_lat") is not None else node.lat,
+    # }
+    vehicle.gps = {
+        "lon": node.lon,
+        "lat": node.lat,
+    }
+    vehicle.operation_status = operation_status
+    if operation_status == "operating":
+        vehicle.rest_status = "operating"
+        vehicle.is_resting = False
+        vehicle.is_rest_requested = False
+    elif operation_status == "resting":
+        vehicle.rest_status = "resting"
+        vehicle.is_resting = True
+        vehicle.is_rest_requested = True
+    elif operation_status == "closing":
+        vehicle.rest_status = "closing"
+        vehicle.is_resting = False
+        vehicle.is_rest_requested = True
+    return vehicle
+
+
+def load_fleet_from_persistence(city_map, current_timestamp):
+    """从数据库车辆档案加载运行车队。
+
+    Args:
+        city_map (CityGraph): 当前路网对象。
+        current_timestamp (float): 初始化时统一使用的仿真时间戳。
+
+    Returns:
+        list[Vehicle]: 可运行车辆列表；读取失败或没有可用车辆时返回空列表。
+    """
+    loaded = []
+    try:
+        for record in persistence.list_vehicles():
+            vehicle = _vehicle_from_db_record(record, city_map, current_timestamp)
+            if vehicle is not None:
+                loaded.append(vehicle)
+    except Exception as exc:
+        print(f"[State.Init] 数据库车辆加载失败，当前车队置为空：{exc}")
+        return []
+    return loaded
 
 
 # ============================================================
@@ -235,7 +354,7 @@ def load_active_operation_restriction_policy():
 # ============================================================
 
 def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
-    """加载路网、创建车队并启动后台匹配引擎。
+    """加载路网、从数据库读取车队并启动后台匹配引擎。
 
     Args:
         shp_path (str): 路网 SHP 文件路径。
@@ -253,24 +372,8 @@ def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
         city = CityGraph(shp_path)
         load_active_operation_restriction_policy()
 
-        # 测试车队固定从三个 POI 出发，便于前端和接口测试复现路径。
-        fleet = [
-            Vehicle("巴士-绿色01", city.pois[0].id, "#10b981", zone=city.pois[0].zone),
-            Vehicle("巴士-蓝色02", city.pois[12].id, "#3b82f6", zone=city.pois[12].zone),
-            Vehicle("巴士-橙色03", city.pois[24].id, "#f59e0b", zone=city.pois[24].zone),
-        ]
         current_timestamp = now_timestamp()
-        for vehicle in fleet:
-            vehicle.time = current_timestamp
-
-        fleet[0].driver_id, fleet[0].driver_no = "700045866645051565", "6800A145"
-        fleet[0].vehicle_id, fleet[0].plate_no = "72057594546143661", "粤A00001"
-
-        fleet[1].driver_id, fleet[1].driver_no = "700045866645052222", "6800B222"
-        fleet[1].vehicle_id, fleet[1].plate_no = "72057594546144444", "粤A00002"
-
-        fleet[2].driver_id, fleet[2].driver_no = "700045866645053333", "6800C333"
-        fleet[2].vehicle_id, fleet[2].plate_no = "72057594546145555", "粤A00003"
+        fleet = load_fleet_from_persistence(city, current_timestamp)
 
         CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
 

@@ -93,6 +93,21 @@
             margin: 8px 0;
         }
 
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin: 8px 0 12px;
+        }
+
+        .tool-block {
+            margin: 12px 0;
+            padding: 10px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, 0.54);
+        }
+
         button {
             border: 0;
             padding: 9px 10px;
@@ -124,6 +139,64 @@
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 8px;
+        }
+
+        .tabs {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin: 8px 0 12px;
+        }
+
+        .tab-button {
+            padding: 8px 6px;
+            background: #1f2937;
+            color: #cbd5e1;
+            border: 1px solid #334155;
+        }
+
+        .tab-button.active {
+            background: #2563eb;
+            color: #fff;
+            border-color: #60a5fa;
+        }
+
+        .tab-panel {
+            display: none;
+        }
+
+        .tab-panel.active {
+            display: block;
+        }
+
+        .mini-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 8px 0 12px;
+            font-size: 12px;
+        }
+
+        .mini-table th,
+        .mini-table td {
+            border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+            padding: 6px 4px;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .mini-table button {
+            padding: 5px 6px;
+            font-size: 12px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .hidden {
+            display: none;
         }
 
         .legend {
@@ -160,6 +233,47 @@
             line-height: 1.55;
             color: #d1d5db;
         }
+
+        .map-marker {
+            min-width: 24px;
+            height: 24px;
+            padding: 0 6px;
+            border-radius: 999px;
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+            line-height: 24px;
+            text-align: center;
+            border: 2px solid #fff;
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.34);
+            transform: translate(
+                calc(-50% + var(--marker-dx, 0px)),
+                calc(-50% + var(--marker-dy, 0px))
+            );
+            white-space: nowrap;
+        }
+
+        .map-marker.vehicle {
+            min-width: 22px;
+            width: 22px;
+            height: 22px;
+            padding: 0;
+            line-height: 22px;
+            background: #2563eb;
+            font-size: 11px;
+        }
+
+        .map-marker.stop-o {
+            background: #16a34a;
+        }
+
+        .map-marker.stop-d {
+            background: #dc2626;
+        }
+
+        .map-marker.stop-other {
+            background: #64748b;
+        }
     </style>
     <script>
         window._AMapSecurityConfig = {
@@ -175,6 +289,13 @@
     <section class="panel">
         <h1>高德纠偏路线展示</h1>
 
+        <div class="tabs">
+            <button class="tab-button active" type="button" data-tab="routeTab">路线展示</button>
+            <button class="tab-button" type="button" data-tab="restrictionTab">运营禁区</button>
+            <button class="tab-button" type="button" data-tab="adminTab">司机车辆</button>
+        </div>
+
+        <div id="routeTab" class="tab-panel active">
         <div class="field">
             <label for="apiBaseInput">后端地址</label>
             <input id="apiBaseInput" value="http://127.0.0.1:5000">
@@ -192,13 +313,24 @@
             <button id="clearBtn" type="button" class="secondary">清空地图</button>
         </div>
 
+        <div class="tool-block">
+            <div class="section-title">模拟随机订单</div>
+            <div class="quick-actions">
+                <button id="randomOrder1Btn" type="button">发起 1 单</button>
+                <button id="randomOrder10Btn" type="button">发起 10 单</button>
+                <button id="randomOrder50Btn" type="button">发起 50 单</button>
+            </div>
+        </div>
+
         <div class="legend">
             <span style="--line-color:#2563eb;">后端原始 A* 路线</span>
             <span style="--line-color:#a855f7;">后端高德纠偏路线</span>
             <span style="--line-color:#f97316;">纠偏分段路线</span>
             <span style="--line-color:#ef4444;">运营禁区</span>
         </div>
+        </div>
 
+        <div id="restrictionTab" class="tab-panel">
         <div class="divider"></div>
         <div class="section-title">运营禁区策略</div>
 
@@ -238,6 +370,301 @@
         </div>
 
         <div class="hint">选择已有策略后可继续绘制并闭合新禁区，保存后会追加到该策略；新增策略会先清空当前表单。画禁区时请按边界顺时针或逆时针依次点击，避免对角线交叉。</div>
+        </div>
+
+        <div id="adminTab" class="tab-panel">
+            <div class="divider"></div>
+            <div class="section-title">司机车辆管理</div>
+
+            <div class="compact-actions">
+                <button id="reloadAdminBtn" type="button">刷新司机车辆</button>
+                <button id="resetAdminFormsBtn" type="button" class="secondary">清空表单</button>
+            </div>
+
+            <div class="divider"></div>
+            <div class="section-title">新增司机</div>
+            <div class="compact-actions">
+                <button id="newDriverBtn" type="button">新添司机</button>
+            </div>
+            <div id="newDriverFormSection" class="hidden">
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="newDriverCodeInput">司机编码</label>
+                        <input id="newDriverCodeInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverNoInput">司机工号</label>
+                        <input id="newDriverNoInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverNameInput">司机姓名</label>
+                        <input id="newDriverNameInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverPhoneInput">手机号</label>
+                        <input id="newDriverPhoneInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverIdCardInput">身份证号</label>
+                        <input id="newDriverIdCardInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverLicenseNoInput">驾驶证号</label>
+                        <input id="newDriverLicenseNoInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverLicenseClassInput">准驾车型</label>
+                        <input id="newDriverLicenseClassInput">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverLicenseExpireInput">驾驶证到期日</label>
+                        <input id="newDriverLicenseExpireInput" type="date">
+                    </div>
+                    <div class="field">
+                        <label for="newDriverWorkStatusSelect">工作状态</label>
+                        <select id="newDriverWorkStatusSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="newDriverEmploymentStatusSelect">雇佣状态</label>
+                        <select id="newDriverEmploymentStatusSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="newDriverServiceCityInput">服务城市</label>
+                        <input id="newDriverServiceCityInput">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="newDriverRemarkInput">司机备注</label>
+                    <textarea id="newDriverRemarkInput"></textarea>
+                </div>
+                <div class="compact-actions">
+                    <button id="createDriverBtn" type="button">保存新增司机</button>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+            <div class="section-title">修改司机信息</div>
+            <div class="field">
+                <label for="editDriverSelect">选择已有司机</label>
+                <select id="editDriverSelect"></select>
+            </div>
+            <div class="section-title">司机列表</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>编码</th>
+                        <th>姓名/工号</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="driverTableBody"></tbody>
+            </table>
+
+            <div class="section-title">司机修改表单</div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="driverCodeInput">司机编码</label>
+                    <input id="driverCodeInput" readonly>
+                </div>
+                <div class="field">
+                    <label for="driverNoInput">司机工号</label>
+                    <input id="driverNoInput">
+                </div>
+                <div class="field">
+                    <label for="driverNameInput">司机姓名</label>
+                    <input id="driverNameInput">
+                </div>
+                <div class="field">
+                    <label for="driverPhoneInput">手机号</label>
+                    <input id="driverPhoneInput">
+                </div>
+                <div class="field">
+                    <label for="driverIdCardInput">身份证号</label>
+                    <input id="driverIdCardInput">
+                </div>
+                <div class="field">
+                    <label for="driverLicenseNoInput">驾驶证号</label>
+                    <input id="driverLicenseNoInput">
+                </div>
+                <div class="field">
+                    <label for="driverLicenseClassInput">准驾车型</label>
+                    <input id="driverLicenseClassInput">
+                </div>
+                <div class="field">
+                    <label for="driverLicenseExpireInput">驾驶证到期日</label>
+                    <input id="driverLicenseExpireInput" type="date">
+                </div>
+                <div class="field">
+                    <label for="driverWorkStatusSelect">工作状态</label>
+                    <select id="driverWorkStatusSelect"></select>
+                </div>
+                <div class="field">
+                    <label for="driverEmploymentStatusSelect">雇佣状态</label>
+                    <select id="driverEmploymentStatusSelect"></select>
+                </div>
+                <div class="field">
+                    <label for="driverServiceCityInput">服务城市</label>
+                    <input id="driverServiceCityInput">
+                </div>
+            </div>
+            <div class="field">
+                <label for="driverRemarkInput">司机备注</label>
+                <textarea id="driverRemarkInput"></textarea>
+            </div>
+            <div class="compact-actions">
+                <button id="saveDriverBtn" type="button">保存司机修改</button>
+                <button id="deleteDriverBtn" type="button" class="danger">删除司机</button>
+            </div>
+
+            <div class="divider"></div>
+            <div class="section-title">新增车辆</div>
+            <div class="compact-actions">
+                <button id="newVehicleBtn" type="button">新添车辆</button>
+            </div>
+            <div id="newVehicleFormSection" class="hidden">
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="newVehicleCodeInput">车辆编码</label>
+                        <input id="newVehicleCodeInput">
+                    </div>
+                    <div class="field">
+                        <label for="newVehiclePlateInput">车牌号</label>
+                        <input id="newVehiclePlateInput">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleTypeSelect">车辆类型</label>
+                        <select id="newVehicleTypeSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleStatusSelect">运营状态</label>
+                        <select id="newVehicleStatusSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleSeatInput">座位数</label>
+                        <input id="newVehicleSeatInput" type="number" min="0" value="10">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleLoadInput">核载人数</label>
+                        <input id="newVehicleLoadInput" type="number" min="0" value="10">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleColorInput">车辆颜色</label>
+                        <input id="newVehicleColorInput" type="color" value="#64748b">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleModelInput">车辆型号</label>
+                        <input id="newVehicleModelInput">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleDriverSelect">绑定司机</label>
+                        <select id="newVehicleDriverSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleModeInput">运营模式</label>
+                        <input id="newVehicleModeInput" value="dynamic_bus">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleLonInput">经度 lon</label>
+                        <input id="newVehicleLonInput">
+                    </div>
+                    <div class="field">
+                        <label for="newVehicleLatInput">纬度 lat</label>
+                        <input id="newVehicleLatInput">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="newVehicleRemarkInput">车辆备注</label>
+                    <textarea id="newVehicleRemarkInput"></textarea>
+                </div>
+                <div class="compact-actions">
+                    <button id="pickNewVehiclePositionBtn" type="button" class="secondary">地图点选位置</button>
+                    <button id="createVehicleBtn" type="button">保存新增车辆</button>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+            <div class="section-title">修改车辆信息</div>
+            <div class="field">
+                <label for="editVehicleSelect">选择已有车辆</label>
+                <select id="editVehicleSelect"></select>
+            </div>
+            <div class="section-title">车辆列表</div>
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>编码</th>
+                        <th>车牌/司机</th>
+                        <th>状态</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="vehicleTableBody"></tbody>
+            </table>
+
+            <div class="section-title">车辆修改表单</div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="vehicleCodeInput">车辆编码</label>
+                    <input id="vehicleCodeInput" readonly>
+                </div>
+                <div class="field">
+                    <label for="vehiclePlateInput">车牌号</label>
+                    <input id="vehiclePlateInput">
+                </div>
+                <div class="field">
+                    <label for="vehicleTypeSelect">车辆类型</label>
+                    <select id="vehicleTypeSelect"></select>
+                </div>
+                <div class="field">
+                    <label for="vehicleStatusSelect">运营状态</label>
+                    <select id="vehicleStatusSelect"></select>
+                </div>
+                <div class="field">
+                    <label for="vehicleSeatInput">座位数</label>
+                    <input id="vehicleSeatInput" type="number" min="0" value="10">
+                </div>
+                <div class="field">
+                    <label for="vehicleLoadInput">核载人数</label>
+                    <input id="vehicleLoadInput" type="number" min="0" value="10">
+                </div>
+                <div class="field">
+                    <label for="vehicleColorInput">车辆颜色</label>
+                    <input id="vehicleColorInput" type="color" value="#64748b">
+                </div>
+                <div class="field">
+                    <label for="vehicleModelInput">车辆型号</label>
+                    <input id="vehicleModelInput">
+                </div>
+                <div class="field">
+                    <label for="vehicleDriverSelect">绑定司机</label>
+                    <select id="vehicleDriverSelect"></select>
+                </div>
+                <div class="field">
+                    <label for="vehicleModeInput">运营模式</label>
+                    <input id="vehicleModeInput" value="dynamic_bus">
+                </div>
+                <div class="field">
+                    <label for="vehicleLonInput">经度 lon</label>
+                    <input id="vehicleLonInput">
+                </div>
+                <div class="field">
+                    <label for="vehicleLatInput">纬度 lat</label>
+                    <input id="vehicleLatInput">
+                </div>
+            </div>
+            <div class="field">
+                <label for="vehicleRemarkInput">车辆备注</label>
+                <textarea id="vehicleRemarkInput"></textarea>
+            </div>
+            <div class="compact-actions">
+                <button id="pickVehiclePositionBtn" type="button" class="secondary">地图点选位置</button>
+                <button id="saveVehicleBtn" type="button">保存车辆修改</button>
+                <button id="applyVehicleStatusBtn" type="button" class="secondary">应用状态</button>
+                <button id="bindVehicleDriverBtn" type="button" class="secondary">绑定司机</button>
+                <button id="deleteVehicleBtn" type="button" class="danger">删除车辆</button>
+            </div>
+        </div>
 
         <div id="status" class="status">等待加载车队。</div>
     </section>
@@ -249,6 +676,9 @@
         const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
         const updatePathBtn = document.getElementById("updatePathBtn");
         const clearBtn = document.getElementById("clearBtn");
+        const randomOrder1Btn = document.getElementById("randomOrder1Btn");
+        const randomOrder10Btn = document.getElementById("randomOrder10Btn");
+        const randomOrder50Btn = document.getElementById("randomOrder50Btn");
         const statusEl = document.getElementById("status");
 
         const restrictionPolicySelect = document.getElementById("restrictionPolicySelect");
@@ -264,6 +694,79 @@
         const clearRestrictionBtn = document.getElementById("clearRestrictionBtn");
         const reloadRestrictionBtn = document.getElementById("reloadRestrictionBtn");
 
+        const tabButtons = document.querySelectorAll(".tab-button");
+        const tabPanels = document.querySelectorAll(".tab-panel");
+        const reloadAdminBtn = document.getElementById("reloadAdminBtn");
+        const resetAdminFormsBtn = document.getElementById("resetAdminFormsBtn");
+        const newDriverBtn = document.getElementById("newDriverBtn");
+        const newDriverFormSection = document.getElementById("newDriverFormSection");
+        const newDriverCodeInput = document.getElementById("newDriverCodeInput");
+        const newDriverNoInput = document.getElementById("newDriverNoInput");
+        const newDriverNameInput = document.getElementById("newDriverNameInput");
+        const newDriverPhoneInput = document.getElementById("newDriverPhoneInput");
+        const newDriverIdCardInput = document.getElementById("newDriverIdCardInput");
+        const newDriverLicenseNoInput = document.getElementById("newDriverLicenseNoInput");
+        const newDriverLicenseClassInput = document.getElementById("newDriverLicenseClassInput");
+        const newDriverLicenseExpireInput = document.getElementById("newDriverLicenseExpireInput");
+        const newDriverWorkStatusSelect = document.getElementById("newDriverWorkStatusSelect");
+        const newDriverEmploymentStatusSelect = document.getElementById("newDriverEmploymentStatusSelect");
+        const newDriverServiceCityInput = document.getElementById("newDriverServiceCityInput");
+        const newDriverRemarkInput = document.getElementById("newDriverRemarkInput");
+        const createDriverBtn = document.getElementById("createDriverBtn");
+        const editDriverSelect = document.getElementById("editDriverSelect");
+        const driverTableBody = document.getElementById("driverTableBody");
+        const driverCodeInput = document.getElementById("driverCodeInput");
+        const driverNoInput = document.getElementById("driverNoInput");
+        const driverNameInput = document.getElementById("driverNameInput");
+        const driverPhoneInput = document.getElementById("driverPhoneInput");
+        const driverIdCardInput = document.getElementById("driverIdCardInput");
+        const driverLicenseNoInput = document.getElementById("driverLicenseNoInput");
+        const driverLicenseClassInput = document.getElementById("driverLicenseClassInput");
+        const driverLicenseExpireInput = document.getElementById("driverLicenseExpireInput");
+        const driverWorkStatusSelect = document.getElementById("driverWorkStatusSelect");
+        const driverEmploymentStatusSelect = document.getElementById("driverEmploymentStatusSelect");
+        const driverServiceCityInput = document.getElementById("driverServiceCityInput");
+        const driverRemarkInput = document.getElementById("driverRemarkInput");
+        const saveDriverBtn = document.getElementById("saveDriverBtn");
+        const deleteDriverBtn = document.getElementById("deleteDriverBtn");
+        const newVehicleBtn = document.getElementById("newVehicleBtn");
+        const newVehicleFormSection = document.getElementById("newVehicleFormSection");
+        const newVehicleCodeInput = document.getElementById("newVehicleCodeInput");
+        const newVehiclePlateInput = document.getElementById("newVehiclePlateInput");
+        const newVehicleTypeSelect = document.getElementById("newVehicleTypeSelect");
+        const newVehicleStatusSelect = document.getElementById("newVehicleStatusSelect");
+        const newVehicleSeatInput = document.getElementById("newVehicleSeatInput");
+        const newVehicleLoadInput = document.getElementById("newVehicleLoadInput");
+        const newVehicleColorInput = document.getElementById("newVehicleColorInput");
+        const newVehicleModelInput = document.getElementById("newVehicleModelInput");
+        const newVehicleDriverSelect = document.getElementById("newVehicleDriverSelect");
+        const newVehicleModeInput = document.getElementById("newVehicleModeInput");
+        const newVehicleLonInput = document.getElementById("newVehicleLonInput");
+        const newVehicleLatInput = document.getElementById("newVehicleLatInput");
+        const newVehicleRemarkInput = document.getElementById("newVehicleRemarkInput");
+        const pickNewVehiclePositionBtn = document.getElementById("pickNewVehiclePositionBtn");
+        const createVehicleBtn = document.getElementById("createVehicleBtn");
+        const editVehicleSelect = document.getElementById("editVehicleSelect");
+        const vehicleTableBody = document.getElementById("vehicleTableBody");
+        const vehicleCodeInput = document.getElementById("vehicleCodeInput");
+        const vehiclePlateInput = document.getElementById("vehiclePlateInput");
+        const vehicleTypeSelect = document.getElementById("vehicleTypeSelect");
+        const vehicleStatusSelect = document.getElementById("vehicleStatusSelect");
+        const vehicleSeatInput = document.getElementById("vehicleSeatInput");
+        const vehicleLoadInput = document.getElementById("vehicleLoadInput");
+        const vehicleColorInput = document.getElementById("vehicleColorInput");
+        const vehicleModelInput = document.getElementById("vehicleModelInput");
+        const vehicleDriverSelect = document.getElementById("vehicleDriverSelect");
+        const vehicleModeInput = document.getElementById("vehicleModeInput");
+        const vehicleLonInput = document.getElementById("vehicleLonInput");
+        const vehicleLatInput = document.getElementById("vehicleLatInput");
+        const vehicleRemarkInput = document.getElementById("vehicleRemarkInput");
+        const pickVehiclePositionBtn = document.getElementById("pickVehiclePositionBtn");
+        const saveVehicleBtn = document.getElementById("saveVehicleBtn");
+        const applyVehicleStatusBtn = document.getElementById("applyVehicleStatusBtn");
+        const bindVehicleDriverBtn = document.getElementById("bindVehicleDriverBtn");
+        const deleteVehicleBtn = document.getElementById("deleteVehicleBtn");
+
         const map = new AMap.Map("container", {
             zoom: 14,
             center: [113.4, 23.05],
@@ -274,12 +777,19 @@
 
         const fleetById = new Map();
         let layers = [];
+        let markerPositionCounts = new Map();
         let restrictionPolicies = [];
         let restrictionPolygons = [];
         let restrictionLayers = [];
         let draftRestrictionPoints = [];
         let draftRestrictionLine = null;
         let isDrawingRestriction = false;
+        let adminDrivers = [];
+        let adminVehicles = [];
+        let selectedDriverCode = null;
+        let selectedVehicleCode = null;
+        let vehiclePositionTarget = null;
+        let cachedPois = null;
 
         function setStatus(message) {
             statusEl.textContent = message;
@@ -290,6 +800,9 @@
             refreshVehicleBtn.disabled = isBusy;
             updatePathBtn.disabled = isBusy;
             clearBtn.disabled = isBusy;
+            randomOrder1Btn.disabled = isBusy;
+            randomOrder10Btn.disabled = isBusy;
+            randomOrder50Btn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
         }
 
@@ -303,6 +816,25 @@
             deleteRestrictionBtn.disabled = isBusy;
             clearRestrictionBtn.disabled = isBusy;
             reloadRestrictionBtn.disabled = isBusy;
+        }
+
+        function setAdminBusy(isBusy) {
+            reloadAdminBtn.disabled = isBusy;
+            resetAdminFormsBtn.disabled = isBusy;
+            newDriverBtn.disabled = isBusy;
+            createDriverBtn.disabled = isBusy;
+            editDriverSelect.disabled = isBusy;
+            saveDriverBtn.disabled = isBusy;
+            deleteDriverBtn.disabled = isBusy;
+            newVehicleBtn.disabled = isBusy;
+            createVehicleBtn.disabled = isBusy;
+            editVehicleSelect.disabled = isBusy;
+            pickNewVehiclePositionBtn.disabled = isBusy;
+            pickVehiclePositionBtn.disabled = isBusy;
+            saveVehicleBtn.disabled = isBusy;
+            applyVehicleStatusBtn.disabled = isBusy;
+            bindVehicleDriverBtn.disabled = isBusy;
+            deleteVehicleBtn.disabled = isBusy;
         }
 
         function apiBase() {
@@ -380,6 +912,7 @@
                 map.remove(layers);
             }
             layers = [];
+            markerPositionCounts = new Map();
         }
 
         function addPolyline(points, options) {
@@ -397,24 +930,81 @@
             return polyline;
         }
 
-        function addMarker(point, label, color) {
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function markerPositionKey(point) {
+            return `${point.lon.toFixed(6)},${point.lat.toFixed(6)}`;
+        }
+
+        function markerOffsetForIndex(index) {
+            if (index <= 0) {
+                return { dx: 0, dy: 0 };
+            }
+            const ring = Math.ceil(index / 8);
+            const slot = (index - 1) % 8;
+            const angle = -Math.PI / 2 + slot * (Math.PI * 2 / 8);
+            const radius = 24 * ring;
+            return {
+                dx: Math.round(Math.cos(angle) * radius),
+                dy: Math.round(Math.sin(angle) * radius)
+            };
+        }
+
+        function nextMarkerPlacement(point) {
+            const key = markerPositionKey(point);
+            const index = markerPositionCounts.get(key) || 0;
+            markerPositionCounts.set(key, index + 1);
+            return {
+                index,
+                ...markerOffsetForIndex(index)
+            };
+        }
+
+        function markerStyle(color, placement) {
+            const styles = [
+                `--marker-dx:${placement.dx}px`,
+                `--marker-dy:${placement.dy}px`
+            ];
+            if (color) {
+                styles.push(`background:${color}`);
+            }
+            return ` style="${styles.join(";")}"`;
+        }
+
+        function addMarker(point, label, color, className = "") {
             const normalized = normalizePoint(point);
             if (!normalized) {
                 return null;
             }
+            const placement = nextMarkerPlacement(normalized);
+            const style = markerStyle(color, placement);
             const marker = new AMap.Marker({
                 position: [normalized.lon, normalized.lat],
-                offset: new AMap.Pixel(-10, -10),
-                content: `<div style="
-                    width:20px;height:20px;border-radius:50%;
-                    background:${color};color:#fff;font-size:11px;
-                    display:flex;align-items:center;justify-content:center;
-                    border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.28);
-                ">${label}</div>`
+                offset: new AMap.Pixel(0, 0),
+                content: `<div class="map-marker ${className}"${style}>${escapeHtml(label)}</div>`,
+                zIndex: 120 + placement.index
             });
             layers.push(marker);
             map.add(marker);
             return marker;
+        }
+
+        function addRouteStopMarker(point, segment, index) {
+            const type = String(segment.type || "").toUpperCase();
+            if (type === "O") {
+                return addMarker(point, `O${index + 1}`, null, "stop-o");
+            }
+            if (type === "D") {
+                return addMarker(point, `D${index + 1}`, null, "stop-d");
+            }
+            return addMarker(point, `S${index + 1}`, null, "stop-other");
         }
 
         function fitVisible(points, customLayers) {
@@ -457,7 +1047,7 @@
                 });
                 const target = segmentTarget(segment);
                 if (target) {
-                    addMarker(target, segment.type || index + 1, segment.type === "D" ? "#dc2626" : "#16a34a");
+                    addRouteStopMarker(target, segment, index);
                 }
             }
 
@@ -470,7 +1060,7 @@
 
             const gps = normalizePoint(vehicle.gps);
             if (gps) {
-                addMarker(gps, "车", "#2563eb");
+                addMarker(gps, "车", null, "vehicle");
             }
 
             const fitPoints = graspedPoints.length >= 2 ? graspedPoints : rawPoints;
@@ -482,9 +1072,10 @@
                 const requestPoints = segment.grasp?.request_points;
                 return `${index + 1}. ${segment.type || "-"} ${segment.request_id || ""} ${source} ${count}点${requestPoints ? ` 输入${requestPoints}点` : ""}`;
             });
+            const displayVehicleId = vehicle.vehicle_id || vehicle.id || "";
 
             setStatus([
-                `车辆：${vehicle.id}`,
+                `车辆：${displayVehicleId}`,
                 `纠偏状态：${vehicle.planned_route_grasp_status || "none"}`,
                 vehicle.operation_restriction_policy_signature ? `禁区策略：${vehicle.operation_restriction_policy_signature}` : null,
                 vehicle.planned_route_grasp_error ? `纠偏错误：${vehicle.planned_route_grasp_error}` : null,
@@ -508,19 +1099,23 @@
                 fleetById.clear();
                 vehicleSelect.innerHTML = "";
                 for (const vehicle of fleet) {
-                    fleetById.set(vehicle.id, vehicle);
+                    const vehicleId = vehicle.vehicle_id;
+                    if (!vehicleId) {
+                        continue;
+                    }
+                    fleetById.set(vehicleId, vehicle);
                     const option = document.createElement("option");
-                    option.value = vehicle.id;
-                    option.textContent = `${vehicle.id} - ${vehicle.planned_route_grasp_status || "none"}`;
+                    option.value = vehicleId;
+                    option.textContent = `${vehicleId} - ${vehicle.plate_no || vehicle.id || "未命名"} - ${vehicle.planned_route_grasp_status || "none"}`;
                     vehicleSelect.appendChild(option);
                 }
-                if (!fleet.length) {
+                if (!vehicleSelect.options.length) {
                     setStatus("车队为空。");
                     return;
                 }
-                const selected = fleet.find(vehicle => (vehicle.planned_route_grasped_point || []).length >= 2)
-                    || fleet[0];
-                vehicleSelect.value = selected.id;
+                const selected = fleet.find(vehicle => vehicle.vehicle_id && (vehicle.planned_route_grasped_point || []).length >= 2)
+                    || fleet.find(vehicle => vehicle.vehicle_id);
+                vehicleSelect.value = selected.vehicle_id;
                 drawVehicle(selected, { message: "车队已加载。" });
             } catch (error) {
                 setStatus(`加载车队失败：${error.message}`);
@@ -535,7 +1130,7 @@
                 throw new Error("未选择车辆");
             }
             const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
-            fleetById.set(vehicle.id, vehicle);
+            fleetById.set(vehicle.vehicle_id, vehicle);
             drawVehicle(vehicle, { message });
             return vehicle;
         }
@@ -576,6 +1171,92 @@
                 message: `路径更新已提交，等待后端异步纠偏。\n本次路径返回点：${rawPoints.length}`
             });
             await waitForGraspReady(vehicleId, vehicle.planned_route_grasp_route_version);
+        }
+
+        function formatLocalDateTime(date) {
+            const pad = value => String(value).padStart(2, "0");
+            return [
+                date.getFullYear(),
+                pad(date.getMonth() + 1),
+                pad(date.getDate())
+            ].join("-") + " " + [
+                pad(date.getHours()),
+                pad(date.getMinutes()),
+                pad(date.getSeconds())
+            ].join(":");
+        }
+
+        async function loadPoisForRandomOrders() {
+            if (cachedPois && cachedPois.length >= 2) {
+                return cachedPois;
+            }
+            const data = await apiJson("/pois");
+            cachedPois = (data.pois || [])
+                .map(poi => {
+                    const point = normalizePoint(poi);
+                    return point ? { ...poi, ...point } : null;
+                })
+                .filter(Boolean);
+            if (cachedPois.length < 2) {
+                throw new Error("可用 POI 不足，无法生成随机订单");
+            }
+            return cachedPois;
+        }
+
+        function buildRandomOrderPayload(pois, index) {
+            const originIndex = Math.floor(Math.random() * pois.length);
+            let destinationIndex = Math.floor(Math.random() * (pois.length - 1));
+            if (destinationIndex >= originIndex) {
+                destinationIndex += 1;
+            }
+            const origin = pois[originIndex];
+            const destination = pois[destinationIndex];
+            const earliest = new Date(Date.now() + (3 + Math.floor(Math.random() * 9)) * 60 * 1000);
+            const latest = new Date(earliest.getTime() + (12 + Math.floor(Math.random() * 10)) * 60 * 1000);
+            return {
+                request_id: `demo-${Date.now()}-${index + 1}-${Math.floor(Math.random() * 100000)}`,
+                origin: { lon: origin.lon, lat: origin.lat },
+                destination: { lon: destination.lon, lat: destination.lat },
+                expected_pickup_time: {
+                    earliest: formatLocalDateTime(earliest),
+                    latest: formatLocalDateTime(latest)
+                },
+                passenger_count: 1 + Math.floor(Math.random() * 3)
+            };
+        }
+
+        async function createRandomOrders(count) {
+            setBusy(true);
+            const created = [];
+            const errors = [];
+            try {
+                const pois = await loadPoisForRandomOrders();
+                for (let index = 0; index < count; index += 1) {
+                    const payload = buildRandomOrderPayload(pois, index);
+                    try {
+                        const result = await apiJson("/order", {
+                            method: "POST",
+                            body: payload
+                        });
+                        created.push(result.request_id || payload.request_id);
+                    } catch (error) {
+                        errors.push(`${payload.request_id}: ${error.message}`);
+                    }
+                    if (count === 1 || (index + 1) % 5 === 0 || index + 1 === count) {
+                        setStatus(`随机订单提交中：${index + 1}/${count}\n成功：${created.length}\n失败：${errors.length}`);
+                    }
+                }
+                await loadFleet();
+                setStatus([
+                    `随机订单提交完成：${created.length}/${count}`,
+                    errors.length ? `失败：${errors.length}` : null,
+                    created.length ? `最近订单：${created.slice(-5).join(", ")}` : null
+                ].filter(Boolean).join("\n"));
+            } catch (error) {
+                setStatus(`随机订单提交失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
         }
 
         function pointFromLngLat(lnglat) {
@@ -795,7 +1476,460 @@
             await loadRestrictionPolicies("禁区策略已删除。");
         }
 
+        function setTab(tabId) {
+            tabButtons.forEach(button => {
+                button.classList.toggle("active", button.dataset.tab === tabId);
+            });
+            tabPanels.forEach(panel => {
+                panel.classList.toggle("active", panel.id === tabId);
+            });
+        }
+
+        function fillSelect(select, values, currentValue) {
+            select.innerHTML = "";
+            for (const value of values || []) {
+                const option = document.createElement("option");
+                option.value = value;
+                option.textContent = value;
+                select.appendChild(option);
+            }
+            if (currentValue) {
+                select.value = currentValue;
+            }
+        }
+
+        function fillDriverSelect(select, currentValue) {
+            select.innerHTML = "";
+            const emptyOption = document.createElement("option");
+            emptyOption.value = "";
+            emptyOption.textContent = "不绑定司机";
+            select.appendChild(emptyOption);
+            for (const driver of adminDrivers) {
+                const option = document.createElement("option");
+                option.value = driver.driver_code;
+                option.textContent = `${driver.driver_name || driver.driver_code} (${driver.driver_no || driver.driver_code})`;
+                select.appendChild(option);
+            }
+            select.value = currentValue || "";
+        }
+
+        function fillRecordSelect(select, records, valueKey, labelBuilder, currentValue, placeholder) {
+            select.innerHTML = "";
+            const emptyOption = document.createElement("option");
+            emptyOption.value = "";
+            emptyOption.textContent = placeholder;
+            select.appendChild(emptyOption);
+            for (const record of records || []) {
+                const option = document.createElement("option");
+                option.value = record[valueKey] || "";
+                option.textContent = labelBuilder(record);
+                select.appendChild(option);
+            }
+            select.value = currentValue || "";
+        }
+
+        function resetNewDriverForm() {
+            newDriverCodeInput.value = "";
+            newDriverNoInput.value = "";
+            newDriverNameInput.value = "";
+            newDriverPhoneInput.value = "";
+            newDriverIdCardInput.value = "";
+            newDriverLicenseNoInput.value = "";
+            newDriverLicenseClassInput.value = "";
+            newDriverLicenseExpireInput.value = "";
+            newDriverServiceCityInput.value = "";
+            newDriverRemarkInput.value = "";
+            newDriverWorkStatusSelect.value = "off_duty";
+            newDriverEmploymentStatusSelect.value = "active";
+        }
+
+        function resetDriverForm() {
+            selectedDriverCode = null;
+            editDriverSelect.value = "";
+            driverCodeInput.readOnly = true;
+            driverCodeInput.value = "";
+            driverNoInput.value = "";
+            driverNameInput.value = "";
+            driverPhoneInput.value = "";
+            driverIdCardInput.value = "";
+            driverLicenseNoInput.value = "";
+            driverLicenseClassInput.value = "";
+            driverLicenseExpireInput.value = "";
+            driverServiceCityInput.value = "";
+            driverRemarkInput.value = "";
+            driverWorkStatusSelect.value = "off_duty";
+            driverEmploymentStatusSelect.value = "active";
+        }
+
+        function resetNewVehicleForm() {
+            newVehicleCodeInput.value = "";
+            newVehiclePlateInput.value = "";
+            newVehicleTypeSelect.value = "bus";
+            newVehicleStatusSelect.value = "offline";
+            newVehicleSeatInput.value = "10";
+            newVehicleLoadInput.value = "10";
+            newVehicleColorInput.value = "#64748b";
+            newVehicleModelInput.value = "";
+            newVehicleModeInput.value = "dynamic_bus";
+            newVehicleLonInput.value = "";
+            newVehicleLatInput.value = "";
+            newVehicleRemarkInput.value = "";
+            fillDriverSelect(newVehicleDriverSelect, "");
+        }
+
+        function resetVehicleForm() {
+            selectedVehicleCode = null;
+            editVehicleSelect.value = "";
+            vehicleCodeInput.readOnly = true;
+            vehicleCodeInput.value = "";
+            vehiclePlateInput.value = "";
+            vehicleTypeSelect.value = "bus";
+            vehicleStatusSelect.value = "offline";
+            vehicleSeatInput.value = "10";
+            vehicleLoadInput.value = "10";
+            vehicleColorInput.value = "#64748b";
+            vehicleModelInput.value = "";
+            vehicleModeInput.value = "dynamic_bus";
+            vehicleLonInput.value = "";
+            vehicleLatInput.value = "";
+            vehicleRemarkInput.value = "";
+            fillDriverSelect(vehicleDriverSelect, "");
+        }
+
+        function resetAdminForms() {
+            newDriverFormSection.classList.add("hidden");
+            newVehicleFormSection.classList.add("hidden");
+            resetNewDriverForm();
+            resetDriverForm();
+            resetNewVehicleForm();
+            resetVehicleForm();
+        }
+
+        function renderDriverTable() {
+            driverTableBody.innerHTML = "";
+            for (const driver of adminDrivers) {
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                    <td>${driver.driver_code || ""}</td>
+                    <td>${driver.driver_name || ""}<br>${driver.driver_no || ""}</td>
+                    <td>${driver.employment_status || ""}<br>${driver.work_status || ""}</td>
+                    <td><button type="button" data-driver-code="${driver.driver_code}">编辑</button></td>
+                `;
+                driverTableBody.appendChild(row);
+            }
+        }
+
+        function renderVehicleTable() {
+            vehicleTableBody.innerHTML = "";
+            for (const vehicle of adminVehicles) {
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                    <td>${vehicle.vehicle_code || ""}</td>
+                    <td>${vehicle.plate_no || ""}<br>${vehicle.current_driver_name || vehicle.current_driver_code || "未绑定"}</td>
+                    <td>${vehicle.operation_status || ""}<br>${vehicle.current_lon != null ? `${vehicle.current_lon}, ${vehicle.current_lat}` : "未定位"}</td>
+                    <td><button type="button" data-vehicle-code="${vehicle.vehicle_code}">编辑</button></td>
+                `;
+                vehicleTableBody.appendChild(row);
+            }
+        }
+
+        function loadDriverIntoForm(driver) {
+            selectedDriverCode = driver.driver_code;
+            editDriverSelect.value = driver.driver_code || "";
+            driverCodeInput.readOnly = true;
+            driverCodeInput.value = driver.driver_code || "";
+            driverNoInput.value = driver.driver_no || "";
+            driverNameInput.value = driver.driver_name || "";
+            driverPhoneInput.value = driver.phone || "";
+            driverIdCardInput.value = driver.id_card_no || "";
+            driverLicenseNoInput.value = driver.license_no || "";
+            driverLicenseClassInput.value = driver.license_class || "";
+            driverLicenseExpireInput.value = driver.license_expire_date || "";
+            driverServiceCityInput.value = driver.service_city || "";
+            driverRemarkInput.value = driver.remark || "";
+            driverWorkStatusSelect.value = driver.work_status || "off_duty";
+            driverEmploymentStatusSelect.value = driver.employment_status || "active";
+            setStatus(`已选择司机：${driver.driver_code}`);
+        }
+
+        function loadVehicleIntoForm(vehicle) {
+            selectedVehicleCode = vehicle.vehicle_code;
+            editVehicleSelect.value = vehicle.vehicle_code || "";
+            vehicleCodeInput.readOnly = true;
+            vehicleCodeInput.value = vehicle.vehicle_code || "";
+            vehiclePlateInput.value = vehicle.plate_no || "";
+            vehicleTypeSelect.value = vehicle.vehicle_type || "bus";
+            vehicleStatusSelect.value = vehicle.operation_status || "offline";
+            vehicleSeatInput.value = vehicle.seat_count || 0;
+            vehicleLoadInput.value = vehicle.max_load_count || 0;
+            vehicleColorInput.value = vehicle.vehicle_color || "#64748b";
+            vehicleModelInput.value = vehicle.vehicle_model || "";
+            vehicleModeInput.value = vehicle.operation_mode || "dynamic_bus";
+            vehicleLonInput.value = vehicle.current_lon ?? "";
+            vehicleLatInput.value = vehicle.current_lat ?? "";
+            vehicleRemarkInput.value = vehicle.remark || "";
+            fillDriverSelect(vehicleDriverSelect, vehicle.current_driver_code || "");
+            setStatus(`已选择车辆：${vehicle.vehicle_code}`);
+        }
+
+        async function loadAdminOptions(message) {
+            setAdminBusy(true);
+            try {
+                const data = await apiJson("/admin/driver-vehicle/options");
+                adminDrivers = data.drivers || [];
+                adminVehicles = data.vehicles || [];
+                fillSelect(newDriverWorkStatusSelect, data.driver_work_statuses || [], newDriverWorkStatusSelect.value || "off_duty");
+                fillSelect(newDriverEmploymentStatusSelect, data.driver_employment_statuses || [], newDriverEmploymentStatusSelect.value || "active");
+                fillSelect(driverWorkStatusSelect, data.driver_work_statuses || [], driverWorkStatusSelect.value || "off_duty");
+                fillSelect(driverEmploymentStatusSelect, data.driver_employment_statuses || [], driverEmploymentStatusSelect.value || "active");
+                fillSelect(newVehicleTypeSelect, data.vehicle_types || [], newVehicleTypeSelect.value || "bus");
+                fillSelect(newVehicleStatusSelect, data.vehicle_operation_statuses || [], newVehicleStatusSelect.value || "offline");
+                fillSelect(vehicleTypeSelect, data.vehicle_types || [], vehicleTypeSelect.value || "bus");
+                fillSelect(vehicleStatusSelect, data.vehicle_operation_statuses || [], vehicleStatusSelect.value || "offline");
+                fillRecordSelect(
+                    editDriverSelect,
+                    adminDrivers,
+                    "driver_code",
+                    driver => `${driver.driver_name || driver.driver_code} (${driver.driver_no || driver.driver_code})`,
+                    selectedDriverCode,
+                    "选择司机进行修改"
+                );
+                fillRecordSelect(
+                    editVehicleSelect,
+                    adminVehicles,
+                    "vehicle_code",
+                    vehicle => `${vehicle.plate_no || vehicle.vehicle_code} (${vehicle.vehicle_code})`,
+                    selectedVehicleCode,
+                    "选择车辆进行修改"
+                );
+                fillDriverSelect(newVehicleDriverSelect, newVehicleDriverSelect.value);
+                fillDriverSelect(vehicleDriverSelect, vehicleDriverSelect.value);
+                renderDriverTable();
+                renderVehicleTable();
+                const selectedDriver = adminDrivers.find(driver => driver.driver_code === selectedDriverCode);
+                if (selectedDriver) {
+                    loadDriverIntoForm(selectedDriver);
+                } else {
+                    resetDriverForm();
+                }
+                const selectedVehicle = adminVehicles.find(vehicle => vehicle.vehicle_code === selectedVehicleCode);
+                if (selectedVehicle) {
+                    loadVehicleIntoForm(selectedVehicle);
+                } else {
+                    resetVehicleForm();
+                }
+                if (message) {
+                    setStatus(message);
+                }
+            } catch (error) {
+                setStatus(`加载司机车辆失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        }
+
+        function newDriverPayload() {
+            return {
+                driver_code: newDriverCodeInput.value.trim(),
+                driver_no: newDriverNoInput.value.trim(),
+                driver_name: newDriverNameInput.value.trim(),
+                phone: newDriverPhoneInput.value.trim(),
+                id_card_no: newDriverIdCardInput.value.trim(),
+                license_no: newDriverLicenseNoInput.value.trim(),
+                license_class: newDriverLicenseClassInput.value.trim(),
+                license_expire_date: newDriverLicenseExpireInput.value || null,
+                service_city: newDriverServiceCityInput.value.trim(),
+                employment_status: newDriverEmploymentStatusSelect.value,
+                work_status: newDriverWorkStatusSelect.value,
+                remark: newDriverRemarkInput.value.trim()
+            };
+        }
+
+        function driverPayload() {
+            return {
+                driver_code: driverCodeInput.value.trim(),
+                driver_no: driverNoInput.value.trim(),
+                driver_name: driverNameInput.value.trim(),
+                phone: driverPhoneInput.value.trim(),
+                id_card_no: driverIdCardInput.value.trim(),
+                license_no: driverLicenseNoInput.value.trim(),
+                license_class: driverLicenseClassInput.value.trim(),
+                license_expire_date: driverLicenseExpireInput.value || null,
+                service_city: driverServiceCityInput.value.trim(),
+                employment_status: driverEmploymentStatusSelect.value,
+                work_status: driverWorkStatusSelect.value,
+                remark: driverRemarkInput.value.trim()
+            };
+        }
+
+        function newVehiclePayload() {
+            const lon = toNumber(newVehicleLonInput.value);
+            const lat = toNumber(newVehicleLatInput.value);
+            const payload = {
+                vehicle_code: newVehicleCodeInput.value.trim(),
+                plate_no: newVehiclePlateInput.value.trim(),
+                vehicle_type: newVehicleTypeSelect.value,
+                operation_status: newVehicleStatusSelect.value,
+                seat_count: Number(newVehicleSeatInput.value || 0),
+                max_load_count: Number(newVehicleLoadInput.value || 0),
+                vehicle_color: newVehicleColorInput.value.trim(),
+                vehicle_model: newVehicleModelInput.value.trim(),
+                operation_mode: newVehicleModeInput.value.trim() || "dynamic_bus",
+                current_driver_code: newVehicleDriverSelect.value || null,
+                remark: newVehicleRemarkInput.value.trim()
+            };
+            if (lon !== null && lat !== null) {
+                payload.initial_position = { lon, lat };
+            }
+            return payload;
+        }
+
+        function vehiclePayload() {
+            const lon = toNumber(vehicleLonInput.value);
+            const lat = toNumber(vehicleLatInput.value);
+            const payload = {
+                vehicle_code: vehicleCodeInput.value.trim(),
+                plate_no: vehiclePlateInput.value.trim(),
+                vehicle_type: vehicleTypeSelect.value,
+                operation_status: vehicleStatusSelect.value,
+                seat_count: Number(vehicleSeatInput.value || 0),
+                max_load_count: Number(vehicleLoadInput.value || 0),
+                vehicle_color: vehicleColorInput.value.trim(),
+                vehicle_model: vehicleModelInput.value.trim(),
+                operation_mode: vehicleModeInput.value.trim() || "dynamic_bus",
+                current_driver_code: vehicleDriverSelect.value || null,
+                remark: vehicleRemarkInput.value.trim()
+            };
+            if (lon !== null && lat !== null) {
+                payload.initial_position = { lon, lat };
+            }
+            return payload;
+        }
+
+        async function createDriver() {
+            const payload = newDriverPayload();
+            if (!payload.driver_code) {
+                throw new Error("请填写新增司机编码");
+            }
+            await apiJson("/admin/drivers", {
+                method: "POST",
+                body: payload
+            });
+            resetNewDriverForm();
+            newDriverFormSection.classList.add("hidden");
+            await loadAdminOptions("新增司机档案已保存。");
+        }
+
+        async function saveDriver() {
+            const payload = driverPayload();
+            if (!selectedDriverCode) {
+                throw new Error("请先从下拉框选择要修改的司机");
+            }
+            await apiJson(`/admin/drivers/${encodeURIComponent(selectedDriverCode)}`, {
+                method: "PUT",
+                body: payload
+            });
+            await loadAdminOptions("司机档案修改已保存。");
+        }
+
+        async function deleteDriver() {
+            const driverCode = selectedDriverCode || driverCodeInput.value.trim();
+            if (!driverCode) {
+                throw new Error("请先选择司机");
+            }
+            await apiJson(`/admin/drivers/${encodeURIComponent(driverCode)}`, { method: "DELETE" });
+            resetDriverForm();
+            await loadAdminOptions("司机档案已删除。");
+        }
+
+        async function createVehicle() {
+            const payload = newVehiclePayload();
+            if (!payload.vehicle_code || !payload.plate_no) {
+                throw new Error("请填写新增车辆编码和车牌号");
+            }
+            await apiJson("/admin/vehicles", {
+                method: "POST",
+                body: payload
+            });
+            resetNewVehicleForm();
+            newVehicleFormSection.classList.add("hidden");
+            await loadAdminOptions("新增车辆档案已保存。");
+            await loadFleet();
+        }
+
+        async function saveVehicle() {
+            const payload = vehiclePayload();
+            if (!selectedVehicleCode) {
+                throw new Error("请先从下拉框选择要修改的车辆");
+            }
+            if (!payload.plate_no) {
+                throw new Error("请填写车牌号");
+            }
+            await apiJson(`/admin/vehicles/${encodeURIComponent(selectedVehicleCode)}`, {
+                method: "PUT",
+                body: payload
+            });
+            await loadAdminOptions("车辆档案修改已保存。");
+            await loadFleet();
+        }
+
+        async function deleteVehicle() {
+            const vehicleCode = selectedVehicleCode || vehicleCodeInput.value.trim();
+            if (!vehicleCode) {
+                throw new Error("请先选择车辆");
+            }
+            await apiJson(`/admin/vehicles/${encodeURIComponent(vehicleCode)}`, { method: "DELETE" });
+            resetVehicleForm();
+            await loadAdminOptions("车辆档案已删除。");
+            await loadFleet();
+        }
+
+        async function applyVehicleStatus() {
+            const vehicleCode = selectedVehicleCode || vehicleCodeInput.value.trim();
+            if (!vehicleCode) {
+                throw new Error("请先选择车辆");
+            }
+            const lon = toNumber(vehicleLonInput.value);
+            const lat = toNumber(vehicleLatInput.value);
+            const body = { operation_status: vehicleStatusSelect.value };
+            if (lon !== null && lat !== null) {
+                body.initial_position = { lon, lat };
+            }
+            await apiJson(`/admin/vehicles/${encodeURIComponent(vehicleCode)}/status`, {
+                method: "POST",
+                body
+            });
+            await loadAdminOptions("车辆状态已更新。");
+            await loadFleet();
+        }
+
+        async function bindVehicleDriver() {
+            const vehicleCode = selectedVehicleCode || vehicleCodeInput.value.trim();
+            if (!vehicleCode) {
+                throw new Error("请先选择车辆");
+            }
+            await apiJson(`/admin/vehicles/${encodeURIComponent(vehicleCode)}/bind-driver`, {
+                method: "POST",
+                body: { driver_code: vehicleDriverSelect.value || null }
+            });
+            await loadAdminOptions("车辆司机绑定已更新。");
+            await loadFleet();
+        }
+
         map.on("click", event => {
+            if (vehiclePositionTarget) {
+                const point = pointFromLngLat(event.lnglat);
+                if (vehiclePositionTarget === "new") {
+                    newVehicleLonInput.value = point.lon;
+                    newVehicleLatInput.value = point.lat;
+                } else {
+                    vehicleLonInput.value = point.lon;
+                    vehicleLatInput.value = point.lat;
+                }
+                vehiclePositionTarget = null;
+                setStatus("车辆初始位置已设置。");
+                return;
+            }
             if (!isDrawingRestriction) {
                 return;
             }
@@ -828,6 +1962,9 @@
             clearMap();
             setStatus("路线已清空，禁区图形保留。");
         });
+        randomOrder1Btn.addEventListener("click", () => createRandomOrders(1));
+        randomOrder10Btn.addEventListener("click", () => createRandomOrders(10));
+        randomOrder50Btn.addEventListener("click", () => createRandomOrders(50));
         vehicleSelect.addEventListener("change", async () => {
             setBusy(true);
             try {
@@ -837,6 +1974,9 @@
             } finally {
                 setBusy(false);
             }
+        });
+        tabButtons.forEach(button => {
+            button.addEventListener("click", () => setTab(button.dataset.tab));
         });
 
         drawRestrictionBtn.addEventListener("click", () => {
@@ -898,8 +2038,153 @@
             }
         });
 
+        reloadAdminBtn.addEventListener("click", () => loadAdminOptions("司机车辆档案已刷新。"));
+        resetAdminFormsBtn.addEventListener("click", () => {
+            resetAdminForms();
+            setStatus("司机车辆表单已清空。");
+        });
+        newDriverBtn.addEventListener("click", () => {
+            resetNewDriverForm();
+            newDriverFormSection.classList.remove("hidden");
+            setStatus("已打开新增司机表单。");
+        });
+        editDriverSelect.addEventListener("change", () => {
+            const driver = adminDrivers.find(item => item.driver_code === editDriverSelect.value);
+            if (driver) {
+                loadDriverIntoForm(driver);
+            } else {
+                resetDriverForm();
+            }
+        });
+        driverTableBody.addEventListener("click", event => {
+            const button = event.target.closest("[data-driver-code]");
+            if (!button) {
+                return;
+            }
+            const driver = adminDrivers.find(item => item.driver_code === button.dataset.driverCode);
+            if (driver) {
+                loadDriverIntoForm(driver);
+            }
+        });
+        newVehicleBtn.addEventListener("click", () => {
+            resetNewVehicleForm();
+            newVehicleFormSection.classList.remove("hidden");
+            setStatus("已打开新增车辆表单。");
+        });
+        editVehicleSelect.addEventListener("change", () => {
+            const vehicle = adminVehicles.find(item => item.vehicle_code === editVehicleSelect.value);
+            if (vehicle) {
+                loadVehicleIntoForm(vehicle);
+            } else {
+                resetVehicleForm();
+            }
+        });
+        vehicleTableBody.addEventListener("click", event => {
+            const button = event.target.closest("[data-vehicle-code]");
+            if (!button) {
+                return;
+            }
+            const vehicle = adminVehicles.find(item => item.vehicle_code === button.dataset.vehicleCode);
+            if (vehicle) {
+                loadVehicleIntoForm(vehicle);
+            }
+        });
+        createDriverBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await createDriver();
+            } catch (error) {
+                setStatus(`新增司机失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        saveDriverBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await saveDriver();
+            } catch (error) {
+                setStatus(`保存司机失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        deleteDriverBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await deleteDriver();
+            } catch (error) {
+                setStatus(`删除司机失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        pickNewVehiclePositionBtn.addEventListener("click", () => {
+            vehiclePositionTarget = "new";
+            isDrawingRestriction = false;
+            renderDraftRestrictionLine();
+            setStatus("请在地图上点击新增车辆初始位置。");
+        });
+        pickVehiclePositionBtn.addEventListener("click", () => {
+            vehiclePositionTarget = "edit";
+            isDrawingRestriction = false;
+            renderDraftRestrictionLine();
+            setStatus("请在地图上点击当前车辆位置。");
+        });
+        createVehicleBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await createVehicle();
+            } catch (error) {
+                setStatus(`新增车辆失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        saveVehicleBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await saveVehicle();
+            } catch (error) {
+                setStatus(`保存车辆失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        applyVehicleStatusBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await applyVehicleStatus();
+            } catch (error) {
+                setStatus(`更新车辆状态失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        bindVehicleDriverBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await bindVehicleDriver();
+            } catch (error) {
+                setStatus(`绑定司机失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+        deleteVehicleBtn.addEventListener("click", async () => {
+            setAdminBusy(true);
+            try {
+                await deleteVehicle();
+            } catch (error) {
+                setStatus(`删除车辆失败：${error.message}`);
+            } finally {
+                setAdminBusy(false);
+            }
+        });
+
         loadFleet();
         loadRestrictionPolicies();
+        loadAdminOptions();
     </script>
 </body>
 
