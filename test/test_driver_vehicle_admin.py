@@ -83,19 +83,24 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
             "work_status": "off_duty",
         })
 
-    def create_vehicle(self, code="vehicle-1", plate="粤A00001", status="operating", driver=None):
+    def create_vehicle(self, code="vehicle-1", plate="粤A00001", status="offline", driver=None, seat_count=10, max_load_count=10):
         payload = {
             "vehicle_code": code,
             "plate_no": plate,
             "vehicle_type": "bus",
-            "seat_count": 10,
-            "max_load_count": 10,
+            "seat_count": seat_count,
+            "max_load_count": max_load_count,
             "operation_status": status,
-            "initial_position": {"lon": 113.00002, "lat": 23.00001},
         }
         if driver:
             payload["current_driver_code"] = driver
         return self.client.post("/admin/vehicles", json=payload)
+
+    def activate_vehicle(self, code="vehicle-1", status="operating", lon=113.00002, lat=23.00001):
+        return self.client.post(f"/admin/vehicles/{code}/status", json={
+            "operation_status": status,
+            "initial_position": {"lon": lon, "lat": lat},
+        })
 
     def test_options_returns_form_enums_and_current_records(self):
         self.create_driver()
@@ -135,13 +140,28 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(deleted.status_code, 409)
         self.assertEqual(deleted.get_json()["error"], "driver_bound")
 
-    def test_vehicle_create_duplicate_plate_and_position_snap(self):
+    def test_vehicle_create_offline_then_activate_with_position_snap(self):
         created = self.create_vehicle()
 
         self.assertEqual(created.status_code, 201)
         data = created.get_json()
-        self.assertEqual(data["snap"]["node"]["id"], "A")
-        self.assertGreaterEqual(data["snap"]["snap_distance_m"], 0.0)
+        self.assertEqual(data["vehicle"]["operation_status"], "offline")
+        self.assertIsNone(data["snap"])
+        self.assertEqual(len(state.fleet), 0)
+
+        unbound_activation = self.activate_vehicle()
+        self.assertEqual(unbound_activation.status_code, 409)
+        self.assertEqual(unbound_activation.get_json()["error"], "driver_required")
+
+        self.create_driver()
+        bound = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": "driver-1"})
+        self.assertEqual(bound.status_code, 200)
+
+        activated = self.activate_vehicle()
+        self.assertEqual(activated.status_code, 200)
+        active_data = activated.get_json()
+        self.assertEqual(active_data["snap"]["node"]["id"], "A")
+        self.assertGreaterEqual(active_data["snap"]["snap_distance_m"], 0.0)
         self.assertEqual(len(state.fleet), 1)
         self.assertEqual(state.fleet[0].vehicle_id, "vehicle-1")
         self.assertTrue(CoreDispatcher._vehicle_can_accept_order(state.fleet[0]))
@@ -150,9 +170,29 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(duplicated_plate.status_code, 409)
         self.assertEqual(duplicated_plate.get_json()["error"], "plate_no_exists")
 
-        invalid_position = self.client.post("/admin/vehicles", json={
-            "vehicle_code": "vehicle-3",
-            "plate_no": "粤A00003",
+        invalid_create_status = self.create_vehicle(code="vehicle-3", plate="粤A00003", status="operating")
+        self.assertEqual(invalid_create_status.status_code, 400)
+
+        missing_seat_count = self.client.post("/admin/vehicles", json={
+            "vehicle_code": "vehicle-4",
+            "plate_no": "粤A00004",
+            "operation_status": "offline",
+            "max_load_count": 10,
+        })
+        self.assertEqual(missing_seat_count.status_code, 400)
+
+        position_on_create = self.client.post("/admin/vehicles", json={
+            "vehicle_code": "vehicle-5",
+            "plate_no": "粤A00005",
+            "operation_status": "offline",
+            "seat_count": 10,
+            "max_load_count": 10,
+            "initial_position": {"lon": 113.00002, "lat": 23.00001},
+        })
+        self.assertEqual(position_on_create.status_code, 400)
+
+        self.create_vehicle(code="vehicle-6", plate="粤A00006")
+        invalid_position = self.client.post("/admin/vehicles/vehicle-6/status", json={
             "operation_status": "operating",
             "initial_position": {"lon": 181, "lat": 23},
         })
@@ -172,7 +212,9 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(by_internal_id.status_code, 404)
 
     def test_vehicle_status_controls_runtime_acceptance_and_removal(self):
-        self.create_vehicle()
+        self.create_driver()
+        self.create_vehicle(driver="driver-1")
+        self.activate_vehicle()
 
         resting = self.client.post("/admin/vehicles/vehicle-1/status", json={"operation_status": "resting"})
         self.assertEqual(resting.status_code, 200)
@@ -190,7 +232,9 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(state.fleet, [])
 
     def test_vehicle_offline_and_delete_conflict_when_vehicle_has_tasks(self):
-        self.create_vehicle()
+        self.create_driver()
+        self.create_vehicle(driver="driver-1")
+        self.activate_vehicle()
         vehicle = state.fleet[0]
         vehicle.planned_route = [{"type": "O", "order": make_order(self.city)}]
 
@@ -205,6 +249,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
     def test_bind_driver_and_missing_driver(self):
         self.create_driver()
         self.create_vehicle(status="offline")
+        self.create_vehicle(code="vehicle-2", plate="粤A00002", status="offline")
 
         missing = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": "missing"})
         self.assertEqual(missing.status_code, 404)
@@ -212,6 +257,17 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         bound = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": "driver-1"})
         self.assertEqual(bound.status_code, 200)
         self.assertEqual(bound.get_json()["vehicle"]["current_driver_code"], "driver-1")
+
+        duplicate_bound = self.client.post("/admin/vehicles/vehicle-2/bind-driver", json={"driver_code": "driver-1"})
+        self.assertEqual(duplicate_bound.status_code, 409)
+        self.assertEqual(duplicate_bound.get_json()["error"], "driver_already_bound")
+
+        activated = self.activate_vehicle()
+        self.assertEqual(activated.status_code, 200)
+
+        unbind_operating = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": None})
+        self.assertEqual(unbind_operating.status_code, 409)
+        self.assertEqual(unbind_operating.get_json()["error"], "driver_required")
 
 
 class DriverVehicleStateLoadTest(unittest.TestCase):
@@ -224,10 +280,16 @@ class DriverVehicleStateLoadTest(unittest.TestCase):
         persistence._manager = self.previous_manager
 
     def test_load_fleet_from_persistence_uses_operating_database_vehicles(self):
+        persistence.save_driver({
+            "driver_code": "driver-db-1",
+            "driver_no": "DB001",
+            "driver_name": "数据库司机1",
+        }, create=True)
         persistence.save_vehicle({
             "vehicle_code": "db-bus-1",
             "plate_no": "粤B00001",
             "operation_status": "operating",
+            "current_driver_code": "driver-db-1",
             "current_lon": 113.00001,
             "current_lat": 23.00001,
             "last_node_code": "A",
@@ -247,10 +309,16 @@ class DriverVehicleStateLoadTest(unittest.TestCase):
         self.assertEqual([vehicle.vehicle_id for vehicle in fleet], ["db-bus-1"])
 
     def test_load_fleet_assigns_random_poi_when_runtime_position_is_missing(self):
+        persistence.save_driver({
+            "driver_code": "driver-db-random",
+            "driver_no": "DB099",
+            "driver_name": "随机司机",
+        }, create=True)
         persistence.save_vehicle({
             "vehicle_code": "db-bus-random",
             "plate_no": "粤B00999",
             "operation_status": "operating",
+            "current_driver_code": "driver-db-random",
         }, create=True)
 
         fleet = state.load_fleet_from_persistence(self.city, datetime.now().timestamp())

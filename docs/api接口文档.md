@@ -90,7 +90,29 @@ Accept: application/json
 | 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
 | 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并刷新车辆后续路径 |
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
-| 系统 | GET  | `/status`                     | 获取系统全量状态           |
+| 系统 | GET | `/status` | 获取系统全量状态 |
+| 地图 | GET | `/pois` | 获取所有合法上下客 POI |
+| 地图 | GET | `/map/road-network` | 获取前端绘图所需路网数据 |
+| 运营禁区 | GET | `/operation-restrictions/policies` | 查询禁区策略列表 |
+| 运营禁区 | POST | `/operation-restrictions/policies` | 创建禁区策略 |
+| 运营禁区 | GET | `/operation-restrictions/policies/<policy_identity>` | 查询单个禁区策略 |
+| 运营禁区 | PUT | `/operation-restrictions/policies/<policy_identity>` | 更新单个禁区策略 |
+| 运营禁区 | DELETE | `/operation-restrictions/policies/<policy_identity>` | 软删除单个禁区策略 |
+| 运营禁区 | GET | `/operation-restrictions/active` | 查询当前生效禁区策略 |
+| 运营禁区 | POST | `/operation-restrictions/active` | 设置或关闭当前生效禁区策略 |
+| 司机车辆管理 | GET | `/admin/driver-vehicle/options` | 获取司机车辆表单选项 |
+| 司机车辆管理 | GET | `/admin/drivers` | 查询司机档案列表 |
+| 司机车辆管理 | POST | `/admin/drivers` | 创建司机档案 |
+| 司机车辆管理 | GET | `/admin/drivers/<driver_code>` | 查询单个司机档案 |
+| 司机车辆管理 | PUT | `/admin/drivers/<driver_code>` | 更新司机档案 |
+| 司机车辆管理 | DELETE | `/admin/drivers/<driver_code>` | 软删除司机档案 |
+| 司机车辆管理 | GET | `/admin/vehicles` | 查询车辆档案列表 |
+| 司机车辆管理 | POST | `/admin/vehicles` | 创建车辆档案 |
+| 司机车辆管理 | GET | `/admin/vehicles/<vehicle_code>` | 查询单个车辆档案 |
+| 司机车辆管理 | PUT | `/admin/vehicles/<vehicle_code>` | 更新车辆档案 |
+| 司机车辆管理 | DELETE | `/admin/vehicles/<vehicle_code>` | 软删除车辆档案 |
+| 司机车辆管理 | POST | `/admin/vehicles/<vehicle_code>/status` | 更新车辆运营状态 |
+| 司机车辆管理 | POST | `/admin/vehicles/<vehicle_code>/bind-driver` | 绑定或解绑车辆司机 |
 
 ## 3. 公共数据模型
 
@@ -862,7 +884,7 @@ ETA 状态：
 
 ### 4.10 POST `/fleet/<vehicle_id>/path`
 
-车辆 GPS 上报并刷新车辆后续路网轨迹。该接口会执行路网吸附，并在车辆接近当前 O/D 点时触发上车或下车事件。
+车辆 GPS 上报并刷新车辆后续路网轨迹。
 
 请求体：
 
@@ -890,14 +912,6 @@ ETA 状态：
 | 400 | 未初始化、缺少坐标、坐标不是数字 |
 | 404 | 车辆不存在 |
 | 409 | 当前订单计划存在不可达路段 |
-
-前端地图绘制建议：
-
-- 车辆当前位置优先使用 `snap.point`，它是吸附到路网后的点。
-- 主轨迹优先使用 `route.points`。
-- 分段轨迹使用 `route.segments[].points`，可按 `type` 给 O/D 分段上色。
-- 上下车弹窗或状态变更使用 `events`。
-- `path` 和 `snapped_point` 是兼容字段，新代码优先读取 `route.points` 和 `snap.point`。
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
@@ -968,9 +982,43 @@ ETA 状态：
 | 400 | 未初始化或参数格式错误 |
 | 404 | 车辆不存在 |
 
+### 4.13 GET `/status`
+
+获取系统全量状态快照。
+
+响应示例：
+
+```json
+{
+  "initialized": true,
+  "system_time": {},
+  "nodes_count": 1000,
+  "pois_count": 50,
+  "edges_count": 2000,
+  "fleet": [],
+  "order_pool_size": 0,
+  "completed_orders": 0,
+  "operation_restriction_policy": null
+}
+```
+
+字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `initialized` | boolean | 系统是否已初始化 |
+| `system_time` | object | 当前后端业务时间 |
+| `nodes_count` | integer | 路网节点数量 |
+| `pois_count` | integer | 合法上下客 POI 数量 |
+| `edges_count` | integer | 路网有向边数量 |
+| `fleet` | array | 当前内存运行车队 |
+| `order_pool_size` | integer | 待匹配订单池数量 |
+| `completed_orders` | integer | 已完成/归档订单数量 |
+| `operation_restriction_policy` | object/null | 当前生效运营禁区策略 |
+
 ### 4.15 GET `/pois`
 
-获取所有合法上下客 POI兴趣点。
+获取所有合法上下客 POI 兴趣点。
 
 响应示例：
 
@@ -987,6 +1035,712 @@ ETA 状态：
   ]
 }
 ```
+
+字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `pois[].id` | string | POI 节点 ID |
+| `pois[].name` | string | POI 名称 |
+| `pois[].lon` | number | 经度 |
+| `pois[].lat` | number | 纬度 |
+| `pois[].zone` | string/number/null | 所属分区 |
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 400 | 系统未初始化 |
+
+### 4.17 GET `/operation-restrictions/policies`
+
+查询所有未软删除的运营禁区策略，并返回当前全局生效策略。
+
+响应示例：
+
+```json
+{
+  "policies": [					# 当前数据库中所有的运营禁区策略
+    {
+      "policy_code": "campus-block",  # 运营禁区属性
+      "policy_name": "校园施工禁区",	 # 运营禁区名字（通过该字段查询）
+      "description": "临时施工区域",   # 运营禁区描述
+      "polygons": [{
+                    "area_km2": 0.198103, # 区域1面积
+                    "bounds": {
+                        "max_lat": 23.052028,
+                        "max_lon": 113.39797,
+                        "min_lat": 23.046698,
+                        "min_lon": 113.392875},
+                    "index": 0,			# 索引
+                    "name": "polygon-1",  # 区域1名字
+                    "points": [		# 区域1多边形坐标点
+                        {
+                            "lat": 23.050053,
+                            "lon": 113.39797
+                        },
+                        {
+                            "lat": 23.046698,
+                            "lon": 113.394843
+                        },
+                        {
+                            "lat": 23.048752,
+                            "lon": 113.392895
+                        },
+                        {
+                            "lat": 23.051336,
+                            "lon": 113.392875
+                        },
+                        {
+                            "lat": 23.052028,
+                            "lon": 113.395199
+                        },
+                        {
+                            "lat": 23.051109,
+                            "lon": 113.397691
+                        }
+                    ]
+                }
+            ],
+            "polygons_json": [
+                {
+                    "area_km2": 0.198103,
+                    "bounds": {
+                        "max_lat": 23.052028,
+                        "max_lon": 113.39797,
+                        "min_lat": 23.046698,
+                        "min_lon": 113.392875
+                    },
+                    "index": 0,
+                    "name": "polygon-1",
+                    "points": [
+                        {
+                            "lat": 23.050053,
+                            "lon": 113.39797
+                        },
+                        {
+                            "lat": 23.046698,
+                            "lon": 113.394843
+                        },
+                        {
+                            "lat": 23.048752,
+                            "lon": 113.392895
+                        },
+                        {
+                            "lat": 23.051336,
+                            "lon": 113.392875
+                        },
+                        {
+                            "lat": 23.052028,
+                            "lon": 113.395199
+                        },
+                        {
+                            "lat": 23.051109,
+                            "lon": 113.397691
+                        }
+                    ]
+                }],
+      "amap_avoidpolygons": "113.4001,23.0501;113.4011,23.0501;113.4011,23.0511",   # 组成多边形禁区的若干个点（最多支持16个）
+      "polygon_count": 1,   # 当前运营禁区策略的禁区数量
+      "vertex_count": 4,
+      "total_area_km2": 0.01,	# 当前运营禁区策略的面积
+      "status": "enabled",		# 是否可用
+      "tenant_id": "000000",
+      "is_active": true,        # 是否启用
+      "created_at": "2026-06-23 16:30:16.703000",
+      "updated_at": "2026-06-24 18:59:54.741000",
+      "policy_signature": "campus-block：xxxxxxxx"
+    },
+	...
+  ],
+  "active_policy": null			# 当前生效的运营禁区策略
+},
+...  # 如果有多个运营禁区策略的话
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+
+### 4.18 POST `/operation-restrictions/policies`
+
+创建运营禁区策略。后端会校验并规范化 polygon，生成可传给高德 Web 服务 v5 驾车规划的 `avoidpolygons` 字符串。
+
+请求体：
+
+```json
+{
+  "policy_code": "campus-block",
+  "policy_name": "校园施工禁区",
+  "description": "临时施工区域",
+  "polygons": [
+    {
+      "name": "area-1",
+      "points": [
+        {"lon": 113.4001, "lat": 23.0501},
+        {"lon": 113.4011, "lat": 23.0501},
+        {"lon": 113.4011, "lat": 23.0511},
+        {"lon": 113.4001, "lat": 23.0511}
+      ]
+    }
+  ]
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `policy_code` | string | 是 | 策略编号，允许重复 |
+| `policy_name` | string | 是 | 策略名称，同租户下必须唯一 |
+| `description` | string/null | 否 | 策略描述 |
+| `polygons` | array | 是 | 禁区 polygon 列表，至少 1 个 |
+| `polygons[].name` | string/null | 否 | 禁区区域名称 |
+| `polygons[].points` | array | 是 | polygon 顶点列表，后端允许前端重复传闭合尾点 |
+
+校验规则：
+
+| 规则 | 说明 |
+| --- | --- |
+| polygon 数量 | 最多 32 个 |
+| 单个 polygon 顶点数 | 最多 16 个，至少 3 个有效顶点 |
+| 单个 polygon 面积 | 不超过 81 平方公里 |
+| 坐标范围 | 经度 `-180~180`，纬度 `-90~90` |
+| 几何形状 | 不允许零面积或自相交 polygon |
+
+成功响应：
+
+```json
+{
+  "policy": {
+    "policy_code": "campus-block",
+    "policy_name": "校园施工禁区",
+    "is_active": false,
+    "policy_signature": "campus-block:xxxxxxxxxxxxxxxx"
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 创建成功 |
+| 400 | 参数错误、polygon 不合法或策略名称已存在 |
+| 500 | 服务端异常 |
+
+### 4.19 GET `/operation-restrictions/policies/<policy_identity>`
+
+查询单个运营禁区策略。`policy_identity` 可传策略名称或策略编号；由于策略编号允许重复，前端优先使用唯一的 `policy_name`，只有确认编号唯一时再使用 `policy_code`。前端拼接 URL 时需要编码。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `policy_identity` | string | 策略名称或策略编号，推荐传 `policy_name` |
+
+成功响应：
+
+```json
+{
+  "policy": {
+    "policy_code": "campus-block",
+    "policy_name": "校园施工禁区",
+    "polygons": []
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 404 | 策略不存在 |
+
+### 4.20 PUT `/operation-restrictions/policies/<policy_identity>`
+
+更新单个运营禁区策略。请求体结构与创建接口一致；编辑已有策略时不允许修改 `policy_name`。由于策略编号允许重复，前端优先使用唯一的 `policy_name` 作为路径参数。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `policy_identity` | string | 策略名称或策略编号，推荐传 `policy_name` |
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 更新成功 |
+| 400 | 参数错误、polygon 不合法或试图修改策略名称 |
+| 404 | 策略不存在 |
+| 500 | 服务端异常 |
+
+### 4.21 DELETE `/operation-restrictions/policies/<policy_identity>`
+
+软删除单个运营禁区策略。如果删除的是当前生效策略，后端会同步清空当前策略。
+
+成功响应：
+
+```json
+{
+  "status": "deleted",
+  "policy_identity": "校园施工禁区",
+  "active_policy": null
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 删除成功 |
+| 404 | 策略不存在 |
+| 500 | 服务端异常 |
+
+### 4.22 GET `/operation-restrictions/active`
+
+查询当前全局生效的运营禁区策略。
+
+响应示例：
+
+```json
+{
+  "policy": null
+}
+```
+
+`policy=null` 表示当前未启用任何禁区策略。
+
+### 4.23 POST `/operation-restrictions/active`
+
+设置当前全局生效的禁区策略，或关闭禁区限制。策略切换只影响后续新路线计算，不会主动重算已有车辆路线。由于策略编号允许重复，前端优先传 `policy_name`。
+
+请求体，按策略名称选择：
+
+```json
+{
+  "policy_name": "校园施工禁区"
+}
+```
+
+请求体，关闭禁区：
+
+```json
+{
+  "policy_code": null
+}
+```
+
+成功响应：
+
+```json
+{
+  "status": "active_updated",
+  "policy": null
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 设置成功 |
+| 404 | 指定策略不存在或已禁用 |
+| 500 | 服务端异常 |
+
+### 4.24 GET `/admin/driver-vehicle/options`
+
+返回司机车辆管理表单所需枚举，以及当前司机和车辆档案列表。
+
+响应示例：
+
+```json
+{
+  "driver_employment_statuses": ["active", "inactive", "blocked"],  # 雇佣司机的状态
+  "driver_work_statuses": ["off_duty", "listening", "serving", "resting"],  # 司机的工作状态
+  "vehicle_operation_statuses": ["operating", "resting", "closing", "offline", "maintenance"], # 车辆的状态
+  "vehicle_types": ["bus", "large_bus", "mid_bus", "small_bus"],
+  "drivers": [],  # 当前司机信息
+  "vehicles": []  # 当前车辆信息
+}
+```
+
+前端建议：
+
+- 新增/编辑司机车辆表单的下拉框统一从该接口读取。
+- 页面打开时调用一次，新增、编辑、删除成功后再刷新一次。
+
+### 4.25 GET `/admin/drivers`
+
+查询未软删除的司机档案列表。
+
+响应示例：
+
+```json
+{
+  "drivers": []
+}
+```
+
+### 4.26 POST `/admin/drivers`
+
+创建司机档案。`driver_code` 是司机业务身份字段，创建后不可修改；`driver_no` 遵循数据库唯一约束，冲突返回 `409`。
+
+请求体：
+
+```json
+{
+  "driver_code": "driver-001",
+  "driver_no": "D001",
+  "driver_name": "张三",
+  "phone": "13800000000",
+  "id_card_no": "",
+  "license_no": "",
+  "license_class": "A1",
+  "license_expire_date": "2028-12-31",
+  "service_city": "广州",
+  "employment_status": "active",
+  "work_status": "off_duty",  # 工作状态
+  "remark": ""
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `driver_code` | string | 是 | 司机业务编码，创建后不可修改 |
+| `driver_no` | string | 是 | 司机工号，同租户下唯一 |
+| `driver_name` | string | 否 | 司机姓名；为空时后端会回退为工号或编码 |
+| `phone` | string | 否 | 手机号 |
+| `id_card_no` | string | 否 | 身份证号 |
+| `license_no` | string | 否 | 驾驶证号 |
+| `license_class` | string | 否 | 准驾车型 |
+| `license_expire_date` | string/null | 否 | 驾驶证到期日，格式 `YYYY-MM-DD` |
+| `service_city` | string | 否 | 服务城市 |
+| `employment_status` | string | 否 | 雇佣状态，见 `/admin/driver-vehicle/options` |
+| `work_status` | string | 否 | 工作状态，见 `/admin/driver-vehicle/options` |
+| `remark` | string | 否 | 备注 |
+
+成功响应：
+
+```json
+{
+  "driver": {}
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 创建成功 |
+| 400 | 参数错误 |
+| 409 | 司机工号等唯一字段冲突 |
+
+### 4.27 GET `/admin/drivers/<driver_code>`
+
+查询单个司机档案。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `driver_code` | string | 司机业务编码 |
+
+成功响应：
+
+```json
+{
+  "driver": {}
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 404 | 司机不存在 |
+
+### 4.28 PUT `/admin/drivers/<driver_code>`
+
+更新司机档案。`driver_code` 以路径参数为准，请求体中的 `driver_code` 会被忽略。
+
+请求体：同 `POST /admin/drivers`。
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 更新成功 |
+| 400 | 参数错误 |
+| 404 | 司机不存在 |
+| 409 | 司机工号等唯一字段冲突 |
+
+### 4.29 DELETE `/admin/drivers/<driver_code>`
+
+软删除司机档案。如果司机仍被车辆绑定，返回 `409`。
+
+成功响应：
+
+```json
+{
+  "status": "deleted",
+  "driver_code": "driver-001"
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 删除成功 |
+| 404 | 司机不存在 |
+| 409 | 司机仍被车辆绑定 |
+
+### 4.30 GET `/admin/vehicles`
+
+查询未软删除的车辆档案列表，包含当前司机和运行位置字段。
+
+响应示例：
+
+```json
+{
+  "vehicles": []
+}
+```
+
+### 4.31 POST `/admin/vehicles`
+
+创建离线车辆档案。`vehicle_code` 是车辆业务身份字段，创建后不可修改；`plate_no` 遵循数据库唯一约束，冲突返回 `409`。新增车辆时 `operation_status` 必须为 `offline`，不能携带 `initial_position`；车辆创建后需要先绑定司机，再调用 `POST /admin/vehicles/<vehicle_code>/status` 切换为 `operating`，车辆才会进入运行车队并参与运营。
+
+请求体：
+
+```json
+{
+  "vehicle_code": "bus-001",
+  "plate_no": "粤A00001",
+  "vehicle_type": "bus",
+  "seat_count": 10,
+  "max_load_count": 10,
+  "vehicle_color": "#64748b",
+  "vehicle_model": "EV-BUS",
+  "operation_status": "offline",
+  "operation_mode": "dynamic_bus",
+  "current_driver_code": "driver-001",
+  "remark": ""
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `vehicle_code` | string | 是 | 车辆业务编码，创建后不可修改 |
+| `plate_no` | string | 是 | 车牌号，同租户下唯一 |
+| `vehicle_type` | string | 否 | 车辆类型，见 `/admin/driver-vehicle/options` |
+| `seat_count` | integer | 是 | 座位数，必须为正整数 |
+| `max_load_count` | integer | 是 | 核载人数，必须为正整数 |
+| `vehicle_color` | string | 否 | 车辆展示颜色 |
+| `vehicle_model` | string | 否 | 车辆型号 |
+| `operation_status` | string | 是 | 新增车辆时必须为 `offline` |
+| `operation_mode` | string | 否 | 运营模式，默认 `dynamic_bus` |
+| `current_driver_code` | string/null | 否 | 当前绑定司机编码；同一个司机只能绑定一台未删除车辆 |
+| `remark` | string | 否 | 备注 |
+
+`POST /admin/vehicles` 不接收车辆初始位置。需要让车辆开始运营时，先选择该车辆并绑定司机，再调用 `POST /admin/vehicles/<vehicle_code>/status` 并传 `operation_status=operating` 与车辆当前位置。
+
+成功响应：
+
+```json
+{
+  "vehicle": {},
+  "runtime": {
+    "runtime_applied": true,
+    "runtime_action": "removed"
+  },
+  "snap": null
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 创建成功 |
+| 400 | 参数错误、`operation_status` 不是 `offline`、缺少座位数/核载人数或创建时传入位置 |
+| 409 | 车牌号等唯一字段冲突 |
+
+### 4.32 GET `/admin/vehicles/<vehicle_code>`
+
+查询单个车辆档案。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `vehicle_code` | string | 车辆业务编码 |
+
+成功响应：
+
+```json
+{
+  "vehicle": {}
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 404 | 车辆不存在 |
+
+### 4.33 PUT `/admin/vehicles/<vehicle_code>`
+
+更新车辆档案并按运营状态同步运行车队。`vehicle_code` 以路径参数为准，请求体中的 `vehicle_code` 会被忽略。
+
+请求体：同 `POST /admin/vehicles`。
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 更新成功 |
+| 400 | 参数错误、状态枚举非法或可运行车辆缺少位置 |
+| 404 | 车辆不存在 |
+| 409 | 车辆有未完成任务，不能退出运营 |
+
+### 4.34 DELETE `/admin/vehicles/<vehicle_code>`
+
+软删除车辆档案，并在可删除时从运行车队移除。如果车辆仍有 `on_board_orders` 或 `planned_route`，返回 `409`。
+
+成功响应：
+
+```json
+{
+  "status": "deleted",
+  "vehicle_code": "bus-001"
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 删除成功 |
+| 404 | 车辆不存在 |
+| 409 | 车辆仍有未完成任务 |
+
+### 4.35 POST `/admin/vehicles/<vehicle_code>/status`
+
+更新车辆运营状态，并同步运行车队。
+
+请求体：
+
+```json
+{
+  "operation_status": "offline"
+}
+```
+
+激活可运行状态时可以同时传当前位置；对于刚通过 `POST /admin/vehicles` 新增、尚无运行位置的离线车辆，切换为 `operating` 时必须先绑定司机，并传 `initial_position`：
+
+```json
+{
+  "operation_status": "operating",
+  "initial_position": {
+    "lon": 113.4001,
+    "lat": 23.0501
+  }
+}
+```
+
+状态规则：
+
+| 状态 | 说明 |
+| --- | --- |
+| `operating` | 车辆已绑定司机时加入或更新运行车队，可参与派单 |
+| `resting` | 保留展示，但不接新单 |
+| `closing` | 停止接新单，允许完成已有任务 |
+| `offline` | 无任务时从运行车队移除，仅保留数据库档案 |
+| `maintenance` | 无任务时从运行车队移除，仅保留数据库档案 |
+
+成功响应：
+
+```json
+{
+  "vehicle": {},
+  "runtime": {
+    "runtime_applied": true,
+    "runtime_action": "removed"
+  },
+  "snap": null
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 状态更新成功 |
+| 400 | 状态枚举非法或可运行车辆缺少位置 |
+| 404 | 车辆不存在 |
+| 409 | 未绑定司机不能开始运营，或车辆仍有未完成任务不能退出运营 |
+
+### 4.36 POST `/admin/vehicles/<vehicle_code>/bind-driver`
+
+绑定或解绑车辆司机，并同步运行车队中的司机字段。同一个司机只能绑定一台未删除车辆；已处于 `operating` 的车辆不能直接解绑司机，需要先把车辆状态调整为非运营状态。
+
+请求体，绑定司机：
+
+```json
+{
+  "driver_code": "driver-001",
+  "operator": "admin"
+}
+```
+
+请求体，解绑司机：
+
+```json
+{
+  "driver_code": null
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `driver_code` | string/null | 是 | 司机业务编码；传 `null` 或空字符串表示解绑 |
+| `operator` | string/null | 否 | 操作人标识，用于绑定历史 |
+
+成功响应：
+
+```json
+{
+  "vehicle": {},
+  "runtime": {
+    "runtime_applied": true,
+    "runtime_action": "updated"
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 绑定或解绑成功 |
+| 404 | 车辆不存在或司机不存在 |
+| 409 | 司机已绑定其他车辆，或运营车辆尝试解绑司机 |
 
 ## 5. 前端典型流程
 
@@ -1030,13 +1784,7 @@ ETA 状态：
 
 ### 6.2 URL 编码
 
-车辆 ID 可能包含中文，如 `巴士-绿色01`。前端拼接 URL 时必须编码：
-
-```js
-const url = `/fleet/${encodeURIComponent(vehicleId)}`;
-```
-
-订单 ID 也建议统一编码：
+订单 ID 建议统一编码：
 
 ```js
 const url = `/orders/${encodeURIComponent(requestId)}/eta`;
@@ -1082,189 +1830,3 @@ $env:AMAP_API_KEY="你的高德Web服务Key"
 | 路径不可达 | 当前路线不可达，请调整任务或联系调度 |
 | 已上车不可取消 | 乘客已上车，当前订单不可取消 |
 | ETA disabled/error | ETA 暂不可用，请稍后刷新 |
-
-## 运营禁区策略
-
-### `GET /operation-restrictions/policies`
-
-返回所有未软删除的禁区策略，以及当前生效策略。
-
-### `POST /operation-restrictions/policies`
-
-创建禁区策略。请求体示例：
-
-```json
-{
-  "policy_code": "campus-block",
-  "policy_name": "校园施工禁区",
-  "description": "optional",
-  "polygons": [
-    {
-      "name": "area-1",
-      "points": [
-        {"lon": 113.4001, "lat": 23.0501},
-        {"lon": 113.4011, "lat": 23.0501},
-        {"lon": 113.4011, "lat": 23.0511},
-        {"lon": 113.4001, "lat": 23.0511}
-      ]
-    }
-  ]
-}
-```
-
-后端会校验高德 `avoidpolygons` 限制：最多 32 个 polygon、单个 polygon 最多 16 个顶点，且单个 polygon 面积不超过 81 平方公里。
-
-策略名称 `policy_name` 在同一租户下必须唯一；策略编号 `policy_code` 允许重复。
-
-### `GET /operation-restrictions/policies/<policy_name>`
-
-返回单个禁区策略。
-
-### `PUT /operation-restrictions/policies/<policy_name>`
-
-更新单个禁区策略。请求体结构与创建接口一致，策略名称作为唯一标识，编辑已有策略时不允许修改名称。
-
-### `DELETE /operation-restrictions/policies/<policy_name>`
-
-软删除单个禁区策略；如果该策略当前生效，则同步清空当前策略。
-
-### `GET /operation-restrictions/active`
-
-返回当前全局生效的禁区策略。
-
-### `POST /operation-restrictions/active`
-
-选择当前全局生效策略，或关闭禁区限制：
-
-```json
-{"policy_code": "campus-block"}
-```
-
-```json
-{"policy_code": null}
-```
-
-策略切换只影响后续新路线计算，不会主动重算已有车辆路线。
-
-## 司机车辆管理
-
-该组接口用于前端动态维护司机档案、车辆档案、车辆状态和车辆司机绑定。删除均为软删除。
-
-### `GET /admin/driver-vehicle/options`
-
-返回司机车辆管理表单所需枚举，以及当前司机和车辆列表：
-
-```json
-{
-  "driver_employment_statuses": ["active", "inactive", "blocked"],
-  "driver_work_statuses": ["off_duty", "listening", "serving", "resting"],
-  "vehicle_operation_statuses": ["operating", "resting", "closing", "offline", "maintenance"],
-  "vehicle_types": ["bus", "large_bus", "mid_bus", "small_bus"],
-  "drivers": [],
-  "vehicles": []
-}
-```
-
-### `GET /admin/drivers`
-
-查询未软删除的司机档案列表。
-
-### `POST /admin/drivers`
-
-创建司机档案。`driver_code` 为路径身份字段，创建后不可修改；`driver_no` 按数据库唯一约束检测，冲突返回 `409`。
-
-```json
-{
-  "driver_code": "driver-001",
-  "driver_no": "D001",
-  "driver_name": "张三",
-  "phone": "13800000000",
-  "id_card_no": "",
-  "license_no": "",
-  "license_class": "A1",
-  "license_expire_date": "2028-12-31",
-  "service_city": "广州",
-  "employment_status": "active",
-  "work_status": "off_duty",
-  "remark": ""
-}
-```
-
-### `GET /admin/drivers/<driver_code>`
-
-查询单个司机档案。
-
-### `PUT /admin/drivers/<driver_code>`
-
-更新司机档案。`driver_code` 以路径为准，请求体中的 `driver_code` 会被忽略。
-
-### `DELETE /admin/drivers/<driver_code>`
-
-软删除司机档案；如果司机仍被车辆绑定，返回 `409`。
-
-### `GET /admin/vehicles`
-
-查询未软删除的车辆档案列表。
-
-### `POST /admin/vehicles`
-
-创建车辆档案。`vehicle_code` 为路径身份字段，创建后不可修改；`plate_no` 按数据库唯一约束检测，冲突返回 `409`。
-
-```json
-{
-  "vehicle_code": "bus-001",
-  "plate_no": "粤A00001",
-  "vehicle_type": "bus",
-  "seat_count": 10,
-  "max_load_count": 10,
-  "vehicle_color": "#64748b",
-  "vehicle_model": "EV-BUS",
-  "operation_status": "operating",
-  "operation_mode": "dynamic_bus",
-  "current_driver_code": "driver-001",
-  "initial_position": {"lon": 113.4001, "lat": 23.0501},
-  "remark": ""
-}
-```
-
-新增或激活为 `operating`、`resting`、`closing` 时必须提供 `initial_position`，或车辆已有运行位置。后端会吸附到最近路网节点，并返回 `snap.node` 和 `snap.snap_distance_m`。
-
-### `GET /admin/vehicles/<vehicle_code>`
-
-查询单个车辆档案。
-
-### `PUT /admin/vehicles/<vehicle_code>`
-
-更新车辆档案并同步运行态车队。
-
-### `DELETE /admin/vehicles/<vehicle_code>`
-
-软删除车辆档案；如果车辆仍有 `on_board_orders` 或 `planned_route`，返回 `409`。
-
-### `POST /admin/vehicles/<vehicle_code>/status`
-
-更新车辆运营状态：
-
-```json
-{
-  "operation_status": "offline"
-}
-```
-
-状态规则：
-- `operating`：加入或更新运行车队，可参与派单。
-- `resting`：保留展示，但不接新单。
-- `closing`：停止接新单，允许完成已有任务。
-- `offline` / `maintenance`：无任务时从运行车队移除；有未完成任务时返回 `409`。
-
-### `POST /admin/vehicles/<vehicle_code>/bind-driver`
-
-绑定或解绑车辆司机：
-
-```json
-{"driver_code": "driver-001"}
-```
-
-```json
-{"driver_code": null}
-```

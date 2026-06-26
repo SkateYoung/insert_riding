@@ -1394,6 +1394,30 @@ class MySqlPersistence:
             raise KeyError("driver_not_found")
         return driver_id
 
+    def _check_memory_driver_binding_available(self, driver_code, vehicle_code):
+        """检查内存模式下司机是否已绑定其他车辆。"""
+        if not driver_code:
+            return
+        for vehicle in self._vehicle_memory.values():
+            if (
+                vehicle.get("current_driver_code") == driver_code
+                and vehicle.get("vehicle_code") != vehicle_code
+            ):
+                raise PersistenceConflict("司机已绑定其他车辆", code="driver_already_bound", field="driver_code")
+
+    def _check_driver_binding_available_sync(self, cursor, driver_id, vehicle_code):
+        """检查数据库模式下司机是否已绑定其他车辆。"""
+        if driver_id is None:
+            return
+        cursor.execute("""
+            SELECT vehicle_code
+            FROM bus_vehicle
+            WHERE tenant_id=%s AND current_driver_id=%s AND vehicle_code<>%s AND deleted=0
+            LIMIT 1
+        """, (self.tenant_id, driver_id, vehicle_code))
+        if cursor.fetchone():
+            raise PersistenceConflict("司机已绑定其他车辆", code="driver_already_bound", field="driver_code")
+
     def _sync_vehicle_binding(self, cursor, vehicle_id, driver_id, operator=None):
         """同步车辆司机绑定历史。
 
@@ -1494,7 +1518,10 @@ class MySqlPersistence:
                 for item in self.list_vehicles():
                     if item.get("plate_no") == plate_no and item.get("vehicle_code") != vehicle_code:
                         raise PersistenceConflict("车牌号已存在", code="plate_no_exists", field="plate_no")
+        operation_status = str(payload.get("operation_status") or "offline").strip()
         driver_code = str(payload.get("current_driver_code") or payload.get("driver_code") or "").strip() or None
+        if operation_status == "operating" and not driver_code:
+            raise PersistenceConflict("车辆未绑定司机，不能开始运营", code="driver_required", field="current_driver_code")
         if driver_code and not self.get_driver(driver_code):
             raise KeyError("driver_not_found")
         normalized = {
@@ -1505,7 +1532,7 @@ class MySqlPersistence:
             "max_load_count": int(payload.get("max_load_count") or payload.get("seat_count") or 0),
             "vehicle_color": str(payload.get("vehicle_color") or "").strip() or None,
             "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
-            "operation_status": str(payload.get("operation_status") or "offline").strip(),
+            "operation_status": operation_status,
             "operation_mode": str(payload.get("operation_mode") or "dynamic_bus").strip(),
             "current_driver_code": driver_code,
             "remark": str(payload.get("remark") or "").strip() or None,
@@ -1519,6 +1546,7 @@ class MySqlPersistence:
             "can_accept_order": payload.get("can_accept_order"),
         }
         if not self.enabled or pymysql is None:
+            self._check_memory_driver_binding_available(driver_code, vehicle_code)
             driver = self.get_driver(driver_code) if driver_code else None
             normalized["current_driver_no"] = driver.get("driver_no") if driver else None
             normalized["current_driver_name"] = driver.get("driver_name") if driver else None
@@ -1534,6 +1562,7 @@ class MySqlPersistence:
             connection = self._sync_connection(autocommit=False)
             with connection.cursor() as cursor:
                 driver_id = self._resolve_driver_id(cursor, driver_code)
+                self._check_driver_binding_available_sync(cursor, driver_id, vehicle_code)
                 if create:
                     cursor.execute("""
                         INSERT INTO bus_vehicle

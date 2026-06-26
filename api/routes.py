@@ -428,7 +428,28 @@ def _runtime_payload_from_position(position, operation_status, existing_vehicle=
     return payload, snap_info
 
 
-def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=None):
+def _required_positive_int(payload, field):
+    """读取必填正整数字段。"""
+    if field not in payload or payload.get(field) in (None, ""):
+        raise ValueError(f"{field} 不能为空")
+    try:
+        value = int(payload.get(field))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} 必须是正整数") from exc
+    if value <= 0:
+        raise ValueError(f"{field} 必须是正整数")
+    return value
+
+
+def _payload_has_position_field(payload):
+    """判断车辆请求体是否包含位置字段。"""
+    return any(key in payload for key in ("initial_position", "position")) or any(
+        payload.get(key) not in (None, "")
+        for key in ("lon", "lng", "longitude", "lat", "latitude")
+    )
+
+
+def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=None, create=False):
     """校验并规范化车辆档案请求体。
 
     Args:
@@ -449,7 +470,15 @@ def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=Non
     plate_no = str(payload.get("plate_no") or "").strip()
     if not plate_no:
         raise ValueError("plate_no 不能为空")
-    operation_status = str(payload.get("operation_status") or payload.get("status") or "offline").strip()
+    raw_operation_status = payload.get("operation_status", payload.get("status"))
+    operation_status = str(raw_operation_status or "offline").strip()
+    if create:
+        if raw_operation_status in (None, ""):
+            raise ValueError("新增车辆时 operation_status 必须为 offline")
+        if operation_status != "offline":
+            raise ValueError("新增车辆时 operation_status 必须为 offline")
+        if _payload_has_position_field(payload):
+            raise ValueError("新增车辆时不允许传入 initial_position")
     if operation_status not in VEHICLE_OPERATION_STATUSES:
         raise ValueError(f"operation_status 必须是 {', '.join(VEHICLE_OPERATION_STATUSES)} 之一")
     vehicle_type = str(payload.get("vehicle_type") or "bus").strip()
@@ -460,12 +489,18 @@ def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=Non
     if operation_status in VEHICLE_RUNTIME_STATUSES and position is None and not existing_vehicle:
         raise ValueError("可运行车辆必须提供 initial_position")
     runtime_payload, snap_info = _runtime_payload_from_position(position, operation_status, existing_vehicle=existing_vehicle)
+    if create:
+        seat_count = _required_positive_int(payload, "seat_count")
+        max_load_count = _required_positive_int(payload, "max_load_count")
+    else:
+        seat_count = int(payload.get("seat_count") or payload.get("max_load_count") or 0)
+        max_load_count = int(payload.get("max_load_count") or payload.get("seat_count") or 0)
     result = {
         "vehicle_code": vehicle_code,
         "plate_no": plate_no,
         "vehicle_type": vehicle_type,
-        "seat_count": int(payload.get("seat_count") or payload.get("max_load_count") or 0),
-        "max_load_count": int(payload.get("max_load_count") or payload.get("seat_count") or 0),
+        "seat_count": seat_count,
+        "max_load_count": max_load_count,
         "vehicle_color": str(payload.get("vehicle_color") or "").strip() or None,
         "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
         "operation_status": operation_status,
@@ -1266,22 +1301,23 @@ def admin_list_vehicles():
 
 @bp.route("/admin/vehicles", methods=["POST"])
 def admin_create_vehicle():
-    """创建车辆档案并按状态同步运行车队。
+    """创建离线车辆档案。
 
     Request:
         POST /admin/vehicles
         Body JSON 字段:
             vehicle_code (str): 车辆业务编码，创建后不可修改。
             plate_no (str): 车牌号，同租户下唯一。
-            operation_status (str): operating/resting/closing/offline/maintenance。
-            initial_position (dict): 新增可运行车辆时必填，包含 lon/lat。
+            operation_status (str): 必须为 offline。
+            seat_count (int): 座位数，必填。
+            max_load_count (int): 核载人数，必填。
 
     Returns:
-        JSON: 创建后的车辆档案、运行态同步结果和路网吸附结果。
+        JSON: 创建后的车辆档案和运行态同步结果。
     """
     try:
         with state.state_lock:
-            payload, snap_info = _normalize_vehicle_payload(request.get_json(silent=True) or {})
+            payload, snap_info = _normalize_vehicle_payload(request.get_json(silent=True) or {}, create=True)
             vehicle = persistence.save_vehicle(payload, create=True)
             runtime = _apply_vehicle_record_to_runtime(vehicle)
         return jsonify({"vehicle": vehicle, "runtime": runtime, "snap": snap_info}), 201
@@ -1378,6 +1414,8 @@ def admin_update_vehicle_status(vehicle_code):
         Body JSON 字段:
             operation_status (str): 目标运营状态。
             initial_position (dict): 激活可运行状态时可选提供的 lon/lat。
+        说明:
+            切换为 operating 时车辆必须已绑定司机。
 
     Returns:
         JSON: 更新后的车辆档案、运行态同步结果和可选吸附结果。
@@ -1420,6 +1458,8 @@ def admin_bind_vehicle_driver(vehicle_code):
         Body JSON 字段:
             driver_code (str | null): 司机业务编码；为空表示解绑。
             operator (str | None): 可选操作人标识。
+        说明:
+            同一司机只能绑定一台车；operating 车辆不能直接解绑司机。
 
     Returns:
         JSON: 更新后的车辆档案和运行态同步结果。
