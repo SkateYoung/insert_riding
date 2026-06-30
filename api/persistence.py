@@ -58,6 +58,25 @@ def _env_enabled(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_value(*names, default=None):
+    """按顺序读取第一个非空环境变量。"""
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _optional_path(value):
+    """把可选文件路径规范化为绝对路径。"""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if value.startswith("file:"):
+        value = value[5:]
+    return os.path.abspath(os.path.expanduser(value))
+
+
 def _now_dt():
     """生成数据库使用的本地时间，精度统一到秒。"""
     return datetime.now().replace(microsecond=0)
@@ -436,6 +455,18 @@ class MySqlPersistence:
         self.password = config.get("password") or ""
         self.database = config.get("database") or "bus_dispatch_core"
         self.tenant_id = config.get("tenant_id") or DEFAULT_TENANT_ID
+        self.ssl_ca = _optional_path(config.get("ssl_ca"))
+        self.ssl_cert = _optional_path(config.get("ssl_cert"))
+        self.ssl_key = _optional_path(config.get("ssl_key"))
+        self.ssl_key_password = config.get("ssl_key_password") or None
+        self.ssl_enabled = bool(
+            _env_enabled(config.get("ssl_enabled"))
+            or self.ssl_ca
+            or self.ssl_cert
+            or self.ssl_key
+        )
+        self.ssl_verify_cert = bool(self.ssl_enabled and _env_enabled(config.get("ssl_verify_cert", "1")))
+        self.ssl_verify_identity = bool(self.ssl_enabled and _env_enabled(config.get("ssl_verify_identity", "0")))
         self.queue = queue.Queue(maxsize=int(config.get("queue_size") or DEFAULT_QUEUE_SIZE))
         self.worker = None
         self.stop_event = threading.Event()
@@ -461,13 +492,20 @@ class MySqlPersistence:
         """
         return cls({
             "enabled": _env_enabled(os.getenv("BUS_DB_ENABLED", "1")),
-            "host": os.getenv("BUS_DB_HOST", "127.0.0.1"),
-            "port": os.getenv("BUS_DB_PORT", "3306"),
-            "user": os.getenv("BUS_DB_USER", "root"),
-            "password": os.getenv("BUS_DB_PASSWORD", "021015"),
-            "database": os.getenv("BUS_DB_NAME", "bus_dispatch_core"),
+            "host": _env_value("BUS_DB_HOST", "MYSQL_HOST", default="127.0.0.1"),
+            "port": _env_value("BUS_DB_PORT", "MYSQL_PORT", default="3306"),
+            "user": _env_value("BUS_DB_USER", "MYSQL_USER", default="root"),
+            "password": _env_value("BUS_DB_PASSWORD", "MYSQL_PWD", default=""),
+            "database": _env_value("BUS_DB_NAME", "MYSQL_DB", default="bus_dispatch_core"),
             "tenant_id": os.getenv("BUS_DB_TENANT_ID", DEFAULT_TENANT_ID),
             "queue_size": os.getenv("BUS_DB_QUEUE_SIZE", str(DEFAULT_QUEUE_SIZE)),
+            "ssl_enabled": _env_value("BUS_DB_SSL_ENABLED", "MYSQL_SSL_ENABLED"),
+            "ssl_ca": _env_value("BUS_DB_SSL_CA", "MYSQL_SSL_CA"),
+            "ssl_cert": _env_value("BUS_DB_SSL_CERT", "MYSQL_SSL_CERT"),
+            "ssl_key": _env_value("BUS_DB_SSL_KEY", "MYSQL_SSL_KEY"),
+            "ssl_key_password": _env_value("BUS_DB_SSL_KEY_PASSWORD", "MYSQL_SSL_KEY_PASSWORD"),
+            "ssl_verify_cert": _env_value("BUS_DB_SSL_VERIFY_CERT", "MYSQL_SSL_VERIFY_CERT", default="1"),
+            "ssl_verify_identity": _env_value("BUS_DB_SSL_VERIFY_IDENTITY", "MYSQL_SSL_VERIFY_IDENTITY", default="0"),
         })
 
     def status(self):
@@ -483,7 +521,46 @@ class MySqlPersistence:
             "processed_tasks": self.processed_tasks,
             "database": self.database,
             "tenant_id": self.tenant_id,
+            "ssl_enabled": self.ssl_enabled,
+            "ssl_ca": self.ssl_ca,
+            "ssl_verify_cert": self.ssl_verify_cert,
+            "ssl_verify_identity": self.ssl_verify_identity,
         }
+
+    def _ssl_connect_kwargs(self):
+        """生成 PyMySQL SSL 连接参数。"""
+        if not self.ssl_enabled:
+            return {}
+        kwargs = {
+            "ssl_verify_cert": self.ssl_verify_cert,
+            "ssl_verify_identity": self.ssl_verify_identity,
+        }
+        if self.ssl_ca:
+            kwargs["ssl_ca"] = self.ssl_ca
+        if self.ssl_cert:
+            kwargs["ssl_cert"] = self.ssl_cert
+        if self.ssl_key:
+            kwargs["ssl_key"] = self.ssl_key
+        if self.ssl_key_password:
+            kwargs["ssl_key_password"] = self.ssl_key_password
+        if not any(key in kwargs for key in ("ssl_ca", "ssl_cert", "ssl_key")):
+            kwargs["ssl"] = {}
+        return kwargs
+
+    def _connect_kwargs(self, *, autocommit):
+        """生成统一的 PyMySQL 连接参数。"""
+        kwargs = {
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "charset": "utf8mb4",
+            "autocommit": autocommit,
+            "cursorclass": pymysql.cursors.DictCursor,
+        }
+        kwargs.update(self._ssl_connect_kwargs())
+        return kwargs
 
     def fetch_completed_orders_for_forecast(self, limit=None):
         """读取 bus_order 中已完成订单，供 OD 热点预测使用。
@@ -510,16 +587,7 @@ class MySqlPersistence:
 
         connection = None
         try:
-            connection = pymysql.connect(
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self.password,
-                database=self.database,
-                charset="utf8mb4",
-                autocommit=True,
-                cursorclass=pymysql.cursors.DictCursor,
-            )
+            connection = pymysql.connect(**self._connect_kwargs(autocommit=True))
             with connection.cursor() as cursor:
                 cursor.execute("""
                     SELECT
@@ -597,16 +665,7 @@ class MySqlPersistence:
         """创建同步数据库连接，供需要事务的禁区管理接口使用。"""
         if not self.enabled or pymysql is None:
             return None
-        return pymysql.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            charset="utf8mb4",
-            autocommit=autocommit,
-            cursorclass=pymysql.cursors.DictCursor,
-        )
+        return pymysql.connect(**self._connect_kwargs(autocommit=autocommit))
 
     @staticmethod
     def _policy_from_row(row):
@@ -1783,16 +1842,7 @@ class MySqlPersistence:
                 return self._connection
             except Exception:
                 self._close_connection()
-        self._connection = pymysql.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            charset="utf8mb4",
-            autocommit=False,
-            cursorclass=pymysql.cursors.DictCursor,
-        )
+        self._connection = pymysql.connect(**self._connect_kwargs(autocommit=False))
         return self._connection
 
     def _close_connection(self):

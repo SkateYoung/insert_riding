@@ -30,6 +30,10 @@ class FakeCity:
         self.c.name = "目的地"
         self.pois = [self.a, self.b, self.c]
         self.nodes_map = {node.id: node for node in self.pois}
+        self.edges = [
+            {"u": self.a.id, "v": self.b.id},
+            {"u": self.b.id, "v": self.c.id},
+        ]
 
     def get_path(self, start_node, end_node):
         if start_node.id == end_node.id:
@@ -244,6 +248,7 @@ def mark_vehicle_grasp_ready(vehicle, city):
     start_node = city.nodes_map[vehicle.next_node]
     result = CoreDispatcher.rebuild_vehicle_path_from_node(vehicle, city, start_node)
     raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
+    vehicle.planned_route_point = result["path"]
     vehicle.planned_route_segment_raw_point = raw_segments
     vehicle.planned_route_segment_grasped_point = raw_segments
     vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(raw_segments)
@@ -725,6 +730,143 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
         self.assertEqual(len(self.vehicle.planned_route_segment_grasped_point), 1)
         self.assertGreater(self.vehicle.planned_route_grasped_point[0]["lon"], self.city.a.lon)
+
+    def test_position_update_does_not_auto_pickup_or_mark_pending(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+
+        records = []
+        original_record_path_update = persistence.record_path_update
+        persistence.record_path_update = lambda vehicle, path_result=None, report_time=None: records.append(path_result)
+        try:
+            result = CoreDispatcher.update_vehicle_position_from_gps(
+                self.vehicle,
+                self.city,
+                self.city.b.lon,
+                self.city.b.lat,
+                current_timestamp=1000.0,
+            )
+        finally:
+            persistence.record_path_update = original_record_path_update
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["changed_steps"], [])
+        self.assertEqual(len(self.vehicle.planned_route), 1)
+        self.assertEqual(self.vehicle.on_board_orders, [])
+        self.assertNotEqual(getattr(order, "status", None), "riding")
+        self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
+        self.assertEqual(len(records), 1)
+
+    def test_position_update_snaps_to_amap_grasped_route_first(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        grasped_segment = {
+            "index": 0,
+            "type": "O",
+            "request_id": str(order.request_id),
+            "target_node": {
+                "id": self.city.b.id,
+                "lon": self.city.b.lon,
+                "lat": self.city.b.lat,
+            },
+            "points": [
+                {"id": "g0", "lon": self.city.a.lon + 0.01, "lat": self.city.a.lat},
+                {"id": "g1", "lon": self.city.b.lon + 0.01, "lat": self.city.b.lat},
+            ],
+        }
+        self.vehicle.planned_route_segment_grasped_point = [grasped_segment]
+        self.vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments([grasped_segment])
+
+        records = []
+        original_record_path_update = persistence.record_path_update
+        persistence.record_path_update = lambda vehicle, path_result=None, report_time=None: records.append(path_result)
+        try:
+            result = CoreDispatcher.update_vehicle_position_from_gps(
+                self.vehicle,
+                self.city,
+                self.city.a.lon + 0.0105,
+                self.city.a.lat + 0.0005,
+                current_timestamp=1000.0,
+            )
+        finally:
+            persistence.record_path_update = original_record_path_update
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["snapped_point"]["snap_source"], "amap_grasped_route")
+        self.assertAlmostEqual(self.vehicle.gps["lon"], self.city.a.lon + 0.0105, places=6)
+        self.assertAlmostEqual(self.vehicle.gps["lat"], self.city.a.lat + 0.0005, places=6)
+        self.assertGreater(self.vehicle.gps["lon"], self.city.a.lon + 0.005)
+        self.assertEqual(len(records), 1)
+
+    def test_confirm_pickup_advances_order_and_drops_first_segment_only(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        self.vehicle.gps = {"lon": self.city.b.lon, "lat": self.city.b.lat}
+
+        original_record_vehicle_route = persistence.record_vehicle_route
+        original_record_vehicle_runtime = persistence.record_vehicle_runtime
+        original_record_order_snapshot = persistence.record_order_snapshot
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        persistence.record_order_snapshot = lambda *args, **kwargs: None
+        try:
+            result = CoreDispatcher.confirm_vehicle_boarding_event(
+                self.vehicle,
+                "pickup",
+                request_id=order.request_id,
+                distance_threshold_m=30.0,
+                current_timestamp=1000.0,
+            )
+        finally:
+            persistence.record_vehicle_route = original_record_vehicle_route
+            persistence.record_vehicle_runtime = original_record_vehicle_runtime
+            persistence.record_order_snapshot = original_record_order_snapshot
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["event"]["action"], "pickup")
+        self.assertEqual(order.status, "riding")
+        self.assertEqual([step["type"] for step in self.vehicle.planned_route], ["D"])
+        self.assertEqual([segment["type"] for segment in self.vehicle.planned_route_segment_raw_point], ["D"])
+        self.assertEqual([segment["type"] for segment in self.vehicle.planned_route_segment_grasped_point], ["D"])
+        self.assertEqual([o.request_id for o in self.vehicle.on_board_orders], [order.request_id])
+
+    def test_prepare_and_apply_priority_amap_replan_writes_segments(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.gps = {"lon": 113.0002, "lat": 23.0002}
+
+        recorded_grasp = []
+        original_record_vehicle_route = persistence.record_vehicle_route
+        original_record_vehicle_runtime = persistence.record_vehicle_runtime
+        original_record_route_grasp = persistence.record_route_grasp
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        persistence.record_route_grasp = lambda vehicle: recorded_grasp.append(vehicle)
+        try:
+            prepared = CoreDispatcher.prepare_vehicle_amap_replan_job(self.vehicle, self.city)
+            self.assertTrue(prepared["ok"])
+            route_result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), prepared["job"])
+            applied = CoreDispatcher._apply_route_grasp_result_to_vehicle(
+                self.vehicle,
+                prepared["job"],
+                route_result,
+            )
+        finally:
+            persistence.record_vehicle_route = original_record_vehicle_route
+            persistence.record_vehicle_runtime = original_record_vehicle_runtime
+            persistence.record_route_grasp = original_record_route_grasp
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
+        self.assertEqual(len(self.vehicle.planned_route_segment_grasped_point), 1)
+        self.assertGreater(len(self.vehicle.planned_route_grasped_point), 1)
+        self.assertEqual(recorded_grasp, [self.vehicle])
 
     def test_route_grasp_skips_zero_length_segment_as_ready(self):
         client = FakeRouteGraspService()

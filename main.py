@@ -32,6 +32,9 @@ def configure_local_database_env():
         "BUS_DB_PASSWORD": "021015",
         "BUS_DB_NAME": "bus_dispatch_core",
         "BUS_DB_TENANT_ID": "000000",
+        "BUS_DB_SSL_CA": r"D:\Bus_Project\insert_riding\database\mysql_ssl_test\ca.pem",
+        "BUS_DB_SSL_VERIFY_CERT": "1",
+        "BUS_DB_SSL_VERIFY_IDENTITY": "0",
     }
     for key, value in defaults.items():
         os.environ.setdefault(key, value)

@@ -5,6 +5,7 @@ These tests do not connect to MySQL. They verify that runtime objects are
 converted into queue tasks with the fields expected by the DDL.
 """
 
+import os
 import unittest
 from datetime import datetime, timedelta
 
@@ -80,6 +81,33 @@ class PersistenceSerializationTest(unittest.TestCase):
         disabled = persistence.MySqlPersistence({"enabled": False})
         self.assertFalse(disabled.enqueue("tenant", {"tenant_name": "x"}))
         self.assertFalse(disabled.status()["enabled"])
+
+    def test_ssl_connection_kwargs_are_generated_from_config(self):
+        if persistence.pymysql is None:
+            self.skipTest("PyMySQL is not available")
+        manager = persistence.MySqlPersistence({
+            "enabled": False,
+            "host": "bus-mysql",
+            "port": "16336",
+            "user": "zhgjuser",
+            "password": "secret",
+            "database": "busx_tms",
+            "ssl_ca": "database/ca.pem",
+            "ssl_verify_cert": "1",
+            "ssl_verify_identity": "1",
+        })
+
+        kwargs = manager._connect_kwargs(autocommit=True)
+
+        self.assertEqual(kwargs["host"], "bus-mysql")
+        self.assertEqual(kwargs["port"], 16336)
+        self.assertEqual(kwargs["user"], "zhgjuser")
+        self.assertEqual(kwargs["database"], "busx_tms")
+        self.assertTrue(kwargs["autocommit"])
+        self.assertEqual(kwargs["ssl_ca"], os.path.abspath("database/ca.pem"))
+        self.assertTrue(kwargs["ssl_verify_cert"])
+        self.assertTrue(kwargs["ssl_verify_identity"])
+        self.assertTrue(manager.status()["ssl_enabled"])
 
     def test_order_created_contains_order_route_fields(self):
         order = make_order(self.city)

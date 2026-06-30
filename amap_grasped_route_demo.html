@@ -161,6 +161,10 @@
             border-color: #60a5fa;
         }
 
+        button.mode-on {
+            background: #059669;
+        }
+
         .tab-panel {
             display: none;
         }
@@ -309,8 +313,19 @@
         <div class="actions">
             <button id="loadFleetBtn" type="button">加载车队</button>
             <button id="refreshVehicleBtn" type="button" class="secondary">刷新车辆</button>
-            <button id="updatePathBtn" type="button">触发路径更新</button>
+            <button id="updatePathBtn" type="button">上报/吸附车辆位置</button>
+            <button id="pickRouteVehiclePositionBtn" type="button" class="secondary">鼠标 GPS 上报模式</button>
+            <button id="replanAmapRouteBtn" type="button">优先重规划高德路径</button>
             <button id="clearBtn" type="button" class="secondary">清空地图</button>
+        </div>
+
+        <div class="tool-block">
+            <div class="section-title">司机上下客确认</div>
+            <div id="boardingInfo" class="hint">请选择车辆并刷新路线。</div>
+            <div class="compact-actions">
+                <button id="confirmPickupBtn" type="button" disabled>已上车</button>
+                <button id="confirmDropoffBtn" type="button" class="secondary" disabled>已下车</button>
+            </div>
         </div>
 
         <div class="tool-block">
@@ -666,7 +681,12 @@
         const loadFleetBtn = document.getElementById("loadFleetBtn");
         const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
         const updatePathBtn = document.getElementById("updatePathBtn");
+        const pickRouteVehiclePositionBtn = document.getElementById("pickRouteVehiclePositionBtn");
+        const replanAmapRouteBtn = document.getElementById("replanAmapRouteBtn");
         const clearBtn = document.getElementById("clearBtn");
+        const boardingInfo = document.getElementById("boardingInfo");
+        const confirmPickupBtn = document.getElementById("confirmPickupBtn");
+        const confirmDropoffBtn = document.getElementById("confirmDropoffBtn");
         const randomOrder1Btn = document.getElementById("randomOrder1Btn");
         const randomOrder10Btn = document.getElementById("randomOrder10Btn");
         const randomOrder50Btn = document.getElementById("randomOrder50Btn");
@@ -776,6 +796,7 @@
         let selectedDriverCode = null;
         let selectedVehicleCode = null;
         let vehiclePositionTarget = null;
+        let routeGpsPickMode = false;
         let cachedPois = null;
 
         function setStatus(message) {
@@ -786,11 +807,20 @@
             loadFleetBtn.disabled = isBusy;
             refreshVehicleBtn.disabled = isBusy;
             updatePathBtn.disabled = isBusy;
+            pickRouteVehiclePositionBtn.disabled = isBusy;
+            replanAmapRouteBtn.disabled = isBusy;
             clearBtn.disabled = isBusy;
             randomOrder1Btn.disabled = isBusy;
             randomOrder10Btn.disabled = isBusy;
             randomOrder50Btn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
+        }
+
+        function setRouteGpsPickMode(enabled) {
+            routeGpsPickMode = Boolean(enabled);
+            pickRouteVehiclePositionBtn.classList.toggle("mode-on", routeGpsPickMode);
+            pickRouteVehiclePositionBtn.classList.toggle("secondary", !routeGpsPickMode);
+            pickRouteVehiclePositionBtn.textContent = routeGpsPickMode ? "停止鼠标 GPS 上报" : "鼠标 GPS 上报模式";
         }
 
         function setRestrictionBusy(isBusy) {
@@ -887,6 +917,22 @@
                 out.push(point);
             }
             return out;
+        }
+
+        function distanceMeters(a, b) {
+            const p1 = normalizePoint(a);
+            const p2 = normalizePoint(b);
+            if (!p1 || !p2) {
+                return null;
+            }
+            const rad = Math.PI / 180;
+            const lat1 = p1.lat * rad;
+            const lat2 = p2.lat * rad;
+            const dLat = (p2.lat - p1.lat) * rad;
+            const dLon = (p2.lon - p1.lon) * rad;
+            const h = Math.sin(dLat / 2) ** 2
+                + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
         }
 
         function asLngLat(points) {
@@ -1008,6 +1054,62 @@
                 || normalizePoint((segment.points || segment.path || [])[Math.max(0, (segment.points || segment.path || []).length - 1)]);
         }
 
+        const BOARDING_DISTANCE_THRESHOLD_M = 30;
+
+        function currentBoardingStep(vehicle) {
+            const planned = vehicle?.planned_route || [];
+            if (!planned.length) {
+                return null;
+            }
+            const step = planned[0];
+            const segments = vehicle?.planned_route_segment_grasped_point || [];
+            const firstSegment = segments.find(segment =>
+                segment.type === step.type && String(segment.request_id || "") === String(step.request_id || "")
+            ) || segments[0];
+            const target = firstSegment ? segmentTarget(firstSegment) : normalizePoint(step.target_node);
+            return {
+                type: step.type,
+                request_id: step.request_id,
+                node_name: step.node_name || target?.name || "",
+                action: step.type === "O" ? "pickup" : "dropoff",
+                target
+            };
+        }
+
+        function updateBoardingPanel(vehicle) {
+            confirmPickupBtn.disabled = true;
+            confirmDropoffBtn.disabled = true;
+            confirmPickupBtn.dataset.requestId = "";
+            confirmDropoffBtn.dataset.requestId = "";
+
+            const step = currentBoardingStep(vehicle);
+            if (!step) {
+                boardingInfo.textContent = "当前车辆没有待确认的上下客步骤。";
+                return;
+            }
+
+            const gps = normalizePoint(vehicle.gps);
+            const distance = distanceMeters(gps, step.target);
+            const distanceText = distance === null ? "未知" : `${distance.toFixed(1)} 米`;
+            const actionText = step.action === "pickup" ? "上车" : "下车";
+            const canConfirm = distance !== null && distance <= BOARDING_DISTANCE_THRESHOLD_M;
+            boardingInfo.textContent = [
+                `下一步：${actionText}`,
+                `订单：${step.request_id || "-"}`,
+                `目标：${step.node_name || "-"}`,
+                `距离：${distanceText}`,
+                `阈值：${BOARDING_DISTANCE_THRESHOLD_M} 米`
+            ].join("\n");
+
+            if (step.action === "pickup") {
+                confirmPickupBtn.disabled = !canConfirm;
+                confirmPickupBtn.dataset.requestId = step.request_id || "";
+            } else {
+                confirmDropoffBtn.disabled = !canConfirm;
+                confirmDropoffBtn.dataset.requestId = step.request_id || "";
+            }
+        }
+
         function drawVehicle(vehicle, options = {}) {
             clearMap();
 
@@ -1049,8 +1151,15 @@
                 addMarker(gps, "车", null, "vehicle");
             }
 
-            const fitPoints = graspedPoints.length >= 2 ? graspedPoints : rawPoints;
-            fitVisible(fitPoints);
+            updateBoardingPanel(vehicle);
+
+            const fitPoints = [
+                ...(graspedPoints.length >= 2 ? graspedPoints : rawPoints),
+                ...(gps ? [gps] : [])
+            ];
+            if (!options.preserveView) {
+                fitVisible(fitPoints);
+            }
 
             const segmentStats = segments.map((segment, index) => {
                 const count = normalizePoints(segment.points || segment.path || []).length;
@@ -1121,19 +1230,33 @@
             return vehicle;
         }
 
-        async function waitForGraspReady(vehicleId, routeVersion) {
-            for (let attempt = 1; attempt <= 12; attempt += 1) {
-                await new Promise(resolve => setTimeout(resolve, 700));
-                const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
-                const status = vehicle.planned_route_grasp_status;
-                const versionMatched = !routeVersion || vehicle.planned_route_grasp_route_version === routeVersion;
-                if (versionMatched && (status === "ready" || status === "error" || status === "disabled" || status === "stale")) {
-                    drawVehicle(vehicle, { message: `异步纠偏已返回，轮询次数：${attempt}` });
-                    return vehicle;
-                }
-                drawVehicle(vehicle, { message: `等待异步纠偏返回：${attempt}/12` });
+        async function submitVehiclePosition(point, messagePrefix = "车辆位置已上报并吸附到道路") {
+            const vehicleId = selectedVehicleId();
+            if (!vehicleId) {
+                throw new Error("未选择车辆");
             }
-            return loadSelectedVehicle("等待超时，请稍后刷新车辆。");
+            const gps = normalizePoint(point);
+            if (!gps) {
+                throw new Error("缺少可上报的车辆坐标");
+            }
+            setStatus(`正在上报车辆位置：${vehicleId}`);
+            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lon: gps.lon, lat: gps.lat })
+            });
+            const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            fleetById.set(vehicle.vehicle_id, vehicle);
+            const snapped = normalizePoint(data.snap?.point || data.snapped_point || data.gps);
+            drawVehicle(vehicle, {
+                preserveView: true,
+                message: [
+                    messagePrefix,
+                    snapped ? `吸附坐标：${snapped.lon.toFixed(6)}, ${snapped.lat.toFixed(6)}` : null,
+                    data.snap?.distance_to_gps != null ? `吸附距离：${Number(data.snap.distance_to_gps).toFixed(1)} 米` : null
+                ].filter(Boolean).join("\n")
+            });
+            return vehicle;
         }
 
         async function triggerPathUpdate() {
@@ -1143,20 +1266,64 @@
             if (!gps) {
                 throw new Error("当前车辆没有 GPS 坐标");
             }
+            return submitVehiclePosition(gps);
+        }
 
-            setStatus(`正在提交路径更新：${vehicleId}`);
-            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/path`, {
+        async function replanSelectedAmapRoute() {
+            const vehicleId = selectedVehicleId();
+            if (!vehicleId) {
+                throw new Error("未选择车辆");
+            }
+            setStatus(`正在优先重规划高德路径：${vehicleId}`);
+            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/amap-route/replan`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ lon: gps.lon, lat: gps.lat })
+                body: JSON.stringify({ force: true })
             });
-            const rawPoints = normalizePoints(data.route?.points || data.path || data.planned_route_point || []);
-            const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            const vehicle = data.vehicle || await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            fleetById.set(vehicle.vehicle_id, vehicle);
             drawVehicle(vehicle, {
-                rawPoints,
-                message: `路径更新已提交，等待后端异步纠偏。\n本次路径返回点：${rawPoints.length}`
+                message: [
+                    `高德优先重规划完成：${data.status || "unknown"}`,
+                    `路线版本：${data.route_version || "-"}`,
+                    `分段数：${(data.segments || []).length}`,
+                    data.grasp_error ? `错误：${data.grasp_error}` : null
+                ].filter(Boolean).join("\n")
             });
-            await waitForGraspReady(vehicleId, vehicle.planned_route_grasp_route_version);
+            return vehicle;
+        }
+
+        async function confirmBoardingAction(action) {
+            const vehicleId = selectedVehicleId();
+            const current = fleetById.get(vehicleId) || await loadSelectedVehicle();
+            const step = currentBoardingStep(current);
+            if (!step) {
+                throw new Error("当前车辆没有待确认的上下客步骤");
+            }
+            if (step.action !== action) {
+                throw new Error(action === "pickup" ? "当前步骤不是上车" : "当前步骤不是下车");
+            }
+            const gps = normalizePoint(current.gps);
+            const body = {
+                action,
+                request_id: step.request_id,
+                distance_threshold_m: BOARDING_DISTANCE_THRESHOLD_M
+            };
+            if (gps) {
+                body.lon = gps.lon;
+                body.lat = gps.lat;
+            }
+            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/boarding-events`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            const vehicle = data.vehicle || await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            fleetById.set(vehicle.vehicle_id, vehicle);
+            drawVehicle(vehicle, {
+                message: `${action === "pickup" ? "已上车" : "已下车"}：${step.request_id || "-"}`
+            });
+            return vehicle;
         }
 
         function formatLocalDateTime(date) {
@@ -1463,6 +1630,9 @@
         }
 
         function setTab(tabId) {
+            if (tabId !== "routeTab") {
+                setRouteGpsPickMode(false);
+            }
             tabButtons.forEach(button => {
                 button.classList.toggle("active", button.dataset.tab === tabId);
             });
@@ -1904,9 +2074,33 @@
             await loadFleet();
         }
 
-        map.on("click", event => {
+        map.on("click", async event => {
+            if (routeGpsPickMode) {
+                const point = pointFromLngLat(event.lnglat);
+                setBusy(true);
+                try {
+                    await submitVehiclePosition(point, "地图点击坐标已同步上报为车辆 GPS");
+                } catch (error) {
+                    setStatus(`同步上报车辆 GPS 失败：${error.message}`);
+                } finally {
+                    setBusy(false);
+                }
+                return;
+            }
             if (vehiclePositionTarget) {
                 const point = pointFromLngLat(event.lnglat);
+                if (vehiclePositionTarget === "route") {
+                    vehiclePositionTarget = null;
+                    setBusy(true);
+                    try {
+                        await submitVehiclePosition(point, "地图点击位置已吸附为车辆当前位置");
+                    } catch (error) {
+                        setStatus(`设置车辆位置失败：${error.message}`);
+                    } finally {
+                        setBusy(false);
+                    }
+                    return;
+                }
                 vehicleLonInput.value = point.lon;
                 vehicleLatInput.value = point.lat;
                 vehiclePositionTarget = null;
@@ -1936,7 +2130,45 @@
             try {
                 await triggerPathUpdate();
             } catch (error) {
-                setStatus(`触发路径更新失败：${error.message}`);
+                setStatus(`上报车辆位置失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        pickRouteVehiclePositionBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(!routeGpsPickMode);
+            vehiclePositionTarget = null;
+            setStatus(routeGpsPickMode
+                ? "鼠标 GPS 上报模式已开启：每次点击地图都会同步上报车辆 GPS，并由后端吸附到道路。"
+                : "鼠标 GPS 上报模式已关闭。"
+            );
+        });
+        replanAmapRouteBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await replanSelectedAmapRoute();
+            } catch (error) {
+                setStatus(`高德优先重规划失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        confirmPickupBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await confirmBoardingAction("pickup");
+            } catch (error) {
+                setStatus(`确认上车失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        confirmDropoffBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await confirmBoardingAction("dropoff");
+            } catch (error) {
+                setStatus(`确认下车失败：${error.message}`);
             } finally {
                 setBusy(false);
             }
@@ -1963,6 +2195,7 @@
         });
 
         drawRestrictionBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(false);
             isDrawingRestriction = true;
             draftRestrictionPoints = [];
             renderDraftRestrictionLine();
@@ -2103,6 +2336,7 @@
             }
         });
         pickVehiclePositionBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(false);
             vehiclePositionTarget = "edit";
             isDrawingRestriction = false;
             renderDraftRestrictionLine();

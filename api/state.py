@@ -353,7 +353,7 @@ def load_fleet_from_persistence(city_map, current_timestamp):
 # 相关方法：init_system
 # ============================================================
 
-def init_system(shp_path="shp/dxc_traffic_mars_shp_0606/dxc0606.shp"):
+def init_system(shp_path="tianhe_shp/zjgc_osm.shp"):
     """加载路网、从数据库读取车队并启动后台匹配引擎。
 
     Args:

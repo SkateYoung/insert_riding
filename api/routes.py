@@ -78,6 +78,13 @@ def _parse_optional_rest_time(value, vehicle):
     return state.datetime_to_timestamp(rest_at)
 
 
+def _parse_optional_event_timestamp(value):
+    """解析可选业务事件时间；为空时返回当前业务时间戳。"""
+    if value in (None, ""):
+        return state.now_timestamp()
+    return state.datetime_to_timestamp(_parse_datetime(value, "occurred_at"))
+
+
 def _vehicle_to_dict(v):
     """将 Vehicle 对象转为接口可返回的 JSON 字典。
 
@@ -120,6 +127,11 @@ def _vehicle_to_dict(v):
                     s["order"].o_node.name
                     if s["type"] == "O"
                     else s["order"].d_node.name
+                ),
+                "target_node": CoreDispatcher._node_to_path_point(
+                    s["order"].o_node
+                    if s["type"] == "O"
+                    else s["order"].d_node
                 ),
             }
             for s in v.planned_route
@@ -204,6 +216,7 @@ def _path_result_to_response(vehicle, path_result):
             "vehicle_id": vehicle.vehicle_id,
         },
         "gps": path_result.get("gps"),
+        "reported_gps": path_result.get("reported_gps"),
         "snap": {
             "point": snap_point,
             "edge": snap_edge,
@@ -211,6 +224,7 @@ def _path_result_to_response(vehicle, path_result):
             "distance_to_gps": snapped_point.get("distance_to_gps"),
             "source": snapped_point.get("snap_source"),
             "next_node": snapped_point.get("next_node"),
+            "raw_point": path_result.get("reported_gps"),
         },
         "route": {
             "points": route_points,
@@ -226,7 +240,7 @@ def _path_result_to_response(vehicle, path_result):
             "on_board": path_result.get("on_board_orders", []),
             "remaining": path_result.get("planned_route", []),
         },
-        # "path": route_points,
+        "path": route_points,
         "snapped_point": snapped_point,
     }
 
@@ -1551,7 +1565,7 @@ def update_vehicle_path(vehicle_id):
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
-        path_result = CoreDispatcher.rebuild_vehicle_path_from_gps(
+        path_result = CoreDispatcher.update_vehicle_position_from_gps(
             target_vehicle,
             state.city,
             lon,
@@ -1559,9 +1573,107 @@ def update_vehicle_path(vehicle_id):
             current_timestamp=state.now_timestamp(),
         )
     if path_result is None:
-        return jsonify({"error": "当前订单计划中存在不可达路段"}), 409
+        return jsonify({"error": "车辆当前位置无法吸附到路网"}), 409
 
     return jsonify(_path_result_to_response(target_vehicle, path_result))
+
+
+@bp.route("/fleet/<vehicle_id>/boarding-events", methods=["POST"])
+def confirm_vehicle_boarding_event(vehicle_id):
+    """司机端显式确认车辆当前上下客步骤。"""
+    if not state.system_initialized:
+        return jsonify({"error": "系统未初始化"}), 400
+
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    request_id = data.get("request_id")
+    lon = data.get("lon", data.get("lng", data.get("longitude")))
+    lat = data.get("lat", data.get("latitude"))
+    threshold = data.get("distance_threshold_m", 30.0)
+    try:
+        occurred_at = _parse_optional_event_timestamp(data.get("occurred_at"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    with state.state_lock:
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
+        if target_vehicle is None:
+            return jsonify({"error": "车辆未找到"}), 404
+
+        result = CoreDispatcher.confirm_vehicle_boarding_event(
+            target_vehicle,
+            action,
+            request_id=request_id,
+            lon=lon,
+            lat=lat,
+            distance_threshold_m=threshold,
+            current_timestamp=occurred_at,
+        )
+        if not result.get("ok"):
+            status_code = int(result.get("status_code") or 400)
+            payload = {key: value for key, value in result.items() if key not in {"ok", "status_code"}}
+            return jsonify(payload), status_code
+
+        return jsonify({
+            "status": "ok",
+            "event": result.get("event"),
+            "orders": {
+                "on_board": result.get("on_board_orders", []),
+                "remaining": result.get("planned_route", []),
+            },
+            "vehicle": _vehicle_to_dict(target_vehicle),
+        })
+
+
+@bp.route("/fleet/<vehicle_id>/amap-route/replan", methods=["POST"])
+def replan_vehicle_amap_route(vehicle_id):
+    """同步优先重规划单辆车的高德驾车路线。"""
+    if not state.system_initialized:
+        return jsonify({"error": "系统未初始化"}), 400
+
+    with state.state_lock:
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
+        if target_vehicle is None:
+            return jsonify({"error": "车辆未找到"}), 404
+
+        prepared = CoreDispatcher.prepare_vehicle_amap_replan_job(target_vehicle, state.city)
+        if not prepared.get("ok"):
+            status_code = int(prepared.get("status_code") or 409)
+            payload = {key: value for key, value in prepared.items() if key not in {"ok", "status_code"}}
+            return jsonify(payload), status_code
+        job = prepared["job"]
+
+    try:
+        route_result = CoreDispatcher._run_route_grasp_job(CoreDispatcher._get_route_planner(), job)
+    except Exception as exc:
+        route_result = {
+            "ok": False,
+            "status": "error",
+            "reason": str(exc),
+            "segments": [],
+        }
+
+    with state.state_lock:
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
+        if target_vehicle is None:
+            return jsonify({"error": "车辆未找到"}), 404
+        applied = CoreDispatcher._apply_route_grasp_result_to_vehicle(target_vehicle, job, route_result)
+        if not applied:
+            return jsonify({
+                "error": "车辆路线版本已变化，重规划结果已丢弃",
+                "route_version": job.get("route_version"),
+                "vehicle": _vehicle_to_dict(target_vehicle),
+            }), 409
+
+        return jsonify({
+            "status": getattr(target_vehicle, "planned_route_grasp_status", None),
+            "ok": bool(isinstance(route_result, dict) and route_result.get("ok")),
+            "route_version": getattr(target_vehicle, "planned_route_grasp_route_version", None),
+            "grasp_error": getattr(target_vehicle, "planned_route_grasp_error", None),
+            "segments": getattr(target_vehicle, "planned_route_segment_grasped_point", []),
+            "path": getattr(target_vehicle, "planned_route_grasped_point", []),
+            "vehicle": _vehicle_to_dict(target_vehicle),
+        })
 
 
 @bp.route("/fleet/<vehicle_id>/rest", methods=["POST"])

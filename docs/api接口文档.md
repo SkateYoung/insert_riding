@@ -88,7 +88,9 @@ Accept: application/json
 | 订单 | POST | `/orders/<request_id>/cancel` | 乘客端取消未上车订单 |
 | 车辆 | GET | `/fleet` | 查询车队列表信息 |
 | 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
-| 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并刷新车辆后续路径 |
+| 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并更新车辆吸附位置，不触发上下客或路线重规划 |
+| 车辆 | POST | `/fleet/<vehicle_id>/boarding-events` | 司机端显式确认当前上车/下车步骤 |
+| 车辆 | POST | `/fleet/<vehicle_id>/amap-route/replan` | 同步优先重规划单车高德驾车路线 |
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
 | 系统 | GET | `/status` | 获取系统全量状态 |
 | 地图 | GET | `/pois` | 获取所有合法上下客 POI |
@@ -306,12 +308,18 @@ Accept: application/json
 
 由 `/fleet/<vehicle_id>/path` 返回。
 
+> 当前语义：该接口只用于车辆 GPS 上报、位置吸附、运行态与 GPS 轨迹落库；不会自动触发上车/下车，不会重建 A* 路线，也不会触发高德驾车重规划。若车辆已有高德规划路线，后端优先把 GPS 投影到高德规划路线；没有高德路线时才退回路网/A* 路线吸附。
+
 ```json
 {
-    "events": [],
-    "gps": {    # 车辆的GPS信息
+    "events": [],   # /path 不再触发上下客事件，因此通常为空数组
+    "gps": {    # 后端吸附后的车辆位置，前端车辆图标应使用该坐标
         "lat": 23.058200500000055,
         "lon": 113.3998150000001
+    },
+    "reported_gps": {   # 前端原始上报的 GPS 坐标
+        "lat": 23.058260000000000,
+        "lon": 113.3999000000000
     },
     "orders": {	  # 车辆已接的订单
         "on_board": [], 	# 已上车乘客的订单
@@ -455,7 +463,11 @@ Accept: application/json
             "zone": 3
         },
         "progress": 0.8592765969912309,
-        "source": "planned_route"
+        "source": "amap_grasped_route",  # 优先为高德规划路线吸附；无高德路线时可能为 planned_route/road_network
+        "raw_point": {
+            "lat": 23.058260000000000,
+            "lon": 113.3999000000000
+        }
     },
     "snapped_point": {
         "distance_to_gps": 63.30390822174122,
@@ -475,7 +487,7 @@ Accept: application/json
             "zone": 3
         },
         "progress": 0.8592765969912309,
-        "snap_source": "planned_route",
+        "snap_source": "amap_grasped_route",
         "zone": 3
     },
 '''
@@ -884,7 +896,15 @@ ETA 状态：
 
 ### 4.10 POST `/fleet/<vehicle_id>/path`
 
-车辆 GPS 上报并刷新车辆后续路网轨迹。
+车辆 GPS 上报接口。后端根据车辆当前高德规划路线或路网对 GPS 坐标做吸附，更新车辆 `gps`、`last_node`、`next_node`、`progress`，并写入运行态和 GPS 历史轨迹。
+
+该接口只处理定位更新：
+
+- 不自动触发上车/下车，响应中的 `events` 通常为空数组。
+- 不重建 A* 后续路线。
+- 不触发高德驾车路线重规划。
+- 有 `planned_route_segment_grasped_point` / `planned_route_grasped_point` 时，优先吸附到高德规划路线，`snap.source` / `snapped_point.snap_source` 为 `amap_grasped_route`。
+- 前端车辆图标应使用响应中的 `gps` 或 `snap.point`，`reported_gps` 仅表示原始上报坐标。
 
 请求体：
 
@@ -911,7 +931,141 @@ ETA 状态：
 | 200 | 更新成功 |
 | 400 | 未初始化、缺少坐标、坐标不是数字 |
 | 404 | 车辆不存在 |
-| 409 | 当前订单计划存在不可达路段 |
+| 409 | 车辆当前位置无法吸附到可用路线或路网 |
+
+### 4.10.1 POST `/fleet/<vehicle_id>/boarding-events`
+
+司机端显式确认当前车辆的下一步上车或下车事件。该接口用于替代旧版 `/path` 中的自动上下客逻辑。
+
+处理规则：
+
+- 只允许确认当前车辆 `planned_route[0]` 对应的下一步 O/D。
+- `action=pickup` 只能确认 `O` 步骤，`action=dropoff` 只能确认 `D` 步骤。
+- 后端会校验车辆当前位置或请求体坐标距离目标 O/D 点不超过阈值。
+- 成功后会推进订单状态并移除当前计划步骤，但不会触发高德重规划，也不会重建 A* 路线。
+
+请求体：
+
+```json
+{
+  "action": "pickup",
+  "request_id": "REQ-1781761465166-1-68790",
+  "lon": 113.409132,
+  "lat": 23.060574,
+  "distance_threshold_m": 30,
+  "occurred_at": "2026-06-29 12:00:00"
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `action` | string | 是 | `pickup` 表示已上车，`dropoff` 表示已下车 |
+| `request_id` | string/null | 否 | 为空时默认确认当前下一步订单；传入时必须等于当前下一步订单 |
+| `lon` / `lng` / `longitude` | number | 否 | 确认位置经度；为空时使用车辆当前 `gps.lon` |
+| `lat` / `latitude` | number | 否 | 确认位置纬度；为空时使用车辆当前 `gps.lat` |
+| `distance_threshold_m` | number | 否 | 距离阈值，默认 30 米 |
+| `occurred_at` | string | 否 | 事件发生时间，格式 `YYYY-MM-DD HH:MM:SS`；为空时使用当前业务时间 |
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "event": {
+    "action": "pickup",
+    "type": "O",
+    "request_id": "REQ-1781761465166-1-68790",
+    "distance_to_target": 8.5,
+    "confirmed_position": {
+      "lon": 113.409132,
+      "lat": 23.060574
+    },
+    "node": {
+      "id": "113.409132_23.060574",
+      "lon": 113.409132,
+      "lat": 23.060574,
+      "name": "大学城南门",
+      "zone": 3
+    }
+  },
+  "orders": {
+    "on_board": ["REQ-1781761465166-1-68790"],
+    "remaining": []
+  },
+  "vehicle": {
+    "...": "见 3.2 Vehicle车辆信息"
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 确认成功 |
+| 400 | 未初始化、`action` 非法、时间格式非法、坐标/阈值不是数字 |
+| 404 | 车辆不存在 |
+| 409 | 当前无待确认步骤、`action` 与当前步骤不匹配、`request_id` 不是当前下一步、距离目标点过远 |
+
+### 4.10.2 POST `/fleet/<vehicle_id>/amap-route/replan`
+
+同步优先重规划某一辆车的高德驾车路线。该接口会从车辆当前位置出发，先重建本地 A* 分段作为高德请求输入，再同步调用高德驾车规划，成功后写回 `planned_route_segment_grasped_point`、`planned_route_grasped_point` 和 `bus_vehicle_runtime.segment_route`。
+
+处理规则：
+
+- 接口会等待高德返回，不进入后台异步队列。
+- 写回前会校验路线版本，避免旧规划结果覆盖新路线。
+- 失败时会返回当前车辆的规划状态和错误信息。
+
+请求体可为空，也可以传：
+
+```json
+{
+  "force": true
+}
+```
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "status": "ready",
+  "route_version": "route:xxxx",
+  "grasp_error": null,
+  "segments": [
+    {
+      "type": "O",
+      "request_id": "REQ-1781761465166-1-68790",
+      "source": "driving_plan",
+      "points": [
+        { "lon": 113.400616, "lat": 23.058379 },
+        { "lon": 113.409132, "lat": 23.060574 }
+      ],
+      "distance_m": 1230.5,
+      "duration_sec": 360
+    }
+  ],
+  "path": [
+    { "lon": 113.400616, "lat": 23.058379 },
+    { "lon": 113.409132, "lat": 23.060574 }
+  ],
+  "vehicle": {
+    "...": "见 3.2 Vehicle车辆信息"
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 请求已完成，`status` 可能为 `ready`、`error` 或 `disabled` |
+| 400 | 系统未初始化 |
+| 404 | 车辆不存在 |
+| 409 | 车辆当前位置为空、无法吸附到路网、存在不可达路段、没有可规划路线、路线版本变化导致结果丢弃 |
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
