@@ -2797,7 +2797,6 @@ def _order_payload(order, city_map=None, status=None, vehicle=None, route_overri
             "assigned_vehicle_code": _vehicle_code(vehicle),
             "assigned_driver_code": _driver_code(vehicle),
             "assigned_plate_no": getattr(vehicle, "plate_no", None),
-            "answer_time": payload.get("answer_time") or _now_dt(),
         })
     return payload
 
@@ -2851,6 +2850,8 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
     record_driver(vehicle)
     record_vehicle(vehicle)
     route_version = _route_version(vehicle)
+    if getattr(order, "answer_time", None) is None:
+        order.answer_time = _now_dt()
     record_order_snapshot(order, city_map=city_map, status=_order_status(order, "matched"), vehicle=vehicle)
     enqueue("dispatch_task", {
         "task_no": f"dispatch:{getattr(order, 'request_id', '')}:{route_version}:{int(time.time() * 1000)}",

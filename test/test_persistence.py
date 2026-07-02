@@ -158,6 +158,37 @@ class PersistenceSerializationTest(unittest.TestCase):
         self.assertTrue(order_payload["route_segments"])
         self.assertTrue(order_payload["raw_route_points"])
 
+    def test_vehicle_snapshot_does_not_refresh_answer_time(self):
+        order = make_order(self.city)
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-code-1"
+        vehicle.planned_route = [{"type": "O", "order": order}]
+
+        persistence.record_order_snapshot(order, status="matched", vehicle=vehicle)
+
+        order_payload = [payload for op, payload in self.fake_manager.tasks if op == "order"][-1]
+        self.assertIsNone(order.answer_time)
+        self.assertIsNone(order_payload["answer_time"])
+
+    def test_dispatch_assignment_sets_answer_time_once(self):
+        order = make_order(self.city)
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-code-1"
+        vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+
+        persistence.record_dispatch_assignment(order, vehicle, city_map=self.city, path_result={})
+        first_answer_time = order.answer_time
+        persistence.record_eta_result(vehicle)
+
+        order_payloads = [payload for op, payload in self.fake_manager.tasks if op == "order"]
+        self.assertIsNotNone(first_answer_time)
+        self.assertEqual(order.answer_time, first_answer_time)
+        self.assertTrue(order_payloads)
+        self.assertTrue(all(payload["answer_time"] == first_answer_time for payload in order_payloads))
+
 
 if __name__ == "__main__":
     unittest.main()

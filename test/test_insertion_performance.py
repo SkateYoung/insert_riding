@@ -22,8 +22,10 @@ import random
 import statistics
 import sys
 import time
+import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 # 允许直接执行本脚本时也能导入项目根目录下的 api 包。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from api.core import CoreDispatcher
-from api.models import CityGraph, Order, Vehicle
+from api.models import CityGraph, Order, SPEED_MPS, Vehicle
 
 
 DEFAULT_SHP_PATH = "dxc_traffic_shp/dxc_rule.shp"
@@ -143,6 +145,122 @@ def is_valid_od_sequence(route, on_board_ids):
         elif request_id not in seen_origin:
             return False
     return True
+
+
+class _TinyNode:
+    """用于单元测试的最小路网节点。"""
+
+    def __init__(self, node_id, lon=0.0, lat=0.0):
+        self.id = node_id
+        self.name = node_id
+        self.lon = lon
+        self.lat = lat
+        self.zone = 1
+        self.neighbors = {}
+
+
+class _TinyCity:
+    """用于单元测试的最小路网。"""
+
+    def __init__(self, distances):
+        node_ids = sorted({node_id for pair in distances for node_id in pair})
+        self.nodes_map = {
+            node_id: _TinyNode(node_id, lon=float(index), lat=0.0)
+            for index, node_id in enumerate(node_ids)
+        }
+        self.pois = list(self.nodes_map.values())
+        self.path_cache = {}
+        self.distances = dict(distances)
+        for (start_id, end_id), distance in self.distances.items():
+            self.nodes_map[start_id].neighbors[end_id] = distance
+
+    def get_path(self, start_node, end_node, restriction_policy=None):
+        if start_node.id == end_node.id:
+            return 0.0, [start_node]
+        distance = self.distances.get((start_node.id, end_node.id), float("inf"))
+        if distance == float("inf"):
+            return distance, []
+        return distance, [start_node, end_node]
+
+
+def _seconds_distance(seconds):
+    """把行驶秒数换算成当前固定速度模型下的距离。"""
+    return float(seconds) * SPEED_MPS
+
+
+def _fake_order(city, request_id, origin_id, dest_id, base_ts, earliest_offset, latest_offset):
+    """构造只包含核心算法所需字段的订单对象。"""
+    earliest_ts = base_ts + earliest_offset
+    latest_ts = base_ts + latest_offset
+    return SimpleNamespace(
+        request_id=request_id,
+        o_node=city.nodes_map[origin_id],
+        d_node=city.nodes_map[dest_id],
+        passenger_count=1,
+        req_time=base_ts,
+        expected_pickup_earliest=earliest_ts,
+        expected_pickup_latest=latest_ts,
+        max_pickup_time=latest_ts,
+        max_arrival_time=latest_ts + 3600.0,
+        actual_pick_time=None,
+    )
+
+
+class TimeWindowRouteEvaluationTest(unittest.TestCase):
+    """验证插单评分会按乘客期望上车时间窗推演 pickup_times。"""
+
+    def _evaluate(self, first_leg_seconds, earliest_offset, latest_offset, second_leg_seconds=300):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "O"): _seconds_distance(first_leg_seconds),
+            ("O", "D"): _seconds_distance(second_leg_seconds),
+        })
+        order = _fake_order(city, "TW1", "O", "D", base_ts, earliest_offset, latest_offset)
+        vehicle_state = {"time": base_ts, "last_node": "A", "next_node": "A", "progress": 0.0}
+        return CoreDispatcher.evaluate_route(
+            [{"type": "O", "order": order}, {"type": "D", "order": order}],
+            vehicle_state,
+            [],
+            city,
+            capacity=4,
+            return_details=True,
+        )
+
+    def test_pickup_inside_expected_window_has_no_time_window_cost(self):
+        is_feasible, cost, _, details = self._evaluate(600, 540, 720)
+        self.assertTrue(is_feasible)
+        self.assertLess(cost, float("inf"))
+        self.assertAlmostEqual(details["metrics"]["pickup_times"]["TW1"], 1_000_600.0)
+        self.assertEqual(details["time_window_cost"], 0.0)
+
+    def test_early_pickup_waits_until_earliest_and_shifts_dropoff(self):
+        is_feasible, _, arrivals, details = self._evaluate(420, 600, 1200, second_leg_seconds=300)
+        self.assertTrue(is_feasible)
+        self.assertAlmostEqual(details["metrics"]["pickup_arrival_times"]["TW1"], 1_000_420.0)
+        self.assertAlmostEqual(details["metrics"]["pickup_times"]["TW1"], 1_000_600.0)
+        self.assertAlmostEqual(details["metrics"]["early_pickup_wait_seconds"]["TW1"], 180.0)
+        self.assertAlmostEqual(arrivals["TW1"], 1_000_900.0)
+
+    def test_early_pickup_over_limit_is_infeasible(self):
+        is_feasible, cost, _, details = self._evaluate(240, 600, 1200)
+        self.assertFalse(is_feasible)
+        self.assertEqual(cost, float("inf"))
+        self.assertEqual(details["infeasible_reason"], "pickup_too_early")
+        self.assertAlmostEqual(details["early_wait_seconds"], 360.0)
+
+    def test_late_pickup_keeps_finite_penalty(self):
+        is_feasible, cost, _, details = self._evaluate(900, 60, 600)
+        self.assertTrue(is_feasible)
+        self.assertLess(cost, float("inf"))
+        self.assertGreater(details["late_pickup_cost"], 0.0)
+        self.assertEqual(details["early_pickup_wait_cost"], 0.0)
+
+    def test_reserved_order_wait_cost_starts_from_earliest(self):
+        is_feasible, _, _, details = self._evaluate(3420, 3600, 4200)
+        self.assertTrue(is_feasible)
+        self.assertAlmostEqual(details["metrics"]["pickup_times"]["TW1"], 1_003_600.0)
+        self.assertEqual(details["wait_cost"], 0.0)
+        self.assertGreater(details["early_pickup_wait_cost"], 0.0)
 
 
 def brute_force_best_route(vehicle, orders, city):

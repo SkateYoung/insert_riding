@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from . import persistence
-from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS
+from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS, business_timestamp
 from .auxiliary import AuxiliaryFunctions
 from .restrictions import restriction_signature
 from forecast import od_forecast_module
@@ -24,6 +24,12 @@ class CoreDispatcher:
     
     # 核心订单池：用于缓存由于运力爆满、或严重绕路(不顺路)而未能及时指派的订单。
     order_pool = []
+
+    # 订单时间窗匹配参数：预约单提前 15 分钟释放，车辆最多早到等待 5 分钟。
+    ORDER_MATCH_DISPATCH_LEAD_SECONDS = 15 * 60
+    MAX_EARLY_PICKUP_WAIT_SECONDS = 5 * 60
+    EARLY_PICKUP_WAIT_COST_PER_MIN = 2.0
+    LATE_PICKUP_COST_PER_MIN = 8.0
     
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
     completed_orders_pool = []
@@ -99,6 +105,48 @@ class CoreDispatcher:
                 return city_map.get_path(start_node, end_node)
             raise
 
+    @staticmethod
+    def _order_time_value_to_timestamp(value, default=None):
+        """把订单时间字段统一转为业务时间戳。"""
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("/", "-"))
+        if isinstance(value, datetime):
+            return business_timestamp(value)
+        return default
+
+    @staticmethod
+    def _order_pickup_earliest_timestamp(order):
+        """返回订单最早可上车时间戳，缺失时回退到请求时间。"""
+        default = float(getattr(order, "req_time", 0.0) or 0.0)
+        return CoreDispatcher._order_time_value_to_timestamp(
+            getattr(order, "expected_pickup_earliest", None),
+            default=default,
+        )
+
+    @staticmethod
+    def _order_pickup_latest_timestamp(order):
+        """返回订单最晚上车时间戳，优先使用已有 max_pickup_time。"""
+        default = getattr(order, "max_pickup_time", None)
+        if default is not None:
+            try:
+                return float(default)
+            except (TypeError, ValueError):
+                pass
+        return CoreDispatcher._order_time_value_to_timestamp(
+            getattr(order, "expected_pickup_latest", None),
+            default=float("inf"),
+        )
+
+    @staticmethod
+    def _order_can_enter_matching_window(order, current_timestamp):
+        """判断订单是否已进入可参与车辆匹配的提前窗口。"""
+        earliest_ts = CoreDispatcher._order_pickup_earliest_timestamp(order)
+        return float(current_timestamp) >= earliest_ts - CoreDispatcher.ORDER_MATCH_DISPATCH_LEAD_SECONDS
+
     # ============================================================
     # 功能一：订单路线成本评估与单车插单寻优
     # 相关方法：evaluate_route、_try_insert_order
@@ -152,7 +200,10 @@ class CoreDispatcher:
         sim_time += first_step_dist / speed
         
         pickup_times = {}
+        pickup_arrival_times = {}
         arrival_times = {}
+        early_pickup_wait_seconds = {}
+        total_early_pickup_wait_seconds = 0.0
         
         for step in route:
             order = step['order']
@@ -177,6 +228,20 @@ class CoreDispatcher:
             sim_next_node = target_node.id
             
             if step['type'] == 'O':
+                pickup_arrival_times[order.request_id] = sim_time
+                earliest_pickup_time = CoreDispatcher._order_pickup_earliest_timestamp(order)
+                early_wait_seconds = max(0.0, earliest_pickup_time - sim_time)
+                if early_wait_seconds > CoreDispatcher.MAX_EARLY_PICKUP_WAIT_SECONDS:
+                    return _result(False, float('inf'), None, {
+                        "infeasible_reason": "pickup_too_early",
+                        "request_id": order.request_id,
+                        "early_wait_seconds": early_wait_seconds,
+                    })
+                if early_wait_seconds > 0.0:
+                    sim_time = earliest_pickup_time
+                    early_pickup_wait_seconds[order.request_id] = early_wait_seconds
+                    total_early_pickup_wait_seconds += early_wait_seconds
+
                 current_load += order.passenger_count
                 if current_load > capacity: 
                     return _result(False, float('inf'), None, {"infeasible_reason": "capacity_exceeded"})
@@ -200,7 +265,8 @@ class CoreDispatcher:
         METERS_PER_KM = 1000.0
         WAIT_COST_PER_MIN = 4.0
         IN_CAR_COST_PER_MIN = 3.0
-        LATE_PICKUP_COST_PER_MIN = 1.0
+        EARLY_PICKUP_WAIT_COST_PER_MIN = CoreDispatcher.EARLY_PICKUP_WAIT_COST_PER_MIN
+        LATE_PICKUP_COST_PER_MIN = CoreDispatcher.LATE_PICKUP_COST_PER_MIN
         LATE_ARRIVAL_COST_PER_MIN = 1.0
         OLD_DELAY_COST_PER_MIN = 3.0
         SEVERE_OLD_DELAY_PENALTY = 25.0
@@ -212,6 +278,7 @@ class CoreDispatcher:
         # 维度 A: 乘客体验成本 (Passenger Cost)
         passenger_cost = 0.0
         wait_cost = 0.0
+        early_pickup_wait_cost = 0.0
         late_pickup_cost = 0.0
         in_car_cost = 0.0
         late_arrival_cost = 0.0
@@ -220,11 +287,19 @@ class CoreDispatcher:
         for step in route:
             order = step['order']
             if step['type'] == 'O':
-                wait_minutes = max(0.0, pickup_times[order.request_id] - order.req_time) / SECONDS_PER_MINUTE
+                wait_start_time = max(
+                    float(getattr(order, "req_time", 0.0) or 0.0),
+                    CoreDispatcher._order_pickup_earliest_timestamp(order),
+                )
+                wait_minutes = max(0.0, pickup_times[order.request_id] - wait_start_time) / SECONDS_PER_MINUTE
                 wait_cost += wait_minutes * WAIT_COST_PER_MIN
+
+                early_wait_minutes = early_pickup_wait_seconds.get(order.request_id, 0.0) / SECONDS_PER_MINUTE
+                early_pickup_wait_cost += early_wait_minutes * EARLY_PICKUP_WAIT_COST_PER_MIN
                 
                 # 时间窗满意度：超出期望上车时间不再一票否决，改为有限惩罚，允许积压订单继续派单。
-                late_pickup_minutes = max(0.0, pickup_times[order.request_id] - order.max_pickup_time) / SECONDS_PER_MINUTE
+                latest_pickup_time = CoreDispatcher._order_pickup_latest_timestamp(order)
+                late_pickup_minutes = max(0.0, pickup_times[order.request_id] - latest_pickup_time) / SECONDS_PER_MINUTE
                 late_pickup_cost += late_pickup_minutes * LATE_PICKUP_COST_PER_MIN
             else:
                 start_service_time = pickup_times.get(order.request_id) or order.actual_pick_time or vehicle_state['time']
@@ -250,6 +325,7 @@ class CoreDispatcher:
 
         passenger_cost = (
             wait_cost
+            + early_pickup_wait_cost
             + late_pickup_cost
             + in_car_cost
             + late_arrival_cost
@@ -303,7 +379,9 @@ class CoreDispatcher:
         cost_details = {
             "passenger_cost": passenger_cost,
             "wait_cost": wait_cost,
+            "early_pickup_wait_cost": early_pickup_wait_cost,
             "late_pickup_cost": late_pickup_cost,
+            "time_window_cost": early_pickup_wait_cost + late_pickup_cost,
             "in_car_cost": in_car_cost,
             "late_arrival_cost": late_arrival_cost,
             "old_passenger_delay_cost": old_passenger_delay_cost,
@@ -326,7 +404,10 @@ class CoreDispatcher:
                 "mileage_util_rate": mileage_util_rate,
                 "load_rate": load_rate,
                 "pickup_times": pickup_times,
+                "pickup_arrival_times": pickup_arrival_times,
                 "arrival_times": arrival_times,
+                "early_pickup_wait_seconds": early_pickup_wait_seconds,
+                "total_early_pickup_wait_seconds": total_early_pickup_wait_seconds,
             },
         }
         return _result(True, cost, arrival_times, cost_details)
@@ -559,6 +640,9 @@ class CoreDispatcher:
                     # 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
                     for i in range(len(CoreDispatcher.order_pool)):
                         order = CoreDispatcher.order_pool[i]
+                        if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
+                            continue
+
                         c1, c2 = float('inf'), float('inf')
                         v1, r1 = None, None
 

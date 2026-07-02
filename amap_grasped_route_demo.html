@@ -330,6 +330,24 @@
 
         <div class="tool-block">
             <div class="section-title">模拟随机订单</div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="manualPickupEarliestInput">最早上车时间</label>
+                    <input id="manualPickupEarliestInput" type="datetime-local">
+                </div>
+                <div class="field">
+                    <label for="manualPickupLatestInput">最晚上车时间</label>
+                    <input id="manualPickupLatestInput" type="datetime-local">
+                </div>
+                <div class="field">
+                    <label for="manualPassengerCountInput">乘客人数</label>
+                    <input id="manualPassengerCountInput" type="number" min="1" max="10" value="1">
+                </div>
+                <div class="field">
+                    <label>&nbsp;</label>
+                    <button id="resetManualPickupTimeBtn" type="button" class="secondary">重置时间窗</button>
+                </div>
+            </div>
             <div class="quick-actions">
                 <button id="randomOrder1Btn" type="button">发起 1 单</button>
                 <button id="randomOrder10Btn" type="button">发起 10 单</button>
@@ -690,6 +708,10 @@
         const randomOrder1Btn = document.getElementById("randomOrder1Btn");
         const randomOrder10Btn = document.getElementById("randomOrder10Btn");
         const randomOrder50Btn = document.getElementById("randomOrder50Btn");
+        const manualPickupEarliestInput = document.getElementById("manualPickupEarliestInput");
+        const manualPickupLatestInput = document.getElementById("manualPickupLatestInput");
+        const manualPassengerCountInput = document.getElementById("manualPassengerCountInput");
+        const resetManualPickupTimeBtn = document.getElementById("resetManualPickupTimeBtn");
         const statusEl = document.getElementById("status");
 
         const restrictionPolicySelect = document.getElementById("restrictionPolicySelect");
@@ -813,6 +835,10 @@
             randomOrder1Btn.disabled = isBusy;
             randomOrder10Btn.disabled = isBusy;
             randomOrder50Btn.disabled = isBusy;
+            manualPickupEarliestInput.disabled = isBusy;
+            manualPickupLatestInput.disabled = isBusy;
+            manualPassengerCountInput.disabled = isBusy;
+            resetManualPickupTimeBtn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
         }
 
@@ -1339,6 +1365,47 @@
             ].join(":");
         }
 
+        function formatDateTimeLocalInput(date) {
+            const pad = value => String(value).padStart(2, "0");
+            return [
+                date.getFullYear(),
+                pad(date.getMonth() + 1),
+                pad(date.getDate())
+            ].join("-") + "T" + [
+                pad(date.getHours()),
+                pad(date.getMinutes())
+            ].join(":");
+        }
+
+        function resetManualPickupTimeWindow() {
+            const earliest = new Date(Date.now() + 3 * 60 * 1000);
+            const latest = new Date(earliest.getTime() + 12 * 60 * 1000);
+            manualPickupEarliestInput.value = formatDateTimeLocalInput(earliest);
+            manualPickupLatestInput.value = formatDateTimeLocalInput(latest);
+        }
+
+        function readManualOrderOptions() {
+            if (!manualPickupEarliestInput.value || !manualPickupLatestInput.value) {
+                resetManualPickupTimeWindow();
+            }
+            const earliest = new Date(manualPickupEarliestInput.value);
+            const latest = new Date(manualPickupLatestInput.value);
+            if (Number.isNaN(earliest.getTime()) || Number.isNaN(latest.getTime())) {
+                throw new Error("期望上车时间格式不正确");
+            }
+            if (latest <= earliest) {
+                throw new Error("最晚上车时间必须晚于最早上车时间");
+            }
+            const passengerCount = Number.parseInt(manualPassengerCountInput.value, 10);
+            if (!Number.isInteger(passengerCount) || passengerCount <= 0) {
+                throw new Error("乘客人数必须为正整数");
+            }
+            return {
+                pickupWindow: { earliest, latest },
+                passengerCount
+            };
+        }
+
         async function loadPoisForRandomOrders() {
             if (cachedPois && cachedPois.length >= 2) {
                 return cachedPois;
@@ -1356,7 +1423,7 @@
             return cachedPois;
         }
 
-        function buildRandomOrderPayload(pois, index) {
+        function buildRandomOrderPayload(pois, index, options = {}) {
             const originIndex = Math.floor(Math.random() * pois.length);
             let destinationIndex = Math.floor(Math.random() * (pois.length - 1));
             if (destinationIndex >= originIndex) {
@@ -1364,8 +1431,10 @@
             }
             const origin = pois[originIndex];
             const destination = pois[destinationIndex];
-            const earliest = new Date(Date.now() + (3 + Math.floor(Math.random() * 9)) * 60 * 1000);
-            const latest = new Date(earliest.getTime() + (12 + Math.floor(Math.random() * 10)) * 60 * 1000);
+            const pickupWindow = options.pickupWindow || {};
+            const earliest = pickupWindow.earliest || new Date(Date.now() + (3 + Math.floor(Math.random() * 9)) * 60 * 1000);
+            const latest = pickupWindow.latest || new Date(earliest.getTime() + (12 + Math.floor(Math.random() * 10)) * 60 * 1000);
+            const passengerCount = options.passengerCount || (1 + Math.floor(Math.random() * 3));
             return {
                 request_id: `demo-${Date.now()}-${index + 1}-${Math.floor(Math.random() * 100000)}`,
                 origin: { lon: origin.lon, lat: origin.lat },
@@ -1374,18 +1443,19 @@
                     earliest: formatLocalDateTime(earliest),
                     latest: formatLocalDateTime(latest)
                 },
-                passenger_count: 1 + Math.floor(Math.random() * 3)
+                passenger_count: passengerCount
             };
         }
 
-        async function createRandomOrders(count) {
+        async function createRandomOrders(count, options = {}) {
             setBusy(true);
             const created = [];
             const errors = [];
             try {
                 const pois = await loadPoisForRandomOrders();
+                const manualOptions = options.useManualPickupTime ? readManualOrderOptions() : null;
                 for (let index = 0; index < count; index += 1) {
-                    const payload = buildRandomOrderPayload(pois, index);
+                    const payload = buildRandomOrderPayload(pois, index, manualOptions || {});
                     try {
                         const result = await apiJson("/order", {
                             method: "POST",
@@ -2177,9 +2247,10 @@
             clearMap();
             setStatus("路线已清空，禁区图形保留。");
         });
-        randomOrder1Btn.addEventListener("click", () => createRandomOrders(1));
+        randomOrder1Btn.addEventListener("click", () => createRandomOrders(1, { useManualPickupTime: true }));
         randomOrder10Btn.addEventListener("click", () => createRandomOrders(10));
         randomOrder50Btn.addEventListener("click", () => createRandomOrders(50));
+        resetManualPickupTimeBtn.addEventListener("click", resetManualPickupTimeWindow);
         vehicleSelect.addEventListener("change", async () => {
             setBusy(true);
             try {
@@ -2393,6 +2464,7 @@
             }
         });
 
+        resetManualPickupTimeWindow();
         loadFleet();
         loadRestrictionPolicies();
         loadAdminOptions();
