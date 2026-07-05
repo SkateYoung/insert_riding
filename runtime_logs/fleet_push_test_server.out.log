@@ -1,0 +1,4 @@
+[FleetPushTest] listening on http://127.0.0.1:18080
+[FleetPushTest] receive endpoint: POST /fleet/snapshot
+ * Serving Flask app 'fleet_push_test_server'
+ * Debug mode: off

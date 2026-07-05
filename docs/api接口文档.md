@@ -94,7 +94,6 @@ Accept: application/json
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
 | 系统 | GET | `/status` | 获取系统全量状态 |
 | 地图 | GET | `/pois` | 获取所有合法上下客 POI |
-| 地图 | GET | `/map/road-network` | 获取前端绘图所需路网数据 |
 | 运营禁区 | GET | `/operation-restrictions/policies` | 查询禁区策略列表 |
 | 运营禁区 | POST | `/operation-restrictions/policies` | 创建禁区策略 |
 | 运营禁区 | GET | `/operation-restrictions/policies/<policy_identity>` | 查询单个禁区策略 |
@@ -308,7 +307,7 @@ Accept: application/json
 
 由 `/fleet/<vehicle_id>/path` 返回。
 
-> 当前语义：该接口只用于车辆 GPS 上报、位置吸附、运行态与 GPS 轨迹落库；不会自动触发上车/下车，不会重建 A* 路线，也不会触发高德驾车重规划。若车辆已有高德规划路线，后端优先把 GPS 投影到高德规划路线；没有高德路线时才退回路网/A* 路线吸附。
+> 该接口只用于车辆 GPS 上报、位置吸附、运行态与 GPS 轨迹落库；不会自动触发上车/下车，不会重建 A* 路线，也不会触发高德驾车重规划。若车辆已有高德规划路线，后端优先把 GPS 投影到高德规划路线；没有高德路线时才退回路网/A* 路线吸附。
 
 ```json
 {
@@ -894,11 +893,11 @@ ETA 状态：
 | 400 | 系统未初始化 |
 | 404 | 车辆不存在 |
 
-### 4.10 POST `/fleet/<vehicle_id>/path`
+### 4.9 POST `/fleet/<vehicle_id>/path`
 
 车辆 GPS 上报接口。后端根据车辆当前高德规划路线或路网对 GPS 坐标做吸附，更新车辆 `gps`、`last_node`、`next_node`、`progress`，并写入运行态和 GPS 历史轨迹。
 
-该接口只处理定位更新：
+该接口只处理GPS信息更新：
 
 - 不自动触发上车/下车，响应中的 `events` 通常为空数组。
 - 不重建 A* 后续路线。
@@ -933,7 +932,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 车辆当前位置无法吸附到可用路线或路网 |
 
-### 4.10.1 POST `/fleet/<vehicle_id>/boarding-events`
+### 4.10 POST `/fleet/<vehicle_id>/boarding-events`
 
 司机端显式确认当前车辆的下一步上车或下车事件。该接口用于替代旧版 `/path` 中的自动上下客逻辑。
 
@@ -1009,63 +1008,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 当前无待确认步骤、`action` 与当前步骤不匹配、`request_id` 不是当前下一步、距离目标点过远 |
 
-### 4.10.2 POST `/fleet/<vehicle_id>/amap-route/replan`
-
-同步优先重规划某一辆车的高德驾车路线。该接口会从车辆当前位置出发，先重建本地 A* 分段作为高德请求输入，再同步调用高德驾车规划，成功后写回 `planned_route_segment_grasped_point`、`planned_route_grasped_point` 和 `bus_vehicle_runtime.segment_route`。
-
-处理规则：
-
-- 接口会等待高德返回，不进入后台异步队列。
-- 写回前会校验路线版本，避免旧规划结果覆盖新路线。
-- 失败时会返回当前车辆的规划状态和错误信息。
-
-请求体可为空，也可以传：
-
-```json
-{
-  "force": true
-}
-```
-
-成功响应：
-
-```json
-{
-  "ok": true,
-  "status": "ready",
-  "route_version": "route:xxxx",
-  "grasp_error": null,
-  "segments": [
-    {
-      "type": "O",
-      "request_id": "REQ-1781761465166-1-68790",
-      "source": "driving_plan",
-      "points": [
-        { "lon": 113.400616, "lat": 23.058379 },
-        { "lon": 113.409132, "lat": 23.060574 }
-      ],
-      "distance_m": 1230.5,
-      "duration_sec": 360
-    }
-  ],
-  "path": [
-    { "lon": 113.400616, "lat": 23.058379 },
-    { "lon": 113.409132, "lat": 23.060574 }
-  ],
-  "vehicle": {
-    "...": "见 3.2 Vehicle车辆信息"
-  }
-}
-```
-
-状态码：
-
-| 状态码 | 场景 |
-| --- | --- |
-| 200 | 请求已完成，`status` 可能为 `ready`、`error` 或 `disabled` |
-| 400 | 系统未初始化 |
-| 404 | 车辆不存在 |
-| 409 | 车辆当前位置为空、无法吸附到路网、存在不可达路段、没有可规划路线、路线版本变化导致结果丢弃 |
+### 
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
@@ -1136,7 +1079,7 @@ ETA 状态：
 | 400 | 未初始化或参数格式错误 |
 | 404 | 车辆不存在 |
 
-### 4.13 GET `/status`
+### 4.12 GET `/status`
 
 获取系统全量状态快照。
 
@@ -1170,7 +1113,7 @@ ETA 状态：
 | `completed_orders` | integer | 已完成/归档订单数量 |
 | `operation_restriction_policy` | object/null | 当前生效运营禁区策略 |
 
-### 4.15 GET `/pois`
+### 4.13 GET `/pois`
 
 获取所有合法上下客 POI 兴趣点。
 
@@ -1207,7 +1150,7 @@ ETA 状态：
 | 200 | 查询成功 |
 | 400 | 系统未初始化 |
 
-### 4.17 GET `/operation-restrictions/policies`
+### 4.14 GET `/operation-restrictions/policies`
 
 查询所有未软删除的运营禁区策略，并返回当前全局生效策略。
 
@@ -1319,7 +1262,7 @@ ETA 状态：
 | --- | --- |
 | 200 | 查询成功 |
 
-### 4.18 POST `/operation-restrictions/policies`
+### 4.15 POST `/operation-restrictions/policies`
 
 创建运营禁区策略。后端会校验并规范化 polygon，生成可传给高德 Web 服务 v5 驾车规划的 `avoidpolygons` 字符串。
 
@@ -1386,7 +1329,7 @@ ETA 状态：
 | 400 | 参数错误、polygon 不合法或策略名称已存在 |
 | 500 | 服务端异常 |
 
-### 4.19 GET `/operation-restrictions/policies/<policy_identity>`
+### 4.16 GET `/operation-restrictions/policies/<policy_identity>`
 
 查询单个运营禁区策略。`policy_identity` 可传策略名称或策略编号；由于策略编号允许重复，前端优先使用唯一的 `policy_name`，只有确认编号唯一时再使用 `policy_code`。前端拼接 URL 时需要编码。
 
@@ -1415,7 +1358,7 @@ ETA 状态：
 | 200 | 查询成功 |
 | 404 | 策略不存在 |
 
-### 4.20 PUT `/operation-restrictions/policies/<policy_identity>`
+### 4.17 PUT `/operation-restrictions/policies/<policy_identity>`
 
 更新单个运营禁区策略。请求体结构与创建接口一致；编辑已有策略时不允许修改 `policy_name`。由于策略编号允许重复，前端优先使用唯一的 `policy_name` 作为路径参数。
 
@@ -1434,7 +1377,7 @@ ETA 状态：
 | 404 | 策略不存在 |
 | 500 | 服务端异常 |
 
-### 4.21 DELETE `/operation-restrictions/policies/<policy_identity>`
+### 4.18 DELETE `/operation-restrictions/policies/<policy_identity>`
 
 软删除单个运营禁区策略。如果删除的是当前生效策略，后端会同步清空当前策略。
 
@@ -1456,7 +1399,7 @@ ETA 状态：
 | 404 | 策略不存在 |
 | 500 | 服务端异常 |
 
-### 4.22 GET `/operation-restrictions/active`
+### 4.19 GET `/operation-restrictions/active`
 
 查询当前全局生效的运营禁区策略。
 
@@ -1470,7 +1413,7 @@ ETA 状态：
 
 `policy=null` 表示当前未启用任何禁区策略。
 
-### 4.23 POST `/operation-restrictions/active`
+### 4.20 POST `/operation-restrictions/active`
 
 设置当前全局生效的禁区策略，或关闭禁区限制。策略切换只影响后续新路线计算，不会主动重算已有车辆路线。由于策略编号允许重复，前端优先传 `policy_name`。
 
@@ -1507,7 +1450,7 @@ ETA 状态：
 | 404 | 指定策略不存在或已禁用 |
 | 500 | 服务端异常 |
 
-### 4.24 GET `/admin/driver-vehicle/options`
+### 4.21 GET `/admin/driver-vehicle/options`
 
 返回司机车辆管理表单所需枚举，以及当前司机和车辆档案列表。
 
@@ -1529,7 +1472,7 @@ ETA 状态：
 - 新增/编辑司机车辆表单的下拉框统一从该接口读取。
 - 页面打开时调用一次，新增、编辑、删除成功后再刷新一次。
 
-### 4.25 GET `/admin/drivers`
+### 4.22 GET `/admin/drivers`
 
 查询未软删除的司机档案列表。
 
@@ -1541,7 +1484,7 @@ ETA 状态：
 }
 ```
 
-### 4.26 POST `/admin/drivers`
+### 4.23 POST `/admin/drivers`
 
 创建司机档案。`driver_code` 是司机业务身份字段，创建后不可修改；`driver_no` 遵循数据库唯一约束，冲突返回 `409`。
 
@@ -1597,7 +1540,7 @@ ETA 状态：
 | 400 | 参数错误 |
 | 409 | 司机工号等唯一字段冲突 |
 
-### 4.27 GET `/admin/drivers/<driver_code>`
+### 4.24 GET `/admin/drivers/<driver_code>`
 
 查询单个司机档案。
 
@@ -1622,7 +1565,7 @@ ETA 状态：
 | 200 | 查询成功 |
 | 404 | 司机不存在 |
 
-### 4.28 PUT `/admin/drivers/<driver_code>`
+### 4.25 PUT `/admin/drivers/<driver_code>`
 
 更新司机档案。`driver_code` 以路径参数为准，请求体中的 `driver_code` 会被忽略。
 
@@ -1637,7 +1580,7 @@ ETA 状态：
 | 404 | 司机不存在 |
 | 409 | 司机工号等唯一字段冲突 |
 
-### 4.29 DELETE `/admin/drivers/<driver_code>`
+### 4.26 DELETE `/admin/drivers/<driver_code>`
 
 软删除司机档案。如果司机仍被车辆绑定，返回 `409`。
 
@@ -1658,7 +1601,7 @@ ETA 状态：
 | 404 | 司机不存在 |
 | 409 | 司机仍被车辆绑定 |
 
-### 4.30 GET `/admin/vehicles`
+### 4.27 GET `/admin/vehicles`
 
 查询未软删除的车辆档案列表，包含当前司机和运行位置字段。
 
@@ -1670,7 +1613,7 @@ ETA 状态：
 }
 ```
 
-### 4.31 POST `/admin/vehicles`
+### 4.28 POST `/admin/vehicles`
 
 创建离线车辆档案。`vehicle_code` 是车辆业务身份字段，创建后不可修改；`plate_no` 遵循数据库唯一约束，冲突返回 `409`。新增车辆时 `operation_status` 必须为 `offline`，不能携带 `initial_position`；车辆创建后需要先绑定司机，再调用 `POST /admin/vehicles/<vehicle_code>/status` 切换为 `operating`，车辆才会进入运行车队并参与运营。
 
@@ -1731,7 +1674,7 @@ ETA 状态：
 | 400 | 参数错误、`operation_status` 不是 `offline`、缺少座位数/核载人数或创建时传入位置 |
 | 409 | 车牌号等唯一字段冲突 |
 
-### 4.32 GET `/admin/vehicles/<vehicle_code>`
+### 4.29 GET `/admin/vehicles/<vehicle_code>`
 
 查询单个车辆档案。
 
@@ -1756,7 +1699,7 @@ ETA 状态：
 | 200 | 查询成功 |
 | 404 | 车辆不存在 |
 
-### 4.33 PUT `/admin/vehicles/<vehicle_code>`
+### 4.30 PUT `/admin/vehicles/<vehicle_code>`
 
 更新车辆档案并按运营状态同步运行车队。`vehicle_code` 以路径参数为准，请求体中的 `vehicle_code` 会被忽略。
 
@@ -1771,7 +1714,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 车辆有未完成任务，不能退出运营 |
 
-### 4.34 DELETE `/admin/vehicles/<vehicle_code>`
+### 4.31 DELETE `/admin/vehicles/<vehicle_code>`
 
 软删除车辆档案，并在可删除时从运行车队移除。如果车辆仍有 `on_board_orders` 或 `planned_route`，返回 `409`。
 
@@ -1792,7 +1735,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 车辆仍有未完成任务 |
 
-### 4.35 POST `/admin/vehicles/<vehicle_code>/status`
+### 4.32 POST `/admin/vehicles/<vehicle_code>/status`
 
 更新车辆运营状态，并同步运行车队。
 
@@ -1848,7 +1791,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 未绑定司机不能开始运营，或车辆仍有未完成任务不能退出运营 |
 
-### 4.36 POST `/admin/vehicles/<vehicle_code>/bind-driver`
+### 4.33 POST `/admin/vehicles/<vehicle_code>/bind-driver`
 
 绑定或解绑车辆司机，并同步运行车队中的司机字段。同一个司机只能绑定一台未删除车辆；已处于 `operating` 的车辆不能直接解绑司机，需要先把车辆状态调整为非运营状态。
 

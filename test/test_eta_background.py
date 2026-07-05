@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 from flask import Flask
 
-from api import state, persistence
+from api import state, persistence, fleet_push
 from api.core import CoreDispatcher
 from api.models import Node, Order, Vehicle
 from api.routes import bp as api_routes
@@ -1123,6 +1123,81 @@ class EtaBackgroundTest(unittest.TestCase):
             CoreDispatcher.route_planner_api_key = previous_service_key
             CoreDispatcher.route_grasp_apply_lock = previous_lock
             CoreDispatcher.route_grasp_auto_submit_enabled = previous_enabled
+
+    def test_fleet_push_is_submitted_after_route_grasp_ready(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        CoreDispatcher.refresh_vehicle_route_metadata(
+            self.vehicle,
+            self.city,
+            fleet_push_event={
+                "event_reason": "order_assigned",
+                "request_id": order.request_id,
+            },
+            fleet_push_fleet=state.fleet,
+        )
+        job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
+        result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), job)
+        submitted = []
+        original_submit = fleet_push.submit_fleet_snapshot
+        fleet_push.submit_fleet_snapshot = lambda fleet, event: submitted.append((fleet, event)) or True
+        try:
+            changed = CoreDispatcher._apply_route_grasp_result(job, result, state.fleet)
+        finally:
+            fleet_push.submit_fleet_snapshot = original_submit
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(len(submitted), 1)
+        self.assertIs(submitted[0][0], state.fleet)
+        self.assertEqual(submitted[0][1]["event_reason"], "order_assigned")
+        self.assertEqual(submitted[0][1]["request_id"], order.request_id)
+        self.assertIsNone(getattr(self.vehicle, "fleet_push_pending_event", None))
+
+    def test_fleet_push_waits_when_route_grasp_fails(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        CoreDispatcher.refresh_vehicle_route_metadata(
+            self.vehicle,
+            self.city,
+            fleet_push_event={
+                "event_reason": "order_inserted",
+                "request_id": order.request_id,
+            },
+            fleet_push_fleet=state.fleet,
+        )
+        job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
+        result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(fail=True), job)
+        submitted = []
+        original_submit = fleet_push.submit_fleet_snapshot
+        fleet_push.submit_fleet_snapshot = lambda fleet, event: submitted.append((fleet, event)) or True
+        try:
+            changed = CoreDispatcher._apply_route_grasp_result(job, result, state.fleet)
+        finally:
+            fleet_push.submit_fleet_snapshot = original_submit
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(submitted, [])
+        self.assertEqual(self.vehicle.planned_route_grasp_status, "error")
+        self.assertEqual(
+            getattr(self.vehicle, "fleet_push_pending_event", {}).get("event_reason"),
+            "order_inserted",
+        )
+
+    def test_gps_position_update_does_not_mark_fleet_push_pending(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+
+        result = CoreDispatcher.update_vehicle_position_from_gps(
+            self.vehicle,
+            self.city,
+            self.city.a.lon + 0.0001,
+            self.city.a.lat + 0.0001,
+            current_timestamp=1000.0,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(hasattr(self.vehicle, "fleet_push_pending_event"))
 
     def test_route_grasp_discards_stale_result(self):
         order = make_order(self.city)
