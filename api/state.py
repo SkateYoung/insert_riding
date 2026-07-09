@@ -220,7 +220,7 @@ def start_route_grasp_thread():
     """启动后台路线纠偏线程；已启动时直接复用。"""
     # 兼容入口：只启用路线更新触发式异步纠偏，不再启动周期扫描线程。
     CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
-    CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+    # CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
     return None
 
 

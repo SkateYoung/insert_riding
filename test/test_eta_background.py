@@ -1134,21 +1134,20 @@ class EtaBackgroundTest(unittest.TestCase):
                 "event_reason": "order_assigned",
                 "request_id": order.request_id,
             },
-            fleet_push_fleet=state.fleet,
         )
         job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
         result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), job)
         submitted = []
-        original_submit = fleet_push.submit_fleet_snapshot
-        fleet_push.submit_fleet_snapshot = lambda fleet, event: submitted.append((fleet, event)) or True
+        original_submit = fleet_push.submit_vehicle_navigation
+        fleet_push.submit_vehicle_navigation = lambda vehicle, event: submitted.append((vehicle, event)) or True
         try:
             changed = CoreDispatcher._apply_route_grasp_result(job, result, state.fleet)
         finally:
-            fleet_push.submit_fleet_snapshot = original_submit
+            fleet_push.submit_vehicle_navigation = original_submit
 
         self.assertEqual(changed, 1)
         self.assertEqual(len(submitted), 1)
-        self.assertIs(submitted[0][0], state.fleet)
+        self.assertIs(submitted[0][0], self.vehicle)
         self.assertEqual(submitted[0][1]["event_reason"], "order_assigned")
         self.assertEqual(submitted[0][1]["request_id"], order.request_id)
         self.assertIsNone(getattr(self.vehicle, "fleet_push_pending_event", None))
@@ -1163,17 +1162,16 @@ class EtaBackgroundTest(unittest.TestCase):
                 "event_reason": "order_inserted",
                 "request_id": order.request_id,
             },
-            fleet_push_fleet=state.fleet,
         )
         job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
         result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(fail=True), job)
         submitted = []
-        original_submit = fleet_push.submit_fleet_snapshot
-        fleet_push.submit_fleet_snapshot = lambda fleet, event: submitted.append((fleet, event)) or True
+        original_submit = fleet_push.submit_vehicle_navigation
+        fleet_push.submit_vehicle_navigation = lambda vehicle, event: submitted.append((vehicle, event)) or True
         try:
             changed = CoreDispatcher._apply_route_grasp_result(job, result, state.fleet)
         finally:
-            fleet_push.submit_fleet_snapshot = original_submit
+            fleet_push.submit_vehicle_navigation = original_submit
 
         self.assertEqual(changed, 1)
         self.assertEqual(submitted, [])
@@ -1182,6 +1180,35 @@ class EtaBackgroundTest(unittest.TestCase):
             getattr(self.vehicle, "fleet_push_pending_event", {}).get("event_reason"),
             "order_inserted",
         )
+
+    def test_vehicle_navigation_push_url_uses_vehicle_path(self):
+        url = fleet_push._push_url_for_vehicle("车/1", base_url="http://push.example/")
+
+        self.assertEqual(
+            url,
+            "http://push.example/bus/python-dispatch/internal/fleet/%E8%BD%A6%2F1/push-navigation",
+        )
+
+    def test_vehicle_navigation_payload_contains_single_vehicle(self):
+        self.vehicle.vehicle_id = "vehicle-001"
+
+        payload = fleet_push.build_payload(
+            self.vehicle,
+            {
+                "event_reason": "order_assigned",
+                "request_id": "order-001",
+                "route_version": "route-v1",
+            },
+        )
+
+        self.assertEqual(payload["event_type"], "fleet_route_changed")
+        self.assertEqual(payload["event_reason"], "order_assigned")
+        self.assertEqual(payload["vehicle_id"], "vehicle-001")
+        self.assertEqual(payload["request_id"], "order-001")
+        self.assertEqual(payload["route_version"], "route-v1")
+        self.assertIn("vehicle", payload)
+        self.assertNotIn("fleet", payload)
+        self.assertEqual(payload["vehicle"]["vehicle_id"], "vehicle-001")
 
     def test_gps_position_update_does_not_mark_fleet_push_pending(self):
         order = make_order(self.city)

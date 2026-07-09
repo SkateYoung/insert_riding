@@ -359,6 +359,8 @@ class Order:
         expected_pickup_latest,
         passenger_count,
         city_map,
+        passenger_phone=None,
+        passenger_id=None,
         req_time=None,
     ):
         """乘客订单实例化构造器。
@@ -394,6 +396,8 @@ class Order:
         self.expected_pickup_earliest = expected_pickup_earliest
         self.expected_pickup_latest = expected_pickup_latest
         self.passenger_count = int(passenger_count)
+        self.passenger_phone = str(passenger_phone or "").strip()
+        self.passenger_id = str(passenger_id or "").strip()
         self.req_time = float(req_time if req_time is not None else business_timestamp(request_time))
         
         def nearest_poi(lon, lat):
@@ -446,7 +450,6 @@ class Order:
         self.driver_no = ""
         self.vehicle_id = ""
         self.plate_no = ""
-        self.passenger_id = ""
         self.answer_time = None
         self.completion_time = None
         self.cancel_type = ""

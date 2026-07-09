@@ -15,6 +15,7 @@ import queue
 import threading
 import time
 from datetime import datetime
+from decimal import Decimal
 
 try:
     import pymysql
@@ -39,6 +40,10 @@ class PersistenceConflict(ValueError):
         super().__init__(message)
         self.code = code
         self.field = field
+
+
+class PersistenceUnavailable(RuntimeError):
+    """数据库不可用于同步查询时抛出，用于接口层转换为 503 响应。"""
 
 
 # ============================================================
@@ -104,6 +109,28 @@ def _json(value):
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, default=_json_default)
+
+
+def _json_loads_or_original(value):
+    """把 MySQL JSON 字符串转换为 Python 对象，无法解析时保留原值。"""
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return value
+
+
+def _api_value(value):
+    """把数据库查询值转换成接口可安全 JSON 序列化的值。"""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if isinstance(value, Decimal):
+        return float(value)
+    return _json_loads_or_original(value)
 
 
 def _float_or_none(value):
@@ -660,6 +687,117 @@ class MySqlPersistence:
         if self.last_error and str(self.last_error).startswith("forecast_history_read_failed:"):
             self.last_error = None
         return orders
+
+    def query_orders(self, filters=None):
+        """按管理查询条件同步读取 bus_order 订单数据。"""
+        if not self.enabled or pymysql is None:
+            raise PersistenceUnavailable("database_unavailable")
+
+        filters = filters or {}
+        conditions = ["o.tenant_id = %s", "o.deleted = 0"]
+        params = [self.tenant_id]
+
+        def text_filter(name):
+            value = filters.get(name)
+            value = str(value or "").strip()
+            return value or None
+
+        request_id = text_filter("request_id")
+        if request_id:
+            conditions.append("o.request_id = %s")
+            params.append(request_id)
+
+        passenger_phone = text_filter("passenger_phone")
+        if passenger_phone:
+            conditions.append("o.passenger_phone = %s")
+            params.append(passenger_phone)
+
+        status = text_filter("status")
+        if status:
+            conditions.append("o.status = %s")
+            params.append(status)
+
+        station_name = text_filter("station_name")
+        if station_name:
+            like_value = f"%{station_name}%"
+            conditions.append("(o.origin_name LIKE %s OR o.destination_name LIKE %s)")
+            params.extend([like_value, like_value])
+
+        driver_name = text_filter("driver_name")
+        if driver_name:
+            conditions.append("d.driver_name LIKE %s")
+            params.append(f"%{driver_name}%")
+
+        plate_no = text_filter("plate_no")
+        if plate_no:
+            conditions.append("o.assigned_plate_no = %s")
+            params.append(plate_no)
+
+        created_at = filters.get("created_at") or {}
+        if not isinstance(created_at, dict):
+            raise ValueError("created_at 必须是对象")
+        created_start = created_at.get("start") or filters.get("created_at_start")
+        created_end = created_at.get("end") or filters.get("created_at_end")
+        if created_start:
+            conditions.append("o.created_at >= %s")
+            params.append(_to_datetime(created_start))
+        if created_end:
+            conditions.append("o.created_at <= %s")
+            params.append(_to_datetime(created_end))
+
+        limit_value = filters.get("limit")
+        offset_value = filters.get("offset", 0)
+        limit_clause = ""
+        if limit_value not in (None, ""):
+            try:
+                limit = int(limit_value)
+                offset = int(offset_value or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("limit 和 offset 必须是整数") from exc
+            if limit <= 0:
+                raise ValueError("limit 必须是正整数")
+            if offset < 0:
+                raise ValueError("offset 不能为负数")
+            limit_clause = " LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+
+        sql = f"""
+            SELECT
+                o.*,
+                d.driver_name AS assigned_driver_name,
+                v.vehicle_code AS assigned_vehicle_code
+            FROM bus_order o
+            LEFT JOIN bus_driver d ON o.assigned_driver_id = d.id
+            LEFT JOIN bus_vehicle v ON o.assigned_vehicle_id = v.id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY o.created_at DESC, o.id DESC
+            {limit_clause}
+        """
+
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            if connection is None:
+                raise PersistenceUnavailable("database_unavailable")
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+        except PersistenceUnavailable:
+            raise
+        except Exception as exc:
+            self.last_error = f"order_query_failed: {exc}"
+            raise
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+
+        return [
+            {key: _api_value(value) for key, value in row.items()}
+            for row in rows or []
+        ]
 
     def _sync_connection(self, autocommit=True):
         """创建同步数据库连接，供需要事务的禁区管理接口使用。"""
@@ -2035,6 +2173,7 @@ class MySqlPersistence:
                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                  %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
+                 passenger_code=VALUES(passenger_code), passenger_phone=VALUES(passenger_phone),
                  passenger_count=VALUES(passenger_count), status=VALUES(status),
                  assigned_vehicle_id=VALUES(assigned_vehicle_id), assigned_driver_id=VALUES(assigned_driver_id),
                  assigned_plate_no=VALUES(assigned_plate_no), answer_time=COALESCE(VALUES(answer_time), answer_time),
@@ -2427,6 +2566,11 @@ def fetch_completed_orders_for_forecast(limit=None):
     return _manager.fetch_completed_orders_for_forecast(limit=limit)
 
 
+def query_orders(filters=None):
+    """按管理查询条件读取订单主表数据。"""
+    return _manager.query_orders(filters=filters)
+
+
 def list_operation_restriction_policies():
     """读取运营禁区策略列表。"""
     return _manager.list_operation_restriction_policies()
@@ -2756,6 +2900,7 @@ def _order_payload(order, city_map=None, status=None, vehicle=None, route_overri
     payload = {
         "request_id": str(getattr(order, "request_id", "")),
         "passenger_code": getattr(order, "passenger_id", None) or None,
+        "passenger_phone": getattr(order, "passenger_phone", None) or None,
         "passenger_count": getattr(order, "passenger_count", 1),
         "order_source": "dynamic_bus",
         "status": status or _order_status(order),

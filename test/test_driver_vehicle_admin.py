@@ -63,6 +63,8 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         state.city = self.city
         state.fleet = []
         state.system_initialized = True
+        CoreDispatcher.order_pool.clear()
+        CoreDispatcher.completed_orders_pool.clear()
         app = Flask(__name__)
         app.register_blueprint(bp)
         self.client = app.test_client()
@@ -72,6 +74,8 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         state.city = self.previous_state["city"]
         state.fleet = self.previous_state["fleet"]
         state.system_initialized = self.previous_state["system_initialized"]
+        CoreDispatcher.order_pool.clear()
+        CoreDispatcher.completed_orders_pool.clear()
 
     def create_driver(self, code="driver-1", no="D001", name="张三"):
         return self.client.post("/admin/drivers", json={
@@ -114,6 +118,45 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertIn("off_duty", data["driver_work_statuses"])
         self.assertEqual(len(data["drivers"]), 1)
         self.assertEqual(len(data["vehicles"]), 1)
+
+    def test_order_query_returns_503_when_database_disabled(self):
+        response = self.client.post("/admin/orders/query", json={})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error"], "database_unavailable")
+
+    def test_create_order_requires_passenger_phone(self):
+        now = datetime.now().replace(microsecond=0)
+        response = self.client.post("/order", json={
+            "request_id": "order-without-phone",
+            "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+            "destination": {"lon": self.city.c.lon, "lat": self.city.c.lat},
+            "expected_pickup_time": {
+                "earliest": now.isoformat(sep=" "),
+                "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+            },
+            "passenger_count": 1,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("passenger_phone", response.get_json()["error"])
+
+    def test_create_order_returns_passenger_identity_fields(self):
+        now = datetime.now().replace(microsecond=0)
+        response = self.client.post("/order", json={
+            "request_id": "order-with-phone",
+            "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+            "destination": {"lon": self.city.c.lon, "lat": self.city.c.lat},
+            "expected_pickup_time": {
+                "earliest": now.isoformat(sep=" "),
+                "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+            },
+            "passenger_count": 1,
+            "passenger_phone": "13900000001",
+            "passenger_id": "passenger-business-1",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["passenger_phone"], "13900000001")
+        self.assertEqual(data["passenger_id"], "passenger-business-1")
 
     def test_driver_crud_duplicate_no_and_bound_delete_conflict(self):
         created = self.create_driver()

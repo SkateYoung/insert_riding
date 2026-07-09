@@ -86,6 +86,7 @@ Accept: application/json
 | 订单 | GET | `/orders/pool` | 查询待匹配订单池 |
 | 订单 | GET | `/orders/<request_id>/eta` | 乘客端查询订单 ETA |
 | 订单 | POST | `/orders/<request_id>/cancel` | 乘客端取消未上车订单 |
+| 订单 | POST | `/admin/orders/query` | 服务端按条件查询订单数据库 |
 | 车辆 | GET | `/fleet` | 查询车队列表信息 |
 | 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
 | 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并更新车辆吸附位置，不触发上下客或路线重规划 |
@@ -669,6 +670,8 @@ ETA 状态：
 ```json
 {
   "request_id": "order_10001",
+  "passenger_phone": "13900000001",
+  "passenger_id": "passenger_10001",
   "origin": {
     "lon": 113.38,
     "lat": 23.04
@@ -690,6 +693,8 @@ ETA 状态：
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `request_id` | string | 是 | 前端/业务侧生成的订单唯一 ID |
+| `passenger_phone` | string | 是 | 乘客手机号 |
+| `passenger_id` | string/null | 否 | 前端/业务系统乘客 ID；为空时不写入 |
 | `origin.lon` | number | 是 | 起点经度 |
 | `origin.lat` | number | 是 | 起点纬度 |
 | `destination.lon` | number | 是 | 终点经度 |
@@ -704,6 +709,8 @@ ETA 状态：
 {
   "status": "pooled",   
   "request_id": "order_10001",
+  "passenger_phone": "13900000001",
+  "passenger_id": "passenger_10001",
   "origin_node": "起点POI",
   "origin_coords": {
     "lon": 113.38,
@@ -729,12 +736,86 @@ ETA 状态：
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 创建成功 |
-| 400 | 未初始化、缺字段、时间格式错误、人数非法 |
+| 400 | 未初始化、缺字段、手机号为空、时间格式错误、人数非法 |
 
 前端建议：
 
 - 创建成功后轮询 `/orders/<request_id>/eta` 获取派车状态和 ETA。
 - 不要使用前端传入的 `request_time`；后端会统一生成。
+
+### 4.4.1 POST `/admin/orders/query`
+
+服务端按条件查询订单数据库。该接口直接读取 `bus_order`，不要求调度系统已初始化。
+
+请求体：
+
+```json
+{
+  "request_id": "order_10001",
+  "passenger_phone": "13900000001",
+  "status": "completed",
+  "station_name": "体育中心",
+  "driver_name": "张三",
+  "plate_no": "粤A00001",
+  "created_at": {
+    "start": "2026-07-01 00:00:00",
+    "end": "2026-07-05 23:59:59"
+  },
+  "limit": 500,
+  "offset": 0
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 否 | 订单请求 ID，精确匹配 |
+| `passenger_phone` | string | 否 | 乘客手机号，精确匹配 |
+| `status` | string | 否 | 订单状态，精确匹配 |
+| `station_name` | string | 否 | 站点名称，匹配起点名称或终点名称，模糊查询 |
+| `driver_name` | string | 否 | 司机姓名，模糊查询 |
+| `plate_no` | string | 否 | 车牌号，精确匹配 |
+| `created_at.start` | string | 否 | 创建时间起始，包含边界 |
+| `created_at.end` | string | 否 | 创建时间结束，包含边界 |
+| `limit` | integer | 否 | 返回条数；不传时返回全部匹配数据 |
+| `offset` | integer | 否 | 分页跳过条数，仅在传入 `limit` 时生效 |
+
+说明：
+
+- 所有条件均可省略；传多个条件时按 `AND` 联合查询。
+- `passenger_id` 在订单创建时按业务乘客 ID 写入 `bus_order.passenger_code`，查询返回结果中也会包含该字段。
+
+成功响应：
+
+```json
+{
+  "count": 1,
+  "orders": [
+    {
+      "id": 1,
+      "request_id": "order_10001",
+      "passenger_code": "passenger_10001",
+      "passenger_phone": "13900000001",
+      "status": "completed",
+      "origin_name": "体育中心站",
+      "destination_name": "珠江新城站",
+      "assigned_plate_no": "粤A00001",
+      "assigned_driver_name": "张三",
+      "assigned_vehicle_code": "vehicle_001",
+      "created_at": "2026-07-05 12:00:00"
+    }
+  ]
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 400 | 请求体格式错误、时间格式错误、分页参数非法 |
+| 503 | 数据库未启用或 PyMySQL 不可用 |
 
 ### 4.5 GET `/orders/pool`
 
@@ -867,11 +948,6 @@ ETA 状态：
 ```
 
 `fleet[]` 元素结构说明见`3.2`的`Vehicle车辆信息`。
-
-前端建议：
-
-- 调度大屏可 1-5 秒轮询。
-- 地图页建议结合 `/fleet/<vehicle_id>/path` 绘制单车实时路径。
 
 ### 4.9 GET `/fleet/<vehicle_id>`
 
@@ -1007,8 +1083,6 @@ ETA 状态：
 | 400 | 未初始化、`action` 非法、时间格式非法、坐标/阈值不是数字 |
 | 404 | 车辆不存在 |
 | 409 | 当前无待确认步骤、`action` 与当前步骤不匹配、`request_id` 不是当前下一步、距离目标点过远 |
-
-### 
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
@@ -1674,7 +1748,7 @@ ETA 状态：
 | 400 | 参数错误、`operation_status` 不是 `offline`、缺少座位数/核载人数或创建时传入位置 |
 | 409 | 车牌号等唯一字段冲突 |
 
-### 4.29 GET `/admin/vehicles/<vehicle_code>`
+### 4.29 GET `/admin/vehicles/<vehicle_id>`
 
 查询单个车辆档案。
 
@@ -1682,7 +1756,7 @@ ETA 状态：
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| `vehicle_code` | string | 车辆业务编码 |
+| `vehicle_id` | string | 车辆业务ID |
 
 成功响应：
 
@@ -1699,9 +1773,9 @@ ETA 状态：
 | 200 | 查询成功 |
 | 404 | 车辆不存在 |
 
-### 4.30 PUT `/admin/vehicles/<vehicle_code>`
+### 4.30 PUT `/admin/vehicles/<vehicle_id>`
 
-更新车辆档案并按运营状态同步运行车队。`vehicle_code` 以路径参数为准，请求体中的 `vehicle_code` 会被忽略。
+更新车辆档案并按运营状态同步运行车队。`vehicle_id` 以路径参数为准，请求体中的 `vehicle_id` 会被忽略。
 
 请求体：同 `POST /admin/vehicles`。
 
@@ -1714,7 +1788,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 车辆有未完成任务，不能退出运营 |
 
-### 4.31 DELETE `/admin/vehicles/<vehicle_code>`
+### 4.31 DELETE `/admin/vehicles/<vehicle_id>`
 
 软删除车辆档案，并在可删除时从运行车队移除。如果车辆仍有 `on_board_orders` 或 `planned_route`，返回 `409`。
 
@@ -1735,7 +1809,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 车辆仍有未完成任务 |
 
-### 4.32 POST `/admin/vehicles/<vehicle_code>/status`
+### 4.32 POST `/admin/vehicles/<vehicle_id>/status`
 
 更新车辆运营状态，并同步运行车队。
 
@@ -1791,7 +1865,7 @@ ETA 状态：
 | 404 | 车辆不存在 |
 | 409 | 未绑定司机不能开始运营，或车辆仍有未完成任务不能退出运营 |
 
-### 4.33 POST `/admin/vehicles/<vehicle_code>/bind-driver`
+### 4.33 POST `/admin/vehicles/<vehicle_id>/bind-driver`
 
 绑定或解绑车辆司机，并同步运行车队中的司机字段。同一个司机只能绑定一台未删除车辆；已处于 `operating` 的车辆不能直接解绑司机，需要先把车辆状态调整为非运营状态。
 

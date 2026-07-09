@@ -163,6 +163,8 @@ def run_tests(base_url):
             "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
         },
         "passenger_count": 1,
+        "passenger_phone": "13900000001",
+        "passenger_id": "test-passenger-1",
     }
     order = check("创建订单 POST /order", lambda: request_json(base_url, "POST", "/order", order_body))
     assert_true(order.get("status") == "pooled", "/order 应返回 status=pooled")

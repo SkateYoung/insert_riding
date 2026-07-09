@@ -85,6 +85,26 @@ def _parse_optional_event_timestamp(value):
     return state.datetime_to_timestamp(_parse_datetime(value, "occurred_at"))
 
 
+def _normalize_order_query_filters(data):
+    """规范化订单管理查询条件。"""
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    filters = dict(data)
+    created_at = filters.get("created_at")
+    if created_at in (None, ""):
+        return filters
+    if not isinstance(created_at, dict):
+        raise ValueError("created_at 必须是对象")
+    normalized_created_at = {}
+    for key in ("start", "end"):
+        value = created_at.get(key)
+        if value in (None, ""):
+            continue
+        normalized_created_at[key] = _parse_datetime(value, f"created_at.{key}")
+    filters["created_at"] = normalized_created_at
+    return filters
+
+
 def _vehicle_to_dict(v):
     """将 Vehicle 对象转为接口可返回的 JSON 字典。
 
@@ -689,6 +709,8 @@ def _admin_error_response(exc):
     Returns:
         tuple: Flask JSON 响应与 HTTP 状态码。
     """
+    if isinstance(exc, persistence.PersistenceUnavailable):
+        return jsonify({"error": "database_unavailable", "message": str(exc)}), 503
     if isinstance(exc, persistence.PersistenceConflict):
         return jsonify({"error": exc.code, "message": str(exc), "field": exc.field}), 409
     if isinstance(exc, KeyError) and str(exc).strip("'") == "driver_not_found":
@@ -885,11 +907,15 @@ def create_order():
         expected_pickup_earliest = _parse_datetime(expected_pickup_time.get("earliest"), "expected_pickup_time.earliest")
         expected_pickup_latest = _parse_datetime(expected_pickup_time.get("latest"), "expected_pickup_time.latest")
         passenger_count = int(data["passenger_count"])
+        passenger_phone = str(data["passenger_phone"]).strip()
+        passenger_id = str(data.get("passenger_id") or "").strip()
     except KeyError as exc:
         return jsonify({"error": f"缺少必填字段: {exc.args[0]}"}), 400
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
 
+    if not passenger_phone:
+        return jsonify({"error": "passenger_phone 必须填写"}), 400
     if passenger_count <= 0:
         return jsonify({"error": "passenger_count 必须为正整数"}), 400
     if expected_pickup_latest < expected_pickup_earliest:
@@ -909,6 +935,8 @@ def create_order():
             expected_pickup_latest=expected_pickup_latest,
             passenger_count=passenger_count,
             city_map=state.city,
+            passenger_phone=passenger_phone,
+            passenger_id=passenger_id,
             req_time=time_snapshot["timestamp"],
         )
         CoreDispatcher.pool_and_route_planning(state.fleet, order, state.city)
@@ -927,6 +955,8 @@ def create_order():
             "latest": order.expected_pickup_latest.isoformat(sep=" "),
         },
         "passenger_count": order.passenger_count,
+        "passenger_phone": order.passenger_phone,
+        "passenger_id": order.passenger_id,
         "pool_size": pool_size,
     })
 
@@ -1004,6 +1034,20 @@ def cancel_order(request_id):
     if result["status"] == "rejected":
         return jsonify(result), 409
     return jsonify(result)
+
+
+@bp.route("/admin/orders/query", methods=["POST"])
+def admin_query_orders():
+    """服务端按组合条件查询订单数据库。"""
+    try:
+        filters = _normalize_order_query_filters(request.get_json(silent=True) or {})
+        orders = persistence.query_orders(filters)
+        return jsonify({
+            "count": len(orders),
+            "orders": orders,
+        })
+    except Exception as exc:
+        return _admin_error_response(exc)
 
 
 # ============================================================

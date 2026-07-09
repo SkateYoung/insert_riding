@@ -149,7 +149,7 @@ class CoreDispatcher:
         return float(current_timestamp) >= earliest_ts - CoreDispatcher.ORDER_MATCH_DISPATCH_LEAD_SECONDS
 
     @staticmethod
-    def _mark_fleet_push_pending(vehicle, event=None, fleet=None):
+    def _mark_fleet_push_pending(vehicle, event=None):
         """记录车辆路线变更后的待推送事件，等待高德规划成功后发送。"""
         if vehicle is None or not event:
             return None
@@ -163,14 +163,13 @@ class CoreDispatcher:
             "request_id": event.get("request_id"),
             "route_version": route_version,
             "created_at": datetime.now().replace(microsecond=0),
-            "fleet_ref": fleet,
         }
         vehicle.fleet_push_pending_event = pending_event
         return pending_event
 
     @staticmethod
-    def _submit_pending_fleet_push_if_ready(vehicle, fleet=None):
-        """高德路线 ready 后提交一次待推送 fleet 快照。"""
+    def _submit_pending_fleet_push_if_ready(vehicle):
+        """高德路线 ready 后提交一次待推送单车导航快照。"""
         pending_event = getattr(vehicle, "fleet_push_pending_event", None)
         if not isinstance(pending_event, dict):
             return False
@@ -179,10 +178,7 @@ class CoreDispatcher:
             return False
         if getattr(vehicle, "planned_route_grasp_status", None) != "ready":
             return False
-        fleet_ref = pending_event.get("fleet_ref") or fleet
-        if fleet_ref is None:
-            return False
-        submitted = fleet_push.submit_fleet_snapshot(fleet_ref, pending_event)
+        submitted = fleet_push.submit_vehicle_navigation(vehicle, pending_event)
         if submitted:
             vehicle.fleet_push_pending_event = None
         return submitted
@@ -781,7 +777,6 @@ class CoreDispatcher:
                                 "event_reason": "order_assigned" if was_idle_before_assignment else "order_inserted",
                                 "request_id": target_o.request_id,
                             },
-                            fleet_push_fleet=fleet,
                         )
                         target_o.status = "waiting_pickup"
                         persistence.record_dispatch_assignment(
@@ -934,7 +929,6 @@ class CoreDispatcher:
                     "event_reason": "order_cancelled",
                     "request_id": request_id,
                 },
-                fleet_push_fleet=fleet,
             )
             CoreDispatcher._start_rest_if_ready(vehicle)
             persistence.record_vehicle_route(vehicle, path_result=path_result)
@@ -1713,7 +1707,6 @@ class CoreDispatcher:
                 "event_reason": "idle_hotspot_assigned",
                 "request_id": None,
             },
-            fleet_push_fleet=fleet,
         )
         if result is None:
             CoreDispatcher._clear_idle_parking(vehicle)
@@ -2432,15 +2425,13 @@ class CoreDispatcher:
         return True
 
     @staticmethod
-    def _mark_vehicle_route_grasp_pending(vehicle, result, fleet_push_event=None, fleet_push_fleet=None):
+    def _mark_vehicle_route_grasp_pending(vehicle, result, fleet_push_event=None):
         """路线刷新后记录原始分段，并触发异步高德驾车规划。
 
         Args:
             vehicle (Vehicle): 路线刚刷新完成的车辆。
             result (dict): 本地 A* 生成的总路线和分段路线结果。
             fleet_push_event (dict | None): 路线变化后待推送事件。
-            fleet_push_fleet (list[Vehicle] | None): 待推送完整车队引用。
-
         Side Effects:
             写入 raw segments、规划版本和 pending 状态；如果异步规划已启用，会立即提交线程池任务。
         """
@@ -2462,7 +2453,6 @@ class CoreDispatcher:
             CoreDispatcher._mark_fleet_push_pending(
                 vehicle,
                 event=fleet_push_event,
-                fleet=fleet_push_fleet,
             )
         CoreDispatcher._submit_vehicle_route_grasp_async(vehicle)
         persistence.record_vehicle_route(vehicle, path_result=result)
@@ -2535,7 +2525,6 @@ class CoreDispatcher:
         start_node=None,
         submit_grasp=True,
         fleet_push_event=None,
-        fleet_push_fleet=None,
     ):
         """刷新车辆当前 GPS 和前端展示所需路径元数据。
 
@@ -2545,8 +2534,6 @@ class CoreDispatcher:
             start_node (Node | None): 指定刷新起点；为空时使用车辆 next_node/last_node。
             submit_grasp (bool): 是否在路线更新后立即提交异步高德驾车规划。
             fleet_push_event (dict | None): 需要在高德 ready 后推送的业务事件。
-            fleet_push_fleet (list[Vehicle] | None): 待推送的完整车队引用。
-
         Returns:
             dict | None: 最新轨迹结果；起点无效或路径不可达时返回 None。
 
@@ -2594,7 +2581,6 @@ class CoreDispatcher:
                 vehicle,
                 result,
                 fleet_push_event=fleet_push_event,
-                fleet_push_fleet=fleet_push_fleet,
             )
         return result
 
@@ -3603,7 +3589,7 @@ class CoreDispatcher:
             target_vehicle.planned_route_grasp_error = None
             # record_route_grasp 会同步刷新 bus_vehicle_runtime.segment_route。
             persistence.record_route_grasp(target_vehicle)
-            CoreDispatcher._submit_pending_fleet_push_if_ready(target_vehicle, fleet=fleet)
+            CoreDispatcher._submit_pending_fleet_push_if_ready(target_vehicle)
             return 1
 
         status = result.get("status", "error") if isinstance(result, dict) else "error"
