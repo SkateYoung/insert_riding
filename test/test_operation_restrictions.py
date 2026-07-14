@@ -22,8 +22,9 @@ def rectangle(lon1, lat1, lon2, lat2):
     ]
 
 
-def policy_payload(code="p1", name=None, polygons=None):
+def policy_payload(code="p1", name=None, polygons=None, operation_area_id=1001):
     return {
+        "operation_area_id": operation_area_id,
         "policy_code": code,
         "policy_name": name or code,
         "polygons": polygons or [rectangle(113.004, 22.9999, 113.006, 23.0001)],
@@ -209,14 +210,20 @@ class OperationRestrictionApiTest(unittest.TestCase):
         listed = self.client.get("/operation-restrictions/policies")
         self.assertEqual(len(listed.get_json()["policies"]), 1)
 
-        active = self.client.post("/operation-restrictions/active", json={"policy_code": "api-policy"})
+        active = self.client.post("/operation-restrictions/active", json={
+            "operation_area_id": 1001,
+            "policy_code": "api-policy",
+        })
         self.assertEqual(active.status_code, 200)
         self.assertEqual(active.get_json()["policy"]["policy_code"], "api-policy")
-        self.assertEqual(CoreDispatcher.current_operation_restriction_policy()["policy_code"], "api-policy")
+        self.assertEqual(
+            CoreDispatcher.current_operation_restriction_policy(1001)["policy_code"],
+            "api-policy",
+        )
 
         deleted = self.client.delete("/operation-restrictions/policies/api-policy")
         self.assertEqual(deleted.status_code, 200)
-        self.assertIsNone(CoreDispatcher.current_operation_restriction_policy())
+        self.assertIsNone(CoreDispatcher.current_operation_restriction_policy(1001))
 
     def test_duplicate_code_is_allowed_but_duplicate_name_is_rejected(self):
         first = self.client.post(
@@ -241,6 +248,32 @@ class OperationRestrictionApiTest(unittest.TestCase):
         listed = self.client.get("/operation-restrictions/policies")
         self.assertEqual(len(listed.get_json()["policies"]), 2)
 
+    def test_active_policy_is_isolated_by_operation_area(self):
+        first = self.client.post(
+            "/operation-restrictions/policies",
+            json=policy_payload(code="area-a", name="区域A禁区", operation_area_id=1001),
+        )
+        second = self.client.post(
+            "/operation-restrictions/policies",
+            json=policy_payload(code="area-b", name="区域B禁区", operation_area_id=2002),
+        )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+
+        active_a = self.client.post("/operation-restrictions/active", json={
+            "operation_area_id": 1001,
+            "policy_name": "区域A禁区",
+        })
+        active_b = self.client.post("/operation-restrictions/active", json={
+            "operation_area_id": 2002,
+            "policy_name": "区域B禁区",
+        })
+
+        self.assertEqual(active_a.status_code, 200)
+        self.assertEqual(active_b.status_code, 200)
+        self.assertEqual(CoreDispatcher.current_operation_restriction_policy(1001)["policy_code"], "area-a")
+        self.assertEqual(CoreDispatcher.current_operation_restriction_policy(2002)["policy_code"], "area-b")
+
     def test_invalid_policy_returns_400(self):
         response = self.client.post("/operation-restrictions/policies", json={
             "policy_code": "invalid",
@@ -248,6 +281,13 @@ class OperationRestrictionApiTest(unittest.TestCase):
             "polygons": [],
         })
         self.assertEqual(response.status_code, 400)
+
+    def test_create_policy_requires_operation_area_id(self):
+        payload = policy_payload(code="missing-area")
+        payload.pop("operation_area_id", None)
+        response = self.client.post("/operation-restrictions/policies", json=payload)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "operation_area_id_required")
 
 
 if __name__ == "__main__":

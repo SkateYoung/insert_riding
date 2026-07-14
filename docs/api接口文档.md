@@ -1,4 +1,4 @@
-# 前端接口对接文档
+﻿# 前端接口对接文档
 
 本文档面向前端调用方，描述当前 Flask 后端暴露的 HTTP JSON 接口。接口定义以 `api/routes.py` 当前实现为准。
 
@@ -95,6 +95,13 @@ Accept: application/json
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
 | 系统 | GET | `/status` | 获取系统全量状态 |
 | 地图 | GET | `/pois` | 获取所有合法上下客 POI |
+| 地图 | GET | `/map/road-network` | 按运营区获取路网节点和边 |
+| 运营区域 | GET | `/admin/operation-areas` | 查询运营区列表 |
+| 运营区域 | POST | `/admin/operation-areas` | 新增运营区 |
+| 运营区域 | GET | `/admin/operation-areas/<area_id>` | 查询单个运营区 |
+| 运营区域 | PUT | `/admin/operation-areas/<area_id>` | 更新单个运营区 |
+| 运营区域 | DELETE | `/admin/operation-areas/<area_id>` | 软删除运营区 |
+| 运营区域 | POST | `/admin/operation-areas/<area_id>/load-test` | 测试加载运营区 SHP |
 | 运营禁区 | GET | `/operation-restrictions/policies` | 查询禁区策略列表 |
 | 运营禁区 | POST | `/operation-restrictions/policies` | 创建禁区策略 |
 | 运营禁区 | GET | `/operation-restrictions/policies/<policy_identity>` | 查询单个禁区策略 |
@@ -619,6 +626,8 @@ ETA 状态：
 
 初始化路网、车队、后台匹配线程、真实时钟线程和订单 ETA 线程。
 
+多运营区版本中，初始化来源改为数据库 `map_operation_area`。后端会读取所有满足 `deleted=0`、`is_deleted=0`、`status='enabled'`、`audit_status='approved'`、`load_on_startup=1` 且 `shp_path` 非空的运营区，并为每个成功加载的运营区创建一个 `CityGraph`。旧请求体中的 `shp_path` 字段保留兼容，但当前会被忽略。
+
 请求体：
 
 ```json
@@ -636,6 +645,9 @@ ETA 状态：
 ```json
 {
   "status": "initialized",
+  "default_operation_area_code": null,
+  "loaded_areas": [],
+  "failed_areas": [],
   "nodes": 1000,
   "pois": 50,
   "edges": 2000,
@@ -648,8 +660,19 @@ ETA 状态：
 ```json
 {
   "status": "already_initialized",
+  "default_operation_area_code": null,
+  "loaded_areas": [],
   "nodes": 1000,
   "pois": 50
+}
+```
+
+如果没有生效运营区：
+
+```json
+{
+  "status": "no_operation_area",
+  "message": "没有生效运营区，未初始化 SHP 路网。"
 }
 ```
 
@@ -658,7 +681,7 @@ ETA 状态：
 | 状态码 | 场景 |
 | --- | :-- |
 | 200 | 初始化成功或已初始化 |
-| 400 | SHP 文件不存在 |
+| 400 | 没有生效运营区，或所有运营区 SHP 加载失败 |
 | 500 | 初始化异常 |
 
 ### 4.4 POST `/order`
@@ -670,6 +693,7 @@ ETA 状态：
 ```json
 {
   "request_id": "order_10001",
+  "operation_area_code": "area_001",
   "passenger_phone": "13900000001",
   "passenger_id": "passenger_10001",
   "origin": {
@@ -684,7 +708,8 @@ ETA 状态：
     "earliest": "2026-06-07 12:05:00",
     "latest": "2026-06-07 12:20:00"
   },
-  "passenger_count": 2
+  "passenger_count": 2,
+  "operation_area_id": 10001
 }
 ```
 
@@ -693,6 +718,7 @@ ETA 状态：
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `request_id` | string | 是 | 前端/业务侧生成的订单唯一 ID |
+| `operation_area_id` | integer | 是 | 订单所属运营区业务 ID，对应 `map_operation_area.area_id`；不传时返回 `400` |
 | `passenger_phone` | string | 是 | 乘客手机号 |
 | `passenger_id` | string/null | 否 | 前端/业务系统乘客 ID；为空时不写入 |
 | `origin.lon` | number | 是 | 起点经度 |
@@ -709,6 +735,7 @@ ETA 状态：
 {
   "status": "pooled",   
   "request_id": "order_10001",
+  "operation_area_code": "area_001",
   "passenger_phone": "13900000001",
   "passenger_id": "passenger_10001",
   "origin_node": "起点POI",
@@ -939,10 +966,17 @@ ETA 状态：
 
 查询全部车辆状态。
 
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `operation_area_code` | string | 否 | 只查询指定运营区的运行车队；不传时返回全量车队 |
+
 响应示例：
 
 ```json
 {
+  "operation_area_code": "area_001",
   "fleet": []
 }
 ```
@@ -1169,7 +1203,9 @@ ETA 状态：
   "fleet": [],
   "order_pool_size": 0,
   "completed_orders": 0,
-  "operation_restriction_policy": null
+  "operation_restriction_policies": {
+    "10001": null
+  }
 }
 ```
 
@@ -1182,19 +1218,29 @@ ETA 状态：
 | `nodes_count` | integer | 路网节点数量 |
 | `pois_count` | integer | 合法上下客 POI 数量 |
 | `edges_count` | integer | 路网有向边数量 |
+| `default_operation_area_code` | string/null | 固定为 `null`；系统不再使用默认运营区 |
+| `loaded_areas` | array | 当前已加载的运营区列表 |
 | `fleet` | array | 当前内存运行车队 |
 | `order_pool_size` | integer | 待匹配订单池数量 |
 | `completed_orders` | integer | 已完成/归档订单数量 |
-| `operation_restriction_policy` | object/null | 当前生效运营禁区策略 |
+| `operation_restriction_policies` | object | 按运营区 ID 返回的当前生效运营禁区策略映射 |
 
 ### 4.13 GET `/pois`
 
 获取所有合法上下客 POI 兴趣点。
 
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `operation_area_id` | integer | 是 | 指定运营区业务 ID；不传时返回 `400` |
+
 响应示例：
 
 ```json
 {
+  "operation_area_id": 10001,
+  "operation_area_code": "area_001",
   "pois": [
     {
       "id": "poi_1",
@@ -1224,16 +1270,201 @@ ETA 状态：
 | 200 | 查询成功 |
 | 400 | 系统未初始化 |
 
-### 4.14 GET `/operation-restrictions/policies`
+### 4.13.1 GET `/map/road-network`
 
-查询所有未软删除的运营禁区策略，并返回当前全局生效策略。
+按运营区返回当前内存路网节点和边，主要供前端地图测试展示。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `operation_area_id` | integer | 是 | 指定运营区业务 ID；不传时返回 `400` |
 
 响应示例：
 
 ```json
 {
+  "operation_area_id": 10001,
+  "operation_area_code": "area_001",
+  "nodes": [],
+  "edges": []
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 400 | 系统未初始化或运营区未加载 |
+
+### 4.13.2 POST `/admin/stations`
+
+新增单个或多个站点，并写入 `map_poi`。新增成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
+
+请求体支持单条：
+
+```json
+{
+  "operation_area_id": 10001,
+  "station_name": "大学城北门",
+  "lon": 113.12345678,
+  "lat": 23.12345678
+}
+```
+
+也支持批量：
+
+```json
+{
+  "stations": [
+    {
+      "operation_area_id": 10001,
+      "station_name": "大学城北门",
+      "lon": 113.12345678,
+      "lat": 23.12345678
+    }
+  ]
+}
+```
+
+必填字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `operation_area_id` | integer | 运营区业务 ID，对应 `map_operation_area.area_id` |
+| `station_name` | string | 站点名称，落库到 `map_poi.poi_name` |
+| `lon`/`lng`/`longitude` | number | 经度 |
+| `lat`/`latitude` | number | 纬度 |
+
+可选字段包括：`poi_code`、`station_id`、`station_type`、`station_direction`、`direction_angle`、`address`、`areas`、`dept_id`、`org_code`、`poi_type`、`zone`、`status`、`source_status`、`audit_status`、`source_create_time`。
+
+响应示例：
+
+```json
+{
+  "total": 1,
+  "success_count": 1,
+  "failure_count": 0,
+  "results": [
+    {
+      "index": 0,
+      "success": true,
+      "status": 201,
+      "station": {
+        "id": 123,
+        "operation_area_id": 10001,
+        "poi_code": "station_10001_113_12345678_23_12345678",
+        "station_name": "大学城北门",
+        "lon": 113.12345678,
+        "lat": 23.12345678
+      }
+    }
+  ],
+  "runtime_refresh": {
+    "runtime_refreshed": true,
+    "refreshed": [{"operation_area_id": 10001, "poi_count": 12}],
+    "skipped": []
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 全部新增成功 |
+| 207 | 批量中部分成功、部分失败 |
+| 400 | 请求体格式、必填字段或经纬度非法 |
+| 404 | 运营区不存在 |
+| 409 | 坐标或站点编号冲突 |
+| 503 | 数据库不可用 |
+
+### 4.13.3 DELETE `/admin/stations`
+
+按经纬度删除单个或多个站点。删除采用软删除：`deleted=1`，`status='disabled'`。后端不做最近点匹配，只按数据库中规范化到 8 位小数后的经纬度精确匹配。
+
+请求体支持单条：
+
+```json
+{
+  "lon": 113.12345678,
+  "lat": 23.12345678
+}
+```
+
+也支持批量：
+
+```json
+{
+  "stations": [
+    {
+      "lon": 113.12345678,
+      "lat": 23.12345678,
+      "operation_area_id": 10001
+    }
+  ]
+}
+```
+
+说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `lon`/`lng`/`longitude` | number | 是 | 经度 |
+| `lat`/`latitude` | number | 是 | 纬度 |
+| `operation_area_id` | integer | 否 | 坐标匹配多个站点时用于消除歧义 |
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 全部删除成功 |
+| 207 | 批量中部分成功、部分失败 |
+| 400 | 请求体格式或经纬度非法 |
+| 404 | 数据库中不存在该坐标站点 |
+| 409 | 同一坐标匹配多个站点，需要补充 `operation_area_id` |
+| 503 | 数据库不可用 |
+
+错误码：
+
+| 错误码 | 说明 |
+| --- | --- |
+| `invalid_json_body` | 请求体不是合法 JSON 对象 |
+| `stations_required` | 批量模式下 `stations` 为空或不是数组 |
+| `operation_area_id_required` | 新增站点缺少运营区 ID |
+| `operation_area_id_invalid` | 运营区 ID 格式非法 |
+| `operation_area_not_found` | 运营区不存在或已删除 |
+| `station_name_required` | 缺少站点名称 |
+| `station_lon_required` / `station_lat_required` | 缺少经纬度字段 |
+| `station_lon_invalid` / `station_lat_invalid` | 经纬度不是数字 |
+| `station_coordinate_out_of_range` | 经纬度超出合法范围 |
+| `station_coordinate_exists` | 同一运营区已有相同经纬度站点 |
+| `station_code_exists` | 同一运营区站点编号冲突 |
+| `station_not_found_by_coordinate` | 数据库中不存在该经纬度站点 |
+| `station_coordinate_ambiguous` | 同一坐标匹配多个站点 |
+| `database_unavailable` | 数据库不可用 |
+| `station_create_failed` | 新增站点发生未分类异常 |
+| `station_delete_failed` | 删除站点发生未分类异常 |
+
+### 4.14 GET `/operation-restrictions/policies`
+
+查询运营禁区策略列表。可通过 `operation_area_id` 过滤某个运营区；传入该参数时同时返回该运营区当前生效策略。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `operation_area_id` | integer | 否 | 运营区业务 ID，对应 `map_operation_area.area_id`；不传时返回全部策略，但 `active_policy=null` |
+
+响应示例：
+
+```json
+{
+  "operation_area_id": 10001,
   "policies": [					# 当前数据库中所有的运营禁区策略
     {
+      "operation_area_id": 10001,
       "policy_code": "campus-block",  # 运营禁区属性
       "policy_name": "校园施工禁区",	 # 运营禁区名字（通过该字段查询）
       "description": "临时施工区域",   # 运营禁区描述
@@ -1325,7 +1556,7 @@ ETA 状态：
     },
 	...
   ],
-  "active_policy": null			# 当前生效的运营禁区策略
+  "active_policy": null			# 指定运营区当前生效的运营禁区策略
 },
 ...  # 如果有多个运营禁区策略的话
 ```
@@ -1344,6 +1575,7 @@ ETA 状态：
 
 ```json
 {
+  "operation_area_id": 10001,
   "policy_code": "campus-block",
   "policy_name": "校园施工禁区",
   "description": "临时施工区域",
@@ -1365,6 +1597,7 @@ ETA 状态：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `operation_area_id` | integer | 是 | 策略所属运营区业务 ID，对应 `map_operation_area.area_id` |
 | `policy_code` | string | 是 | 策略编号，允许重复 |
 | `policy_name` | string | 是 | 策略名称，同租户下必须唯一 |
 | `description` | string/null | 否 | 策略描述 |
@@ -1387,6 +1620,7 @@ ETA 状态：
 ```json
 {
   "policy": {
+    "operation_area_id": 10001,
     "policy_code": "campus-block",
     "policy_name": "校园施工禁区",
     "is_active": false,
@@ -1453,7 +1687,7 @@ ETA 状态：
 
 ### 4.18 DELETE `/operation-restrictions/policies/<policy_identity>`
 
-软删除单个运营禁区策略。如果删除的是当前生效策略，后端会同步清空当前策略。
+软删除单个运营禁区策略。如果删除的是某运营区当前生效策略，后端只同步清空该运营区当前策略。
 
 成功响应：
 
@@ -1461,6 +1695,7 @@ ETA 状态：
 {
   "status": "deleted",
   "policy_identity": "校园施工禁区",
+  "operation_area_id": 10001,
   "active_policy": null
 }
 ```
@@ -1475,12 +1710,19 @@ ETA 状态：
 
 ### 4.19 GET `/operation-restrictions/active`
 
-查询当前全局生效的运营禁区策略。
+查询指定运营区当前生效的运营禁区策略。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `operation_area_id` | integer | 是 | 运营区业务 ID，对应 `map_operation_area.area_id` |
 
 响应示例：
 
 ```json
 {
+  "operation_area_id": 10001,
   "policy": null
 }
 ```
@@ -1489,12 +1731,13 @@ ETA 状态：
 
 ### 4.20 POST `/operation-restrictions/active`
 
-设置当前全局生效的禁区策略，或关闭禁区限制。策略切换只影响后续新路线计算，不会主动重算已有车辆路线。由于策略编号允许重复，前端优先传 `policy_name`。
+设置指定运营区当前生效的禁区策略，或关闭该运营区禁区限制。策略切换只影响后续新路线计算，不会主动重算已有车辆路线。由于策略编号允许重复，前端优先传 `policy_name`。
 
 请求体，按策略名称选择：
 
 ```json
 {
+  "operation_area_id": 10001,
   "policy_name": "校园施工禁区"
 }
 ```
@@ -1503,6 +1746,7 @@ ETA 状态：
 
 ```json
 {
+  "operation_area_id": 10001,
   "policy_code": null
 }
 ```
@@ -1512,6 +1756,7 @@ ETA 状态：
 ```json
 {
   "status": "active_updated",
+  "operation_area_id": 10001,
   "policy": null
 }
 ```
@@ -1521,8 +1766,174 @@ ETA 状态：
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 设置成功 |
+| 400 | 缺少 `operation_area_id` |
 | 404 | 指定策略不存在或已禁用 |
 | 500 | 服务端异常 |
+
+### 4.20.1 GET `/admin/operation-areas`
+
+查询数据库中未软删除的运营区列表。该接口不要求系统已初始化。
+
+响应示例：
+
+```json
+{
+  "areas": [],
+  "loaded_areas": [],
+  "default_operation_area_code": null
+}
+```
+
+### 4.20.2 POST `/admin/operation-areas`
+
+新增运营区。`code` 在未软删除记录中必须唯一，一个运营区对应一个 SHP 文件。
+
+请求体：
+
+```json
+{
+  "area_id": 10001,
+  "org_id": 20001,
+  "dept_id": 30001,
+  "code": "area_001",
+  "name": "大学城运营区",
+  "org_code": "org_001",
+  "org_name": "示例公司",
+  "status": "enabled",
+  "city_code": "440100",
+  "city_name": "广州市",
+  "country_code": "440113",
+  "country_name": "番禺区",
+  "audit_status": "approved",
+  "shp_path": "dxc_traffic_shp/dxc_rule.shp",
+  "shp_name": "dxc_rule.shp",
+  "shp_version": "v1",
+  "shp_encoding": "utf-8",
+  "coord_system": "gcj02",
+  "load_on_startup": 1,
+  "description": "测试运营区"
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `area_id` | integer | 是 | 业务区域 ID |
+| `org_id` | integer | 是 | 机构 ID |
+| `dept_id` | integer | 是 | 部门 ID |
+| `code` | string | 是 | 运营区编码，未软删除记录中唯一 |
+| `name` | string | 是 | 运营区名称 |
+| `org_code` | string | 是 | 所属公司或机构编码 |
+| `org_name` | string | 是 | 所属公司或机构名称 |
+| `status` | string | 是 | `enabled/disabled`，生效加载要求为 `enabled` |
+| `city_code` | string | 是 | 城市编码 |
+| `city_name` | string | 是 | 城市名称 |
+| `country_code` | string | 是 | 区县编码；后端兼容写入数据库 `county_code` |
+| `country_name` | string | 是 | 区县名称；后端兼容写入数据库 `county_name` |
+| `audit_status` | string | 否 | `approved/pending/rejected`，生效加载要求为 `approved` |
+| `shp_path` | string | 是 | SHP 文件路径 |
+| `shp_name` | string | 否 | SHP 文件名 |
+| `shp_version` | string | 否 | SHP 版本 |
+| `shp_encoding` | string | 否 | SHP/DBF 首选编码，默认先尝试 `utf-8`；失败后自动尝试 `gb18030/gbk/cp936/gb2312/big5`，成功编码会写回加载结果 |
+| `coord_system` | string | 否 | 坐标系，默认 `gcj02` |
+| `load_on_startup` | integer/boolean | 是 | 是否在 `/init` 时自动加载 |
+| `area_points/area_polygon/area_center` | object/array/string | 否 | 区域几何信息 |
+| `description` | string | 否 | 说明文本 |
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 创建成功 |
+| 400 | 缺少运营区创建必填字段、枚举值非法，或运行态预加载失败 |
+| 409 | 运营区编码已存在 |
+| 503 | 数据库不可用 |
+
+新增运营区时，后端会先预加载 SHP 并确认可进入运行态；预加载失败会返回 `operation_area_runtime_load_failed`，且不会写入 `map_operation_area`。创建或更新运营区后，如果 `status='enabled'` 且 `audit_status='approved'`，后端会立即尝试把该运营区 SHP 加载进当前运行态。响应中会包含 `runtime_load`：
+
+```json
+{
+  "area": {},
+  "runtime_load": {
+    "status": "ready",
+    "area": {
+      "code": "area_001",
+      "nodes": 1000,
+      "edges": 2000,
+      "pois": 50
+    },
+    "default_operation_area_code": null,
+    "fleet_size": 3
+  }
+}
+```
+
+`runtime_load.status` 可能为：
+
+| 值 | 说明 |
+| --- | --- |
+| `ready` | 已加入运行态，可被 `/pois`、`/fleet`、订单和车辆接口使用 |
+| `skipped` | 当前运营区状态未触发运行态加载 |
+| `error` | SHP 加载失败，错误原因见 `runtime_load.error` |
+
+### 4.20.3 GET `/admin/operation-areas/<area_id>`
+
+查询单个运营区。
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+| 404 | 运营区不存在 |
+| 503 | 数据库不可用 |
+
+### 4.20.4 PUT `/admin/operation-areas/<area_id>`
+
+更新单个运营区。路径中的 `area_id` 为身份字段，对应 `map_operation_area.area_id`；请求体中的 `code` 仅作为运营区编码字段保存。
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 更新成功 |
+| 400 | 缺少名称或 SHP 路径 |
+| 404 | 运营区不存在 |
+| 503 | 数据库不可用 |
+
+### 4.20.5 DELETE `/admin/operation-areas/<area_id>`
+
+软删除运营区。软删除后不会被 `/init` 加载。
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 删除成功 |
+| 404 | 运营区不存在 |
+| 503 | 数据库不可用 |
+
+### 4.20.6 POST `/admin/operation-areas/<area_id>/load-test`
+
+测试加载指定运营区 SHP。接口会尝试构建 `CityGraph`，并写回 `load_status`、`load_error`、`node_count`、`edge_count`、`poi_count`、`bounds_json`、`last_loaded_at` 等加载结果，但不会改变当前运行中的 `state.city_maps`。
+
+响应示例：
+
+```json
+{
+  "status": "ready",
+  "area": {
+    "code": "area_001",
+    "node_count": 1000,
+    "edge_count": 2000,
+    "poi_count": 50
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 测试加载成功 |
+| 400 | SHP 路径为空或加载失败 |
+| 404 | 运营区不存在 |
+| 503 | 数据库不可用 |
 
 ### 4.21 GET `/admin/driver-vehicle/options`
 
@@ -1536,6 +1947,9 @@ ETA 状态：
   "driver_work_statuses": ["off_duty", "listening", "serving", "resting"],  # 司机的工作状态
   "vehicle_operation_statuses": ["operating", "resting", "closing", "offline", "maintenance"], # 车辆的状态
   "vehicle_types": ["bus", "large_bus", "mid_bus", "small_bus"],
+  "operation_areas": [],
+  "loaded_operation_areas": [],
+  "default_operation_area_code": null,
   "drivers": [],  # 当前司机信息
   "vehicles": []  # 当前车辆信息
 }
@@ -1689,7 +2103,7 @@ ETA 状态：
 
 ### 4.28 POST `/admin/vehicles`
 
-创建离线车辆档案。`vehicle_code` 是车辆业务身份字段，创建后不可修改；`plate_no` 遵循数据库唯一约束，冲突返回 `409`。新增车辆时 `operation_status` 必须为 `offline`，不能携带 `initial_position`；车辆创建后需要先绑定司机，再调用 `POST /admin/vehicles/<vehicle_code>/status` 切换为 `operating`，车辆才会进入运行车队并参与运营。
+创建离线车辆档案。`vehicle_code` 是车辆业务身份字段，创建后不可修改；`plate_no` 遵循数据库唯一约束，冲突返回 `409`。新增车辆时 `operation_status` 必须为 `offline`，不能携带 `initial_position`；车辆创建后调用 `POST /admin/vehicles/<vehicle_code>/status` 切换为 `operating`，车辆才会进入运行车队并参与运营。司机绑定为可选项。
 
 请求体：
 
@@ -1700,6 +2114,7 @@ ETA 状态：
   "vehicle_type": "bus",
   "seat_count": 10,
   "max_load_count": 10,
+  "operation_area_id": 10001,
   "vehicle_color": "#64748b",
   "vehicle_model": "EV-BUS",
   "operation_status": "offline",
@@ -1718,6 +2133,7 @@ ETA 状态：
 | `vehicle_type` | string | 否 | 车辆类型，见 `/admin/driver-vehicle/options` |
 | `seat_count` | integer | 是 | 座位数，必须为正整数 |
 | `max_load_count` | integer | 是 | 核载人数，必须为正整数 |
+| `operation_area_id` | integer | 否 | 车辆所属运营区业务 ID，对应 `map_operation_area.area_id`；切换为可运行状态时必须归属到已加载运营区 |
 | `vehicle_color` | string | 否 | 车辆展示颜色 |
 | `vehicle_model` | string | 否 | 车辆型号 |
 | `operation_status` | string | 是 | 新增车辆时必须为 `offline` |
@@ -1725,7 +2141,9 @@ ETA 状态：
 | `current_driver_code` | string/null | 否 | 当前绑定司机编码；同一个司机只能绑定一台未删除车辆 |
 | `remark` | string | 否 | 备注 |
 
-`POST /admin/vehicles` 不接收车辆初始位置。需要让车辆开始运营时，先选择该车辆并绑定司机，再调用 `POST /admin/vehicles/<vehicle_code>/status` 并传 `operation_status=operating` 与车辆当前位置。
+`POST /admin/vehicles` 不接收车辆初始位置。需要让车辆开始运营时，调用 `POST /admin/vehicles/<vehicle_code>/status` 并传 `operation_status=operating` 与车辆当前位置；可按需提前或之后绑定司机。
+
+车辆管理接口只接受 `operation_area_id` 表示车辆所属运营区，不再接受 `operation_area_code` 或 `area_code` 作为车辆归属输入；如继续传入会返回 `400`。
 
 成功响应：
 
@@ -1821,11 +2239,16 @@ ETA 状态：
 }
 ```
 
-激活可运行状态时可以同时传当前位置；对于刚通过 `POST /admin/vehicles` 新增、尚无运行位置的离线车辆，切换为 `operating` 时必须先绑定司机，并传 `initial_position`：
+激活可运行状态时可以同时传当前位置；对于刚通过 `POST /admin/vehicles` 新增、尚无运行位置的离线车辆，切换为 `operating` 时必须传 `initial_position`，但不强制绑定司机：
+
+如果传入 `operation_area_id`，车辆会归属到该运营区；切换为 `operating/resting/closing` 时，该运营区必须已经通过 `/init` 成功加载。车辆表只保存 `operation_area_id`，接口响应中的 `operation_area_code`、`operation_area_name`、`operation_area_org_code`、`operation_area_org_name` 均由 `map_operation_area` 关联得到。
+
+该接口同样不再接受 `operation_area_code` 或 `area_code` 作为车辆归属输入。
 
 ```json
 {
   "operation_status": "operating",
+  "operation_area_id": 10001,
   "initial_position": {
     "lon": 113.4001,
     "lat": 23.0501
@@ -1837,7 +2260,7 @@ ETA 状态：
 
 | 状态 | 说明 |
 | --- | --- |
-| `operating` | 车辆已绑定司机时加入或更新运行车队，可参与派单 |
+| `operating` | 加入或更新运行车队，可参与派单；司机绑定为可选 |
 | `resting` | 保留展示，但不接新单 |
 | `closing` | 停止接新单，允许完成已有任务 |
 | `offline` | 无任务时从运行车队移除，仅保留数据库档案 |
@@ -1863,11 +2286,11 @@ ETA 状态：
 | 200 | 状态更新成功 |
 | 400 | 状态枚举非法或可运行车辆缺少位置 |
 | 404 | 车辆不存在 |
-| 409 | 未绑定司机不能开始运营，或车辆仍有未完成任务不能退出运营 |
+| 409 | 车辆仍有未完成任务不能退出运营，或司机重复绑定 |
 
 ### 4.33 POST `/admin/vehicles/<vehicle_id>/bind-driver`
 
-绑定或解绑车辆司机，并同步运行车队中的司机字段。同一个司机只能绑定一台未删除车辆；已处于 `operating` 的车辆不能直接解绑司机，需要先把车辆状态调整为非运营状态。
+绑定或解绑车辆司机，并同步运行车队中的司机字段。同一个司机只能绑定一台未删除车辆；已处于 `operating` 的车辆也可以解绑司机，车辆会继续保持运营状态。
 
 请求体，绑定司机：
 

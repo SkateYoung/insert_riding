@@ -130,6 +130,20 @@ class PersistenceSerializationTest(unittest.TestCase):
         self.assertFalse(disabled.enqueue("tenant", {"tenant_name": "x"}))
         self.assertFalse(disabled.status()["enabled"])
 
+    def test_initial_state_only_records_vehicle_runtime(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-code-1"
+        vehicle.operation_area_id = None
+
+        persistence.record_initial_state(self.city, [vehicle])
+
+        ops = [op for op, _ in self.fake_manager.tasks]
+        self.assertIn("tenant", ops)
+        self.assertIn("vehicle_runtime", ops)
+        self.assertNotIn("vehicle", ops)
+        self.assertNotIn("driver", ops)
+        self.assertNotIn("route_snapshot", ops)
+
     def test_ssl_connection_kwargs_are_generated_from_config(self):
         if persistence.pymysql is None:
             self.skipTest("PyMySQL is not available")

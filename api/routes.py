@@ -10,7 +10,7 @@ from . import state
 from . import persistence
 from .auxiliary import AuxiliaryFunctions
 from .core import CoreDispatcher
-from .models import Order, SPEED_MPS, Vehicle
+from .models import CityGraph, Order, SPEED_MPS, Vehicle
 from .restrictions import OperationRestrictionError, normalize_policy_payload, policy_to_response
 
 
@@ -123,6 +123,8 @@ def _vehicle_to_dict(v):
         "driver_no": v.driver_no,
         "vehicle_id": v.vehicle_id,
         "plate_no": v.plate_no,
+        "operation_area_id": getattr(v, "operation_area_id", None),
+        "operation_area_code": getattr(v, "operation_area_code", None),
         "time": v.time,
         "time_text": state.format_timestamp(v.time),
         "on_board_count": sum(o.passenger_count for o in v.on_board_orders),
@@ -182,6 +184,12 @@ def _vehicle_to_dict(v):
         "rest_duration_minutes": (
             round(v.rest_duration / 60.0, 2)
             if getattr(v, "rest_duration", None) is not None
+            else None
+        ),
+        "max_continuous_driving_seconds": getattr(v, "max_continuous_driving_seconds", None),
+        "max_continuous_driving_minutes": (
+            round(v.max_continuous_driving_seconds / 60.0, 2)
+            if getattr(v, "max_continuous_driving_seconds", None) is not None
             else None
         ),
         "rest_timer": getattr(v, "rest_timer", 0.0),
@@ -289,9 +297,14 @@ def _restriction_policy_response(policy):
     return policy_to_response(policy)
 
 
-def _sync_active_restriction_policy(policy):
+def _sync_active_restriction_policy(policy, operation_area_id=None):
     """同步进程内当前禁区策略，并返回响应结构。"""
-    CoreDispatcher.set_operation_restriction_policy(policy)
+    area_id = operation_area_id
+    if area_id is None and policy:
+        area_id = policy.get("operation_area_id")
+    if area_id is None:
+        return _restriction_policy_response(policy)
+    CoreDispatcher.set_operation_restriction_policy(policy, operation_area_id=area_id)
     return _restriction_policy_response(policy)
 
 
@@ -341,6 +354,325 @@ def _json_error(message, status=400, **extra):
     payload = {"error": message}
     payload.update(extra)
     return jsonify(payload), status
+
+
+class StationRequestError(ValueError):
+    """站点管理接口的可细分请求错误。"""
+
+    def __init__(self, message, code, status=400, field=None):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.field = field
+
+
+def _station_error_payload(code, message, field=None, **extra):
+    """组装站点管理接口错误响应体。"""
+    payload = {"error": code, "code": code, "message": message}
+    if field:
+        payload["field"] = field
+    payload.update(extra)
+    return payload
+
+
+def _station_error_response(code, message, status=400, field=None, **extra):
+    """生成站点管理接口错误响应。"""
+    return jsonify(_station_error_payload(code, message, field=field, **extra)), status
+
+
+def _station_request_items(data):
+    """兼容单站点对象和 stations 批量数组。"""
+    if not isinstance(data, dict):
+        raise StationRequestError("请求体必须是 JSON 对象", "invalid_json_body")
+    if "stations" not in data:
+        return [data]
+    stations = data.get("stations")
+    if not isinstance(stations, list) or not stations:
+        raise StationRequestError("stations 必须是非空数组", "stations_required", field="stations")
+    for index, item in enumerate(stations):
+        if not isinstance(item, dict):
+            raise StationRequestError(f"stations[{index}] 必须是 JSON 对象", "invalid_json_body", field=f"stations[{index}]")
+    return stations
+
+
+def _station_required_int(item, field):
+    """读取站点请求中的必填整数字段。"""
+    value = item.get(field)
+    if value in (None, ""):
+        raise StationRequestError("缺少 operation_area_id", "operation_area_id_required", field=field)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise StationRequestError("operation_area_id 必须是整数", "operation_area_id_invalid", field=field) from exc
+
+
+def _station_optional_int(item, field):
+    """读取站点请求中的可选整数字段。"""
+    value = item.get(field)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise StationRequestError(f"{field} 必须是整数", f"{field}_invalid", field=field) from exc
+
+
+def _station_coordinate(item, names, required_code, invalid_code):
+    """读取并校验站点经纬度字段。"""
+    raw = None
+    field = names[0]
+    for name in names:
+        if item.get(name) not in (None, ""):
+            raw = item.get(name)
+            field = name
+            break
+    if raw in (None, ""):
+        raise StationRequestError("缺少经纬度坐标", required_code, field=field)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise StationRequestError("经纬度必须是数字", invalid_code, field=field) from exc
+    return value
+
+
+def _validate_station_coordinate_range(lon, lat):
+    """校验经纬度范围。"""
+    if lon < -180 or lon > 180:
+        raise StationRequestError("经度超出合法范围", "station_coordinate_out_of_range", field="lon")
+    if lat < -90 or lat > 90:
+        raise StationRequestError("纬度超出合法范围", "station_coordinate_out_of_range", field="lat")
+
+
+def _normalize_station_create_payload(item):
+    """规范化新增站点请求项。"""
+    operation_area_id = _station_required_int(item, "operation_area_id")
+    station_name = str(item.get("station_name") or item.get("poi_name") or "").strip()
+    if not station_name:
+        raise StationRequestError("缺少站点名称", "station_name_required", field="station_name")
+    lon = _station_coordinate(item, ("lon", "lng", "longitude"), "station_lon_required", "station_lon_invalid")
+    lat = _station_coordinate(item, ("lat", "latitude"), "station_lat_required", "station_lat_invalid")
+    _validate_station_coordinate_range(lon, lat)
+    payload = dict(item)
+    payload.update({
+        "operation_area_id": operation_area_id,
+        "station_name": station_name,
+        "lon": lon,
+        "lat": lat,
+        "station_id": _station_optional_int(item, "station_id"),
+        "dept_id": _station_optional_int(item, "dept_id"),
+        "direction_angle": _station_optional_int(item, "direction_angle"),
+    })
+    return payload
+
+
+def _normalize_station_delete_payload(item):
+    """规范化删除站点请求项。"""
+    lon = _station_coordinate(item, ("lon", "lng", "longitude"), "station_lon_required", "station_lon_invalid")
+    lat = _station_coordinate(item, ("lat", "latitude"), "station_lat_required", "station_lat_invalid")
+    _validate_station_coordinate_range(lon, lat)
+    operation_area_id = None
+    if item.get("operation_area_id") not in (None, ""):
+        operation_area_id = _station_required_int(item, "operation_area_id")
+    return {
+        "lon": lon,
+        "lat": lat,
+        "operation_area_id": operation_area_id,
+    }
+
+
+def _station_exception_result(index, exc, fallback_code="station_operation_failed"):
+    """把单条站点操作异常转换为批量结果项。"""
+    if isinstance(exc, StationRequestError):
+        status = exc.status
+        payload = _station_error_payload(exc.code, str(exc), field=exc.field)
+    elif isinstance(exc, persistence.PersistenceUnavailable):
+        status = 503
+        payload = _station_error_payload("database_unavailable", str(exc) or "数据库不可用")
+    elif isinstance(exc, persistence.PersistenceConflict):
+        status = 409
+        payload = _station_error_payload(exc.code, str(exc), field=exc.field)
+    elif isinstance(exc, KeyError) and str(exc).strip("'") == "operation_area_not_found":
+        status = 404
+        payload = _station_error_payload("operation_area_not_found", "运营区不存在", field="operation_area_id")
+    else:
+        status = 500
+        payload = _station_error_payload(fallback_code, str(exc))
+    payload.update({"index": index, "success": False, "status": status})
+    return payload
+
+
+def _station_batch_status(results, success_status):
+    """根据逐项结果确定批量接口 HTTP 状态码。"""
+    success_count = sum(1 for item in results if item.get("success"))
+    if success_count == len(results):
+        return success_status
+    if success_count > 0:
+        return 207
+    statuses = [int(item.get("status") or 400) for item in results]
+    if 503 in statuses:
+        return 503
+    if 500 in statuses:
+        return 500
+    if all(status == 404 for status in statuses):
+        return 404
+    if all(status == 409 for status in statuses):
+        return 409
+    return 400
+
+
+def _refresh_station_runtime_areas(operation_area_ids):
+    """新增或删除站点后刷新已加载运营区的 POI。"""
+    refreshed = []
+    skipped = []
+    for area_id in sorted({int(item) for item in operation_area_ids if item not in (None, "")}):
+        try:
+            city_map = (state.city_maps or {}).get(area_id)
+            area = _operation_area_by_area_id(area_id)
+            if city_map is None or area is None:
+                skipped.append({"operation_area_id": area_id, "reason": "operation_area_not_loaded"})
+                continue
+            poi_count = state._apply_database_pois(city_map, area)
+            refreshed.append({"operation_area_id": area_id, "poi_count": poi_count})
+        except Exception as exc:
+            skipped.append({
+                "operation_area_id": area_id,
+                "reason": "runtime_refresh_failed",
+                "message": str(exc),
+            })
+    return {
+        "refreshed": refreshed,
+        "skipped": skipped,
+        "runtime_refreshed": bool(refreshed) and not skipped,
+    }
+
+
+def _preflight_operation_area_runtime_load(area):
+    """新增运营区入库前预检查 SHP 是否可进入运行态。"""
+    operation_area_id = _optional_int(area, "area_id")
+    area_code = str((area or {}).get("code") or "").strip()
+    shp_path = str((area or {}).get("shp_path") or "").strip()
+    if operation_area_id is None:
+        return {"status": "skipped", "reason": "operation_area_id_empty"}
+    if not area_code:
+        return {"status": "skipped", "reason": "operation_area_code_empty"}
+    if not shp_path:
+        return {"status": "skipped", "reason": "shp_path_empty"}
+    if (
+        str((area or {}).get("status") or "").strip() != "enabled"
+        or str((area or {}).get("audit_status") or "").strip() != "approved"
+    ):
+        return {"status": "skipped", "reason": "operation_area_not_active"}
+    shp_encoding = str((area or {}).get("shp_encoding") or "utf-8").strip() or "utf-8"
+    city_map = CityGraph(shp_path, shp_encoding=shp_encoding)
+    area["shp_encoding"] = getattr(city_map, "shp_encoding", shp_encoding)
+    poi_count = state._apply_database_pois(city_map, area)
+    bounds = state._city_bounds(city_map)
+    return {
+        "status": "ready",
+        "operation_area_id": operation_area_id,
+        "code": area_code,
+        "node_count": len(city_map.nodes_map),
+        "edge_count": len(city_map.edges),
+        "poi_count": poi_count,
+        "bounds_json": bounds,
+        "shp_encoding": getattr(city_map, "shp_encoding", shp_encoding),
+    }
+
+
+def _request_operation_area_id(data=None):
+    """读取请求中的运营区 ID；为空时不再使用默认运营区。"""
+    data = data or {}
+    raw_area_id = (
+        request.args.get("operation_area_id")
+        or data.get("operation_area_id")
+    )
+    if raw_area_id in (None, ""):
+        return None
+    try:
+        return int(raw_area_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _city_for_operation_area_or_error(operation_area_id=None):
+    """读取运营区对应路网；不存在时返回错误响应。"""
+    if operation_area_id in (None, ""):
+        return None, _json_error("缺少 operation_area_id", 400, operation_area_id=None)
+    try:
+        area_id = int(operation_area_id)
+    except (TypeError, ValueError):
+        return None, _json_error("operation_area_id 必须是整数", 400, operation_area_id=operation_area_id)
+    city_map = (state.city_maps or {}).get(area_id)
+    if city_map is None:
+        return None, _json_error("运营区未加载或不存在", 404, operation_area_id=area_id)
+    return city_map, None
+
+
+def _city_for_vehicle(vehicle):
+    """读取车辆所属运营区对应路网。"""
+    return state.city_for_vehicle(vehicle)
+
+
+OPERATION_AREA_CREATE_REQUIRED_FIELDS = (
+    "area_id",
+    "org_id",
+    "dept_id",
+    "org_code",
+    "org_name",
+    "name",
+    "code",
+    "status",
+    "city_code",
+    "city_name",
+    "country_code",
+    "country_name",
+    "shp_path",
+    "load_on_startup",
+)
+
+
+def _operation_area_value(data, field):
+    """读取运营区字段，兼容 county/country 命名。"""
+    if field == "country_code":
+        return data.get("country_code", data.get("county_code"))
+    if field == "country_name":
+        return data.get("country_name", data.get("county_name"))
+    return data.get(field)
+
+
+def _normalize_operation_area_payload(data, *, existing_code=None, require_create_fields=False):
+    """规范化运营区管理请求体。"""
+    payload = dict(data or {})
+    code = str(existing_code or payload.get("code") or "").strip()
+    if not code:
+        raise ValueError("code 不能为空")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("name 不能为空")
+    if require_create_fields:
+        missing_fields = []
+        for field in OPERATION_AREA_CREATE_REQUIRED_FIELDS:
+            value = _operation_area_value(payload, field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing_fields.append(field)
+        if missing_fields:
+            raise ValueError(f"运营区创建缺少必填字段：{', '.join(missing_fields)}")
+    status = str(payload.get("status") or "pending").strip()
+    audit_status = str(payload.get("audit_status") or "pending").strip()
+    if status not in {"pending", "disabled", "enabled", "rejected"}:
+        raise ValueError("status 必须是 pending/disabled/enabled/rejected 之一")
+    if audit_status not in {"pending", "approved", "rejected"}:
+        raise ValueError("audit_status 必须是 pending/approved/rejected 之一")
+    payload["code"] = code
+    payload["name"] = name
+    payload["status"] = status
+    payload["audit_status"] = audit_status
+    payload["load_on_startup"] = payload.get("load_on_startup", 1)
+    payload["county_code"] = _operation_area_value(payload, "country_code")
+    payload["county_name"] = _operation_area_value(payload, "country_name")
+    payload["shp_encoding"] = str(payload.get("shp_encoding") or "utf-8").strip() or "utf-8"
+    payload["coord_system"] = str(payload.get("coord_system") or "gcj02").strip()
+    return payload
 
 
 def _normalize_driver_payload(data, *, existing_code=None):
@@ -408,7 +740,7 @@ def _extract_position(data):
     return {"lon": lon, "lat": lat}
 
 
-def _runtime_payload_from_position(position, operation_status, existing_vehicle=None):
+def _runtime_payload_from_position(position, operation_status, existing_vehicle=None, operation_area_id=None):
     """把车辆位置和运营状态转换成运行快照字段。
 
     Args:
@@ -432,7 +764,10 @@ def _runtime_payload_from_position(position, operation_status, existing_vehicle=
         if existing_vehicle.get("current_lon") is not None and existing_vehicle.get("current_lat") is not None:
             position = {"lon": existing_vehicle.get("current_lon"), "lat": existing_vehicle.get("current_lat")}
     if state.system_initialized and position is not None:
-        node, dist = _nearest_node_from_coords(state.city, position["lon"], position["lat"])
+        city_map = state.city_for_operation_area(operation_area_id)
+        if city_map is None:
+            raise ValueError("运营区未加载或不存在")
+        node, dist = _nearest_node_from_coords(city_map, position["lon"], position["lat"])
         if node is None:
             raise ValueError("车辆位置无法吸附到路网节点")
         payload.update({
@@ -475,6 +810,48 @@ def _required_positive_int(payload, field):
     return value
 
 
+def _optional_int(payload, field):
+    """读取可选整数字段。"""
+    value = payload.get(field)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} 必须是整数") from exc
+
+
+def _operation_area_by_area_id(area_id):
+    """按运营区业务 area_id 查找运营区。"""
+    if area_id in (None, ""):
+        return None
+    target_area_id = int(area_id)
+    for area in persistence.list_operation_areas():
+        try:
+            if int(area.get("area_id") or 0) == target_area_id:
+                return area
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _reject_vehicle_area_code_fields(payload):
+    """拒绝车辆接口继续使用运营区编码字段。"""
+    for field in ("operation_area_code", "area_code"):
+        if payload.get(field) not in (None, ""):
+            raise ValueError("车辆接口不再接受 operation_area_code/area_code，请传 operation_area_id")
+
+
+def _operation_area_code_by_area_id(area_id):
+    """按运营区业务 area_id 解析运营区展示编码。"""
+    if area_id in (None, ""):
+        return None
+    area = _operation_area_by_area_id(area_id)
+    if area is None:
+        raise ValueError("operation_area_id 对应的运营区不存在")
+    return str(area.get("code") or "").strip() or None
+
+
 def _payload_has_position_field(payload):
     """判断车辆请求体是否包含位置字段。"""
     return any(key in payload for key in ("initial_position", "position")) or any(
@@ -515,6 +892,18 @@ def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=Non
             raise ValueError("新增车辆时不允许传入 initial_position")
     if operation_status not in VEHICLE_OPERATION_STATUSES:
         raise ValueError(f"operation_status 必须是 {', '.join(VEHICLE_OPERATION_STATUSES)} 之一")
+    _reject_vehicle_area_code_fields(payload)
+    operation_area_id = _optional_int(
+        payload,
+        "operation_area_id",
+    )
+    if operation_area_id is None and existing_vehicle:
+        operation_area_id = _optional_int(existing_vehicle, "operation_area_id")
+    operation_area_code = _operation_area_code_by_area_id(operation_area_id)
+    if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and operation_area_id is None:
+        raise ValueError("可运行车辆必须指定有效的 operation_area_id")
+    if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and state.city_for_operation_area(operation_area_id) is None:
+        raise ValueError("车辆所属运营区未加载或不存在")
     vehicle_type = str(payload.get("vehicle_type") or "bus").strip()
     if vehicle_type not in VEHICLE_TYPES:
         raise ValueError(f"vehicle_type 必须是 {', '.join(VEHICLE_TYPES)} 之一")
@@ -522,7 +911,12 @@ def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=Non
     position = _extract_position(payload)
     if operation_status in VEHICLE_RUNTIME_STATUSES and position is None and not existing_vehicle:
         raise ValueError("可运行车辆必须提供 initial_position")
-    runtime_payload, snap_info = _runtime_payload_from_position(position, operation_status, existing_vehicle=existing_vehicle)
+    runtime_payload, snap_info = _runtime_payload_from_position(
+        position,
+        operation_status,
+        existing_vehicle=existing_vehicle,
+        operation_area_id=operation_area_id,
+    )
     if create:
         seat_count = _required_positive_int(payload, "seat_count")
         max_load_count = _required_positive_int(payload, "max_load_count")
@@ -539,6 +933,8 @@ def _normalize_vehicle_payload(data, *, existing_code=None, existing_vehicle=Non
         "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
         "operation_status": operation_status,
         "operation_mode": str(payload.get("operation_mode") or "dynamic_bus").strip(),
+        "operation_area_id": operation_area_id,
+        "operation_area_code": operation_area_code,
         "current_driver_code": current_driver_code,
         "remark": str(payload.get("remark") or "").strip() or None,
     }
@@ -632,18 +1028,28 @@ def _apply_vehicle_record_to_runtime(vehicle_record):
     operation_status = vehicle_record.get("operation_status") or "offline"
     vehicle_code = vehicle_record.get("vehicle_code")
     existing = _runtime_vehicle_by_code(vehicle_code)
+    operation_area_id = _optional_int(vehicle_record, "operation_area_id")
+    if operation_area_id is None and existing is not None:
+        operation_area_id = getattr(existing, "operation_area_id", None)
+    operation_area_code = str(vehicle_record.get("operation_area_code") or getattr(existing, "operation_area_code", "") or "").strip()
+    city_map = state.city_for_operation_area(operation_area_id)
     if operation_status not in VEHICLE_RUNTIME_STATUSES:
         if existing is not None:
             if _runtime_vehicle_has_tasks(existing):
                 raise persistence.PersistenceConflict("车辆仍有未完成任务，不能退出运营", code="vehicle_has_tasks")
             state.fleet.remove(existing)
+            area_fleet = state.fleet_by_area.get(getattr(existing, "operation_area_id", None))
+            if area_fleet is not None and existing in area_fleet:
+                area_fleet.remove(existing)
         return {"runtime_applied": True, "runtime_action": "removed"}
+    if operation_area_id is None or city_map is None:
+        raise ValueError("可运行车辆所属运营区未加载或不存在")
 
     node_id = vehicle_record.get("next_node_code") or vehicle_record.get("last_node_code")
     if not node_id and vehicle_record.get("current_lon") is not None and vehicle_record.get("current_lat") is not None:
-        node, _ = _nearest_node_from_coords(state.city, vehicle_record["current_lon"], vehicle_record["current_lat"])
+        node, _ = _nearest_node_from_coords(city_map, vehicle_record["current_lon"], vehicle_record["current_lat"])
         node_id = node.id if node else None
-    node = state.city.nodes_map.get(node_id)
+    node = city_map.nodes_map.get(node_id)
     if node is None:
         raise ValueError("可运行车辆缺少可用路网节点")
 
@@ -652,13 +1058,22 @@ def _apply_vehicle_record_to_runtime(vehicle_record):
         capacity = vehicle_record.get("max_load_count") or vehicle_record.get("seat_count") or 10
         existing = Vehicle(vehicle_code, node.id, color, getattr(node, "zone", None), capacity=capacity)
         state.fleet.append(existing)
+        state.fleet_by_area.setdefault(operation_area_id, []).append(existing)
         action = "created"
+    elif getattr(existing, "operation_area_id", None) != operation_area_id:
+        old_area_fleet = state.fleet_by_area.get(getattr(existing, "operation_area_id", None))
+        if old_area_fleet is not None and existing in old_area_fleet:
+            old_area_fleet.remove(existing)
+        state.fleet_by_area.setdefault(operation_area_id, []).append(existing)
+        action = "updated"
     else:
         action = "updated"
 
     existing.id = vehicle_code
     existing.vehicle_id = vehicle_code
     existing.plate_no = vehicle_record.get("plate_no") or vehicle_code
+    existing.operation_area_id = operation_area_id
+    existing.operation_area_code = operation_area_code
     existing.capacity = vehicle_record.get("max_load_count") or vehicle_record.get("seat_count") or existing.capacity
     existing.color = vehicle_record.get("vehicle_color") or existing.color
     existing.driver_id = vehicle_record.get("current_driver_code") or ""
@@ -672,7 +1087,7 @@ def _apply_vehicle_record_to_runtime(vehicle_record):
     existing.progress = float(vehicle_record.get("edge_progress") or 0.0)
     existing.time = state.now_timestamp()
     _set_runtime_vehicle_status(existing, operation_status)
-    CoreDispatcher.refresh_vehicle_route_metadata(existing, state.city)
+    CoreDispatcher.refresh_vehicle_route_metadata(existing, city_map)
     persistence.record_vehicle_runtime(existing)
     return {
         "runtime_applied": True,
@@ -848,24 +1263,23 @@ def init_route():
     Returns:
         JSON: 初始化状态、路网节点数量、POI 数量和道路边数量。
     """
-    data = request.get_json(silent=True) or {}
-    shp_path = data.get("shp_path", "dxc_traffic_shp/dxc_rule.shp")
     try:
         with state.state_lock:
             if state.system_initialized:
                 return jsonify({
                     "status": "already_initialized",
-                    "nodes": len(state.city.nodes_map),
-                    "pois": len(state.city.pois),
+                    "loaded_areas": state.loaded_operation_areas(),
+                    "default_operation_area_id": None,
+                    "default_operation_area_code": None,
+                    "nodes": sum(len(city.nodes_map) for city in state.city_maps.values()),
+                    "pois": sum(len(city.pois) for city in state.city_maps.values()),
                 })
-            state.init_system(shp_path)
-            return jsonify({
-                "status": "initialized",
-                "nodes": len(state.city.nodes_map),
-                "pois": len(state.city.pois),
-                "edges": len(state.city.edges),
-                "system_time": state.current_time(),
-            })
+            result = state.init_system()
+            result["system_time"] = state.current_time()
+            result["default_operation_area_id"] = None
+            result["default_operation_area_code"] = None
+            status_code = 200 if result.get("status") == "initialized" else 400
+            return jsonify(result), status_code
     except FileNotFoundError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
     except Exception as e:
@@ -897,6 +1311,12 @@ def create_order():
     origin = data.get("origin") or {}
     destination = data.get("destination") or {}
     expected_pickup_time = data.get("expected_pickup_time") or {}
+    operation_area_id = _request_operation_area_id(data)
+    operation_area = _operation_area_by_area_id(operation_area_id)
+    operation_area_code = str((operation_area or {}).get("code") or "").strip() or None
+    city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
+    if area_error is not None:
+        return area_error
 
     try:
         request_id = str(data["request_id"])
@@ -914,6 +1334,8 @@ def create_order():
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
 
+    if not operation_area_id: 
+        return jsonify({"error": "operation_area_id 必须填写"}), 400
     if not passenger_phone:
         return jsonify({"error": "passenger_phone 必须填写"}), 400
     if passenger_count <= 0:
@@ -934,12 +1356,14 @@ def create_order():
             expected_pickup_earliest=expected_pickup_earliest,
             expected_pickup_latest=expected_pickup_latest,
             passenger_count=passenger_count,
-            city_map=state.city,
+            city_map=city_map,
             passenger_phone=passenger_phone,
             passenger_id=passenger_id,
+            operation_area_id=operation_area_id,
+            operation_area_code=operation_area_code,
             req_time=time_snapshot["timestamp"],
         )
-        CoreDispatcher.pool_and_route_planning(state.fleet, order, state.city)
+        CoreDispatcher.pool_and_route_planning(state.fleet_for_operation_area(operation_area_id), order, city_map)
         pool_size = len(CoreDispatcher.order_pool)
 
     return jsonify({
@@ -957,6 +1381,8 @@ def create_order():
         "passenger_count": order.passenger_count,
         "passenger_phone": order.passenger_phone,
         "passenger_id": order.passenger_id,
+        "operation_area_id": order.operation_area_id,
+        "operation_area_code": order.operation_area_code,
         "pool_size": pool_size,
     })
 
@@ -988,6 +1414,8 @@ def get_order_pool():
                         "latest": o.expected_pickup_latest.isoformat(sep=" "),
                     },
                     "passenger_count": o.passenger_count,
+                    "operation_area_id": getattr(o, "operation_area_id", None),
+                    "operation_area_code": getattr(o, "operation_area_code", None),
                     "req_time": o.req_time,
                 }
                 for o in CoreDispatcher.order_pool
@@ -1028,7 +1456,20 @@ def cancel_order(request_id):
         return jsonify({"error": "系统未初始化"}), 400
 
     with state.state_lock:
-        result = CoreDispatcher.cancel_order(request_id, state.fleet, state.city, cancel_time=state.now_datetime())
+        cancel_city = None
+        for order in CoreDispatcher.order_pool:
+            if str(order.request_id) == str(request_id):
+                cancel_city = state.city_for_operation_area(getattr(order, "operation_area_id", None))
+                break
+        else:
+            for vehicle in state.fleet or []:
+                if any(str(order.request_id) == str(request_id) for order in getattr(vehicle, "on_board_orders", []) or []):
+                    cancel_city = _city_for_vehicle(vehicle)
+                    break
+                if any(str(step["order"].request_id) == str(request_id) for step in getattr(vehicle, "planned_route", []) or []):
+                    cancel_city = _city_for_vehicle(vehicle)
+                    break
+        result = CoreDispatcher.cancel_order(request_id, state.fleet, cancel_city, cancel_time=state.now_datetime())
     if result["status"] == "not_found":
         return jsonify(result), 404
     if result["status"] == "rejected":
@@ -1050,6 +1491,250 @@ def admin_query_orders():
         return _admin_error_response(exc)
 
 
+@bp.route("/admin/stations", methods=["POST"])
+def admin_create_stations():
+    """新增单个或多个站点。"""
+    data = request.get_json(silent=True)
+    try:
+        items = _station_request_items(data)
+    except StationRequestError as exc:
+        return _station_error_response(exc.code, str(exc), status=exc.status, field=exc.field)
+
+    results = []
+    affected_area_ids = set()
+    for index, item in enumerate(items):
+        try:
+            payload = _normalize_station_create_payload(item)
+            station = persistence.create_station(payload)
+            affected_area_ids.add(station.get("operation_area_id"))
+            results.append({
+                "index": index,
+                "success": True,
+                "status": 201,
+                "station": station,
+            })
+        except Exception as exc:
+            results.append(_station_exception_result(index, exc, fallback_code="station_create_failed"))
+
+    with state.state_lock:
+        runtime_refresh = _refresh_station_runtime_areas(affected_area_ids)
+    status_code = _station_batch_status(results, 201)
+    return jsonify({
+        "total": len(results),
+        "success_count": sum(1 for item in results if item.get("success")),
+        "failure_count": sum(1 for item in results if not item.get("success")),
+        "results": results,
+        "runtime_refresh": runtime_refresh,
+    }), status_code
+
+
+@bp.route("/admin/stations", methods=["DELETE"])
+def admin_delete_stations():
+    """按经纬度删除单个或多个站点。"""
+    data = request.get_json(silent=True)
+    try:
+        items = _station_request_items(data)
+    except StationRequestError as exc:
+        return _station_error_response(exc.code, str(exc), status=exc.status, field=exc.field)
+
+    results = []
+    affected_area_ids = set()
+    for index, item in enumerate(items):
+        try:
+            payload = _normalize_station_delete_payload(item)
+            station = persistence.delete_station_by_coordinate(
+                payload["lon"],
+                payload["lat"],
+                operation_area_id=payload.get("operation_area_id"),
+            )
+            if station is None:
+                raise StationRequestError(
+                    "数据库中不存在该经纬度站点",
+                    "station_not_found_by_coordinate",
+                    status=404,
+                    field="lon,lat",
+                )
+            affected_area_ids.add(station.get("operation_area_id"))
+            results.append({
+                "index": index,
+                "success": True,
+                "status": 200,
+                "station": station,
+            })
+        except Exception as exc:
+            results.append(_station_exception_result(index, exc, fallback_code="station_delete_failed"))
+
+    with state.state_lock:
+        runtime_refresh = _refresh_station_runtime_areas(affected_area_ids)
+    status_code = _station_batch_status(results, 200)
+    return jsonify({
+        "total": len(results),
+        "success_count": sum(1 for item in results if item.get("success")),
+        "failure_count": sum(1 for item in results if not item.get("success")),
+        "results": results,
+        "runtime_refresh": runtime_refresh,
+    }), status_code
+
+
+@bp.route("/admin/operation-areas", methods=["GET"])
+def admin_list_operation_areas():
+    """查询运营区列表。"""
+    try:
+        include_deleted = str(request.args.get("include_deleted") or "").lower() in {"1", "true", "yes"}
+        return jsonify({
+            "areas": persistence.list_operation_areas(include_deleted=include_deleted),
+            "loaded_areas": state.loaded_operation_areas(),
+            "default_operation_area_id": None,
+            "default_operation_area_code": None,
+        })
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/operation-areas", methods=["POST"])
+def admin_create_operation_area():
+    """新增运营区。"""
+    try:
+        payload = _normalize_operation_area_payload(
+            request.get_json(silent=True) or {},
+            require_create_fields=True,
+        )
+        try:
+            runtime_preflight = _preflight_operation_area_runtime_load(payload)
+        except Exception as exc:
+            return jsonify({
+                "error": "operation_area_runtime_load_failed",
+                "message": str(exc),
+            }), 400
+        if runtime_preflight.get("status") != "ready":
+            return jsonify({
+                "error": "operation_area_runtime_not_ready",
+                "runtime_load": runtime_preflight,
+            }), 400
+        area = None
+        area = persistence.save_operation_area(payload, create=True)
+        runtime_load = state.load_operation_area_into_runtime(area)
+        if runtime_load.get("status") != "ready":
+            persistence.hard_delete_operation_area_by_area_id(area.get("area_id"))
+            return jsonify({
+                "error": "operation_area_runtime_not_ready",
+                "runtime_load": runtime_load,
+            }), 400
+        return jsonify({"area": area, "runtime_load": runtime_load}), 201
+    except Exception as exc:
+        if "area" in locals() and area:
+            try:
+                persistence.hard_delete_operation_area_by_area_id(area.get("area_id"))
+            except Exception:
+                pass
+        return _admin_error_response(exc)
+
+
+def _operation_area_path_id(area_id):
+    """解析运营区接口路径中的 area_id。"""
+    try:
+        value = int(area_id)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+@bp.route("/admin/operation-areas/<area_id>", methods=["GET"])
+def admin_get_operation_area(area_id):
+    """查询单个运营区。"""
+    operation_area_id = _operation_area_path_id(area_id)
+    if operation_area_id is None:
+        return jsonify({"error": "operation_area_id_invalid", "operation_area_id": str(area_id)}), 400
+    area = persistence.get_operation_area_by_area_id(operation_area_id)
+    if area is None:
+        return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+    loaded = next((
+        item for item in state.loaded_operation_areas()
+        if str(item.get("area_id") or "") == str(operation_area_id)
+    ), None)
+    return jsonify({"area": area, "loaded": loaded})
+
+
+@bp.route("/admin/operation-areas/<area_id>", methods=["PUT"])
+def admin_update_operation_area(area_id):
+    """更新运营区。"""
+    try:
+        operation_area_id = _operation_area_path_id(area_id)
+        if operation_area_id is None:
+            return jsonify({"error": "operation_area_id_invalid", "operation_area_id": str(area_id)}), 400
+        existing = persistence.get_operation_area_by_area_id(operation_area_id)
+        if existing is None:
+            return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+        data = request.get_json(silent=True) or {}
+        data["area_id"] = operation_area_id
+        if not data.get("code"):
+            data["code"] = existing.get("code")
+        payload = _normalize_operation_area_payload(data)
+        area = persistence.save_operation_area(payload, create=False)
+        if area is None:
+            return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+        runtime_load = state.load_operation_area_into_runtime(area)
+        return jsonify({"area": area, "runtime_load": runtime_load})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/operation-areas/<area_id>", methods=["DELETE"])
+def admin_delete_operation_area(area_id):
+    """软删除运营区。"""
+    try:
+        operation_area_id = _operation_area_path_id(area_id)
+        if operation_area_id is None:
+            return jsonify({"error": "operation_area_id_invalid", "operation_area_id": str(area_id)}), 400
+        deleted = persistence.delete_operation_area_by_area_id(operation_area_id)
+        if not deleted:
+            return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+        return jsonify({"status": "deleted", "operation_area_id": operation_area_id})
+    except Exception as exc:
+        return _admin_error_response(exc)
+
+
+@bp.route("/admin/operation-areas/<area_id>/load-test", methods=["POST"])
+def admin_test_operation_area_load(area_id):
+    """测试指定运营区 SHP 是否可以加载。"""
+    operation_area_id = _operation_area_path_id(area_id)
+    if operation_area_id is None:
+        return jsonify({"error": "operation_area_id_invalid", "operation_area_id": str(area_id)}), 400
+    area = persistence.get_operation_area_by_area_id(operation_area_id)
+    if area is None:
+        return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+    shp_path = str(area.get("shp_path") or "").strip()
+    if not shp_path:
+        return jsonify({"error": "shp_path 不能为空", "operation_area_id": operation_area_id}), 400
+    try:
+        shp_encoding = str(area.get("shp_encoding") or "utf-8").strip() or "utf-8"
+        city_map = CityGraph(shp_path, shp_encoding=shp_encoding)
+        state._apply_database_pois(city_map, area)
+        bounds = state._city_bounds(city_map)
+        result = {
+            "load_status": "ready",
+            "load_error": None,
+            "node_count": len(city_map.nodes_map),
+            "edge_count": len(city_map.edges),
+            "poi_count": len(city_map.pois),
+            "bounds_json": bounds,
+            "shp_encoding": getattr(city_map, "shp_encoding", shp_encoding),
+        }
+        persistence.record_operation_area_load_result_by_area_id(operation_area_id, result)
+        return jsonify({"status": "ready", "operation_area_id": operation_area_id, "result": result})
+    except Exception as exc:
+        result = {
+            "load_status": "error",
+            "load_error": str(exc),
+            "node_count": None,
+            "edge_count": None,
+            "poi_count": None,
+            "bounds_json": None,
+        }
+        persistence.record_operation_area_load_result_by_area_id(operation_area_id, result)
+        return jsonify({"status": "error", "operation_area_id": operation_area_id, "error": str(exc)}), 400
+
+
 # ============================================================
 # 功能三：运营禁区、司机车辆管理与车辆运行接口
 # 相关接口：/operation-restrictions/*、/admin/*、/fleet/*、/tick、/status
@@ -1063,12 +1748,21 @@ def list_operation_restriction_policies():
         GET /operation-restrictions/policies
 
     Returns:
-        JSON: 未软删除策略列表，以及当前全局生效策略。
+        JSON: 未软删除策略列表，以及指定运营区当前生效策略。
     """
-    policies = persistence.list_operation_restriction_policies()
+    operation_area_id = _request_operation_area_id()
+    policies = persistence.list_operation_restriction_policies(operation_area_id=operation_area_id)
+    active_policy = (
+        persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        if operation_area_id is not None
+        else None
+    )
+    if operation_area_id is not None:
+        _sync_active_restriction_policy(active_policy, operation_area_id=operation_area_id)
     return jsonify({
+        "operation_area_id": operation_area_id,
         "policies": [_restriction_policy_response(policy) for policy in policies],
-        "active_policy": _restriction_policy_response(CoreDispatcher.current_operation_restriction_policy()),
+        "active_policy": _restriction_policy_response(active_policy),
     })
 
 
@@ -1088,7 +1782,11 @@ def create_operation_restriction_policy():
     """
     data = request.get_json(silent=True) or {}
     try:
+        operation_area_id = _request_operation_area_id(data)
+        if operation_area_id is None:
+            return jsonify({"error": "operation_area_id_required"}), 400
         policy = normalize_policy_payload(data, require_identity=True)
+        policy["operation_area_id"] = operation_area_id
         if persistence.get_operation_restriction_policy(policy["policy_name"]):
             return jsonify({
                 "error": "policy_name_exists",
@@ -1096,8 +1794,8 @@ def create_operation_restriction_policy():
                 "policy_name": policy["policy_name"],
             }), 400
         saved = persistence.save_operation_restriction_policy(policy)
-        active = persistence.get_active_operation_restriction_policy()
-        _sync_active_restriction_policy(active)
+        active = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        _sync_active_restriction_policy(active, operation_area_id=operation_area_id)
         return jsonify({"policy": _restriction_policy_response(saved)}), 201
     except OperationRestrictionError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1115,7 +1813,11 @@ def get_operation_restriction_policy(policy_identity):
     Returns:
         JSON: 策略快照；不存在时返回 404。
     """
-    policy = persistence.get_operation_restriction_policy(policy_identity)
+    operation_area_id = _request_operation_area_id()
+    policy = persistence.get_operation_restriction_policy(
+        policy_identity,
+        operation_area_id=operation_area_id,
+    )
     if policy is None:
         return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
     return jsonify({"policy": _restriction_policy_response(policy)})
@@ -1137,6 +1839,7 @@ def update_operation_restriction_policy(policy_identity):
     """
     data = request.get_json(silent=True) or {}
     try:
+        requested_area_id = _request_operation_area_id(data)
         policy = normalize_policy_payload(data, require_identity=True)
         existing = persistence.get_operation_restriction_policy(policy_identity)
         if existing is None:
@@ -1147,10 +1850,20 @@ def update_operation_restriction_policy(policy_identity):
                 "message": "禁区策略名称是唯一标识，编辑已有策略时不能修改名称",
                 "policy_name": existing.get("policy_name"),
             }), 400
+        old_operation_area_id = existing.get("operation_area_id")
+        operation_area_id = requested_area_id or old_operation_area_id
+        if operation_area_id is None:
+            return jsonify({"error": "operation_area_id_required"}), 400
+        policy["operation_area_id"] = operation_area_id
         policy["is_active"] = bool(existing.get("is_active"))
         saved = persistence.save_operation_restriction_policy(policy)
-        active = persistence.get_active_operation_restriction_policy()
-        _sync_active_restriction_policy(active)
+        active = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        _sync_active_restriction_policy(active, operation_area_id=operation_area_id)
+        if old_operation_area_id and old_operation_area_id != operation_area_id:
+            old_active = persistence.get_active_operation_restriction_policy(
+                operation_area_id=old_operation_area_id
+            )
+            _sync_active_restriction_policy(old_active, operation_area_id=old_operation_area_id)
         return jsonify({"policy": _restriction_policy_response(saved)})
     except OperationRestrictionError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1169,14 +1882,17 @@ def delete_operation_restriction_policy(policy_identity):
         JSON: 删除结果和删除后的当前生效策略；策略不存在返回 404。
     """
     try:
+        existing = persistence.get_operation_restriction_policy(policy_identity)
+        operation_area_id = existing.get("operation_area_id") if existing else None
         deleted = persistence.delete_operation_restriction_policy(policy_identity)
         if not deleted:
             return jsonify({"error": "policy_not_found", "policy_identity": str(policy_identity)}), 404
-        active = persistence.get_active_operation_restriction_policy()
-        _sync_active_restriction_policy(active)
+        active = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        _sync_active_restriction_policy(active, operation_area_id=operation_area_id)
         return jsonify({
             "status": "deleted",
             "policy_identity": str(policy_identity),
+            "operation_area_id": operation_area_id,
             "active_policy": _restriction_policy_response(active),
         })
     except Exception as exc:
@@ -1191,11 +1907,17 @@ def get_active_operation_restriction_policy():
         GET /operation-restrictions/active
 
     Returns:
-        JSON: 当前全局生效策略；未设置时 policy 为 null。
+        JSON: 指定运营区当前生效策略；未设置时 policy 为 null。
     """
-    active = persistence.get_active_operation_restriction_policy()
-    _sync_active_restriction_policy(active)
-    return jsonify({"policy": _restriction_policy_response(active)})
+    operation_area_id = _request_operation_area_id()
+    if operation_area_id is None:
+        return jsonify({"error": "operation_area_id_required"}), 400
+    active = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+    _sync_active_restriction_policy(active, operation_area_id=operation_area_id)
+    return jsonify({
+        "operation_area_id": operation_area_id,
+        "policy": _restriction_policy_response(active),
+    })
 
 
 @bp.route("/operation-restrictions/active", methods=["POST"])
@@ -1212,19 +1934,27 @@ def set_active_operation_restriction_policy():
         JSON: 切换结果和当前生效策略；策略不存在或禁用时返回 404。
     """
     data = request.get_json(silent=True) or {}
+    operation_area_id = _request_operation_area_id(data)
+    if operation_area_id is None:
+        return jsonify({"error": "operation_area_id_required"}), 400
     policy_identity = data.get("policy_name")
     if policy_identity in (None, ""):
         policy_identity = data.get("policy_code")
     try:
-        active = persistence.set_active_operation_restriction_policy(policy_identity)
+        active = persistence.set_active_operation_restriction_policy(
+            policy_identity,
+            operation_area_id=operation_area_id,
+        )
         if policy_identity not in (None, "") and active is None:
             return jsonify({
                 "error": "policy_not_found_or_disabled",
                 "policy_identity": str(policy_identity),
+                "operation_area_id": operation_area_id,
             }), 404
-        _sync_active_restriction_policy(active)
+        _sync_active_restriction_policy(active, operation_area_id=operation_area_id)
         return jsonify({
             "status": "active_updated",
+            "operation_area_id": operation_area_id,
             "policy": _restriction_policy_response(active),
         })
     except Exception as exc:
@@ -1248,6 +1978,10 @@ def admin_driver_vehicle_options():
         "vehicle_types": list(VEHICLE_TYPES),
         "drivers": persistence.list_drivers(),
         "vehicles": persistence.list_vehicles(),
+        "operation_areas": persistence.list_operation_areas(),
+        "loaded_operation_areas": state.loaded_operation_areas(),
+        "default_operation_area_id": None,
+        "default_operation_area_code": None,
     })
 
 
@@ -1452,6 +2186,9 @@ def admin_delete_vehicle(vehicle_code):
                 raise persistence.PersistenceConflict("车辆仍有未完成任务，不能删除", code="vehicle_has_tasks")
             if runtime_vehicle and state.fleet is not None:
                 state.fleet.remove(runtime_vehicle)
+                area_fleet = state.fleet_by_area.get(getattr(runtime_vehicle, "operation_area_id", None))
+                if area_fleet is not None and runtime_vehicle in area_fleet:
+                    area_fleet.remove(runtime_vehicle)
             deleted = persistence.delete_vehicle(vehicle_code)
         if not deleted:
             return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
@@ -1473,7 +2210,7 @@ def admin_update_vehicle_status(vehicle_code):
             operation_status (str): 目标运营状态。
             initial_position (dict): 激活可运行状态时可选提供的 lon/lat。
         说明:
-            切换为 operating 时车辆必须已绑定司机。
+            切换为 operating 时车辆可以不绑定司机；如传入司机则校验司机存在且未绑定其他车辆。
 
     Returns:
         JSON: 更新后的车辆档案、运行态同步结果和可选吸附结果。
@@ -1490,11 +2227,23 @@ def admin_update_vehicle_status(vehicle_code):
             runtime_vehicle = _runtime_vehicle_by_code(vehicle_code) if state.system_initialized else None
             if operation_status not in VEHICLE_RUNTIME_STATUSES and runtime_vehicle and _runtime_vehicle_has_tasks(runtime_vehicle):
                 raise persistence.PersistenceConflict("车辆仍有未完成任务，不能退出运营", code="vehicle_has_tasks")
+            _reject_vehicle_area_code_fields(data)
+            operation_area_id = _optional_int(data, "operation_area_id")
+            if operation_area_id is None:
+                operation_area_id = _optional_int(existing, "operation_area_id")
+            operation_area_code = _operation_area_code_by_area_id(operation_area_id)
+            if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and operation_area_id is None:
+                raise ValueError("可运行车辆必须指定有效的 operation_area_id")
+            if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and state.city_for_operation_area(operation_area_id) is None:
+                raise ValueError("车辆所属运营区未加载或不存在")
             runtime_payload, snap_info = _runtime_payload_from_position(
                 _extract_position(data),
                 operation_status,
                 existing_vehicle=existing,
+                operation_area_id=operation_area_id,
             )
+            runtime_payload["operation_area_id"] = operation_area_id
+            runtime_payload["operation_area_code"] = operation_area_code
             if operation_status in VEHICLE_RUNTIME_STATUSES and state.system_initialized and not _vehicle_payload_has_runtime_position(runtime_payload):
                 raise ValueError("可运行车辆必须提供 initial_position 或已有运行位置")
             vehicle = persistence.update_vehicle_status(vehicle_code, operation_status, runtime_payload=runtime_payload)
@@ -1517,7 +2266,7 @@ def admin_bind_vehicle_driver(vehicle_code):
             driver_code (str | null): 司机业务编码；为空表示解绑。
             operator (str | None): 可选操作人标识。
         说明:
-            同一司机只能绑定一台车；operating 车辆不能直接解绑司机。
+            同一司机只能绑定一台车；operating 车辆也允许解绑司机。
 
     Returns:
         JSON: 更新后的车辆档案和运行态同步结果。
@@ -1551,7 +2300,18 @@ def get_fleet():
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     with state.state_lock:
-        return jsonify({"fleet": [_vehicle_to_dict(v) for v in state.fleet]})
+        operation_area_id = _request_operation_area_id()
+        selected_fleet = (
+            state.fleet_for_operation_area(operation_area_id)
+            if operation_area_id is not None
+            else (state.fleet or [])
+        )
+        operation_area = _operation_area_by_area_id(operation_area_id)
+        return jsonify({
+            "operation_area_id": operation_area_id,
+            "operation_area_code": (operation_area or {}).get("code"),
+            "fleet": [_vehicle_to_dict(v) for v in selected_fleet],
+        })
 
 
 @bp.route("/fleet/<vehicle_id>", methods=["GET"])
@@ -1609,9 +2369,12 @@ def update_vehicle_path(vehicle_id):
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
+        city_map = _city_for_vehicle(target_vehicle)
+        if city_map is None:
+            return jsonify({"error": "车辆所属运营区未加载或不存在"}), 409
         path_result = CoreDispatcher.update_vehicle_position_from_gps(
             target_vehicle,
-            state.city,
+            city_map,
             lon,
             lat,
             current_timestamp=state.now_timestamp(),
@@ -1680,7 +2443,10 @@ def replan_vehicle_amap_route(vehicle_id):
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
-        prepared = CoreDispatcher.prepare_vehicle_amap_replan_job(target_vehicle, state.city)
+        city_map = _city_for_vehicle(target_vehicle)
+        if city_map is None:
+            return jsonify({"error": "车辆所属运营区未加载或不存在"}), 409
+        prepared = CoreDispatcher.prepare_vehicle_amap_replan_job(target_vehicle, city_map)
         if not prepared.get("ok"):
             status_code = int(prepared.get("status_code") or 409)
             payload = {key: value for key, value in prepared.items() if key not in {"ok", "status_code"}}
@@ -1755,7 +2521,7 @@ def request_vehicle_rest(vehicle_id):
 
         result = CoreDispatcher.request_driver_rest(
             target_vehicle,
-            state.city,
+            _city_for_vehicle(target_vehicle),
             desired_rest_time=desired_rest_time,
             rest_duration_seconds=rest_duration_seconds,
         )
@@ -1817,18 +2583,25 @@ def full_status():
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     with state.state_lock:
+        loaded_city_maps = list((state.city_maps or {}).values())
         return jsonify({
             "initialized": state.system_initialized,
             "system_time": state.current_time(),
-            "nodes_count": len(state.city.nodes_map),
-            "pois_count": len(state.city.pois),
-            "edges_count": len(state.city.edges),
+            "nodes_count": sum(len(city_map.nodes_map) for city_map in loaded_city_maps),
+            "pois_count": sum(len(city_map.pois) for city_map in loaded_city_maps),
+            "edges_count": sum(len(city_map.edges) for city_map in loaded_city_maps),
+            "default_operation_area_id": None,
+            "default_operation_area_code": None,
+            "loaded_areas": state.loaded_operation_areas(),
             "fleet": [_vehicle_to_dict(v) for v in state.fleet],
             "order_pool_size": len(CoreDispatcher.order_pool),
             "completed_orders": len(CoreDispatcher.completed_orders_pool),
-            "operation_restriction_policy": _restriction_policy_response(
-                CoreDispatcher.current_operation_restriction_policy()
-            ),
+            "operation_restriction_policies": {
+                str(area_id): _restriction_policy_response(
+                    CoreDispatcher.current_operation_restriction_policy(area_id)
+                )
+                for area_id in (state.city_maps or {})
+            },
         })
 
 
@@ -1855,8 +2628,17 @@ def export_visualization():
     file_path = data.get("file_path", "map_data.js")
     try:
         with state.state_lock:
-            AuxiliaryFunctions.export_visualization_data(state.city, file_path, state.fleet, speed_mps=SPEED_MPS)
-        return jsonify({"status": "ok", "file": file_path})
+            operation_area_id = _request_operation_area_id(data)
+            city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
+            if area_error is not None:
+                return area_error
+            AuxiliaryFunctions.export_visualization_data(
+                city_map,
+                file_path,
+                state.fleet_for_operation_area(operation_area_id),
+                speed_mps=SPEED_MPS,
+            )
+        return jsonify({"status": "ok", "file": file_path, "operation_area_id": operation_area_id})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -1874,7 +2656,14 @@ def get_pois():
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     with state.state_lock:
+        operation_area_id = _request_operation_area_id()
+        operation_area = _operation_area_by_area_id(operation_area_id)
+        city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
+        if area_error is not None:
+            return area_error
         return jsonify({
+            "operation_area_id": operation_area_id,
+            "operation_area_code": (operation_area or {}).get("code"),
             "pois": [
                 {
                     "id": p.id,
@@ -1883,7 +2672,7 @@ def get_pois():
                     "lat": p.lat,
                     "zone": p.zone,
                 }
-                for p in state.city.pois
+                for p in city_map.pois
             ]
         })
 
@@ -1902,6 +2691,11 @@ def get_road_network():
         return jsonify({"error": "系统未初始化"}), 400
 
     with state.state_lock:
+        operation_area_id = _request_operation_area_id()
+        operation_area = _operation_area_by_area_id(operation_area_id)
+        city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
+        if area_error is not None:
+            return area_error
         nodes = {
             node_id: {
                 "id": node.id,
@@ -1911,15 +2705,17 @@ def get_road_network():
                 "zone": node.zone,
                 "is_poi": node.is_poi,
             }
-            for node_id, node in state.city.nodes_map.items()
+            for node_id, node in city_map.nodes_map.items()
         }
         lons = [node["lon"] for node in nodes.values()]
         lats = [node["lat"] for node in nodes.values()]
 
         return jsonify({
             "nodes": nodes,
-            "edges": state.city.edges,
-            "pois": [p.id for p in state.city.pois],
+            "edges": city_map.edges,
+            "pois": [p.id for p in city_map.pois],
+            "operation_area_id": operation_area_id,
+            "operation_area_code": (operation_area or {}).get("code"),
             "bounds": {
                 "min_lon": min(lons),
                 "max_lon": max(lons),

@@ -148,14 +148,16 @@ ETA 状态：
 
 ## 运营禁区策略
 
-`bus_operation_restriction_policy` 用于存储前端维护的运营禁区策略。
+`bus_operation_restriction_policy` 用于存储前端维护的运营禁区策略。禁区策略按运营区生效，`operation_area_id` 保存 `map_operation_area.area_id`，不是运营区表主键 `id`。
 
 - `policy_code`: 策略业务编码，可重复，用于前端展示或外部分组。
 - `policy_name`: 策略展示名称，同一租户下唯一，后端以该字段定位策略。
+- `operation_area_id`: 策略所属运营区业务 ID，对应 `map_operation_area.area_id`；为空的历史策略迁移后保留但不生效。
 - `polygons_json`: 规范化后的禁区 polygon 列表，每个 polygon 包含 `points`、`area_km2` 和 `bounds`。
 - `amap_avoidpolygons`: 序列化后的高德 WebService `avoidpolygons` 参数值。
 - `polygon_count`、`vertex_count`、`total_area_km2`: 校验与统计字段。
 - `status`: 策略状态，取值为 `enabled` 或 `disabled`。
-- `is_active`: 当前全局生效策略标记；应用层事务会先清空同租户其他生效策略，再设置新的生效策略。
+- `is_active`: 当前运营区生效策略标记；应用层事务只清空同租户、同 `operation_area_id` 下其他生效策略。
+- `active_operation_area_id`: 生成列，用于唯一约束 `tenant_id + active_operation_area_id`，保证同租户同运营区最多一个启用策略，不影响其他运营区。
 
 后端写库前会校验高德限制：最多 32 个 polygon、单个 polygon 最多 16 个顶点，且单个 polygon 面积不超过 81 平方公里。

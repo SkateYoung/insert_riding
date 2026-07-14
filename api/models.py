@@ -24,7 +24,26 @@ try:
 except ImportError:
     pass
 
+COMMON_SHP_ENCODINGS = ("utf-8", "gb18030", "gbk", "cp936", "gb2312", "big5")
+
 # 常量定义
+def _env_float(names, default):
+    """读取浮点型环境变量；无效或非正数时使用默认值。"""
+    if isinstance(names, str):
+        names = (names,)
+    for name in names:
+        value = os.getenv(name)
+        if value in (None, ""):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return float(default)
+
+
 SPEED_KMH = 60
 SPEED_MPS = SPEED_KMH * 1000.0 / 3600.0   # 平均推演物理时速：8.33 m/s (同步 JS 设定)
 BUSINESS_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -32,6 +51,10 @@ DEFAULT_REST_DURATION_SECONDS = 20 * 60
 MIN_REST_DURATION_SECONDS = 15 * 60
 MAX_REST_DURATION_SECONDS = 30 * 60
 REST_PREPARE_THRESHOLD_SECONDS = 5 * 60
+MAX_CONTINUOUS_DRIVING_SECONDS = _env_float(
+    ("BUS_MAX_CONTINUOUS_DRIVING_SECONDS", "BUS_FORCE_REST_DRIVING_LIMIT_SECONDS"),
+    2 * 60 * 60,
+)
 
 
 def business_timestamp(value):
@@ -86,25 +109,56 @@ class Node:
 
 
 # ============================================================
-# 功能三：城市路网加载、POI 构建与最短路径寻路
+# 功能三：城市路网加载、POI 挂载与最短路径寻路
 # 相关类：CityGraph
 # ============================================================
 
 class CityGraph:
     """数字孪生世界路图抽象框架。
     
-    封装了庞大的 shapefile 读取机制、生成真实世界映射图、生成 POI 等全套功能。
+    封装了庞大的 shapefile 读取机制、生成真实世界映射图和最短路径寻路能力。
     
     Args:
         shp_path (str): 目标基础路网地图数据的位置源。
     """
-    def __init__(self, shp_path="tianhe_shp/zjgc_osm.shp"):
+    @staticmethod
+    def _encoding_candidates(preferred=None):
+        candidates = []
+        if preferred:
+            candidates.append(str(preferred).strip())
+        candidates.extend(COMMON_SHP_ENCODINGS)
+        result = []
+        seen = set()
+        for encoding in candidates:
+            if not encoding:
+                continue
+            key = encoding.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(encoding)
+        return result
+
+    @classmethod
+    def _read_shape_records_with_encoding(cls, shp_path, preferred_encoding=None):
+        candidates = cls._encoding_candidates(preferred_encoding)
+        failures = []
+        for encoding in candidates:
+            try:
+                sf = shapefile.Reader(shp_path, encoding=encoding, encodingErrors="strict")
+                return sf.shapeRecords(), encoding, candidates
+            except (UnicodeError, LookupError) as exc:
+                failures.append(f"{encoding}: {exc}")
+        message = "SHP/DBF encoding decode failed. tried: " + "; ".join(failures)
+        raise UnicodeError(message)
+
+    def __init__(self, shp_path="", shp_encoding=None):
         """路网引擎初始化构造器。
         
-        负责读取 SHP 文件并构建内存级图论拓扑结构，同时执行连通组件提取与 POI 采样。
+        负责读取 SHP 文件并构建内存级图论拓扑结构，同时执行连通组件提取。
         
         Args:
-            shp_path (str, optional): SHP 文件路径。默认为 "zsc_shp/ditu_gcj02_ln.shp"。
+            shp_path (str, optional): SHP 文件路径。
         """
         self.nodes_map = {}
         self.edges = []
@@ -115,13 +169,21 @@ class CityGraph:
         if not os.path.exists(shp_path):
             raise FileNotFoundError(f"找不到关键的 SHP 地理数据集: {shp_path}")
             
-        sf = shapefile.Reader(shp_path)
+        shape_records, detected_encoding, encoding_candidates = self._read_shape_records_with_encoding(
+            shp_path,
+            shp_encoding,
+        )
+        self.shp_encoding = detected_encoding
+        self.shp_encoding_attempts = encoding_candidates
+        requested_encoding = str(shp_encoding or "utf-8").strip() or "utf-8"
+        if detected_encoding.lower() != requested_encoding.lower():
+            print(f"[CityGraph] SHP/DBF encoding switched from {requested_encoding} to {detected_encoding}.")
         
         def get_id(pt):
             """将 SHP 点坐标稳定转换为路网节点 ID。"""
             return f"{pt[0]:.6f}_{pt[1]:.6f}"
             
-        for sr in sf.shapeRecords():
+        for sr in shape_records:
             pts = sr.shape.points
             if len(pts) < 2: continue
             
@@ -166,65 +228,8 @@ class CityGraph:
         for n in z2: n.zone = 2
         for n in z3: n.zone = 3
         
-        # ======  30 个固定坐标 ======
-
-        target_coords = [
-            (113.318289,23.133618), (113.326903,23.141183), (113.317262,23.140308),
-            (113.332594,23.134199), (113.327122,23.132076), (113.332594,23.134199),
-            (113.324798,23.127797), (113.328541,23.134654), (113.315792,23.132619),
-            (113.332844,23.139592)
-        ]
-        # target_coords = [
-        #     (113.400432, 23.058342), (113.408249, 23.059654), (113.409279, 23.059181),
-        #     (113.410918, 23.056409), (113.408958, 23.055814), (113.403476, 23.056747),
-        #     (113.403402, 23.052397), (113.403426, 23.045208), (113.397930, 23.047002),
-        #     (113.395399, 23.044034), (113.394788, 23.036643), (113.376318, 23.038370),
-        #     (113.366185, 23.039608), (113.353567, 23.040831), (113.360126, 23.044599),
-        #     (113.366346, 23.043228), (113.363934, 23.048971), (113.365738, 23.054616),
-        #     (113.371203, 23.054979), (113.371864, 23.060934), (113.376951, 23.064815),
-        #     (113.382411, 23.064052), (113.393363, 23.062182), (113.396898, 23.063383),
-        #     (113.386289, 23.056230), (113.390231, 23.046660), (113.385723, 23.050278),
-        #     (113.374612, 23.046061), (113.386851, 23.060300)
-        # ]
-        
         self.pois = []
-        # 由于手动输入的坐标可能无法直接命中路网节点，在此执行最近邻节点归位
-        all_graph_nodes = list(self.nodes_map.values())
-        unique_poi_ids = set()
-        
-        for lon, lat in target_coords:
-            best_n = None
-            min_d = float('inf')
-            # 暴力遍历寻找最近点，由于 POI 数量极少且仅执行一次，性能开销可忽略
-            for n in all_graph_nodes:
-                d = AuxiliaryFunctions.haversine_distance(lon, lat, n.lon, n.lat)
-                if d < min_d:
-                    min_d = d
-                    best_n = n
-            
-            if best_n and best_n.id not in unique_poi_ids:
-                best_n.is_poi = True
-                self.pois.append(best_n)
-                unique_poi_ids.add(best_n.id)
-
-        self._assign_poi_names()
-        print(f"[OK] POIs 固定加载成功！共映射到 {len(self.pois)} 个唯一路网节点并分配了名称。")
-
-    def _assign_poi_names(self):
-        """为所有 POI 站点分配具有业务感的随机名称。"""
-        prefixes = ["科技园", "大学城", "商业街", "创新大厦", "体育馆", "图书馆", "地铁站", "公寓区", "实验楼", "中心广场"]
-        secondary = ["南门", "北门", "东门", "西门", "A座", "B座", "二期", "分馆", "广场", "枢纽"]
-        
-        rng = random.Random(42) # 保证名称在不同运行间保持一致，且不影响车辆起点随机。
-        p_list = prefixes.copy()
-        s_list = secondary.copy()
-        rng.shuffle(p_list)
-        rng.shuffle(s_list)
-        
-        for i, poi in enumerate(self.pois):
-            p = prefixes[i % len(prefixes)]
-            s = secondary[(i // len(prefixes)) % len(secondary)]
-            poi.name = f"{p}{s}"
+        print("[OK] 路网 POI 等待数据库 map_poi 按运营区加载。")
 
     def _keep_largest_connected_component(self):
         """路网图脱水：仅保留图中最大的通车区块阵列，剔除所有的离岛孤岛避免寻路黑洞。
@@ -361,6 +366,8 @@ class Order:
         city_map,
         passenger_phone=None,
         passenger_id=None,
+        operation_area_id=None,
+        operation_area_code=None,
         req_time=None,
     ):
         """乘客订单实例化构造器。
@@ -398,6 +405,8 @@ class Order:
         self.passenger_count = int(passenger_count)
         self.passenger_phone = str(passenger_phone or "").strip()
         self.passenger_id = str(passenger_id or "").strip()
+        self.operation_area_id = operation_area_id
+        self.operation_area_code = str(operation_area_code or "").strip()
         self.req_time = float(req_time if req_time is not None else business_timestamp(request_time))
         
         def nearest_poi(lon, lat):
@@ -586,6 +595,7 @@ class Vehicle:
         self.desired_rest_time = None
         self.rest_duration = DEFAULT_REST_DURATION_SECONDS
         self.rest_prepare_threshold = REST_PREPARE_THRESHOLD_SECONDS
+        self.max_continuous_driving_seconds = MAX_CONTINUOUS_DRIVING_SECONDS
         self.rest_started_time = None
 
     def tick(self, dt: float, current_time=None):
@@ -640,11 +650,12 @@ class Vehicle:
         if len(self.on_board_orders) > 0 or len(self.planned_route) > 0:
             self.driving_time += dt
             
-        # 极限工态疲劳触发器 (7200s = 2小时)
-        if self.driving_time > 7200.0 and not self.is_rest_requested:
+        # 极限工态疲劳触发器，默认 2 小时，可通过环境变量配置。
+        if self.driving_time > self.max_continuous_driving_seconds and not self.is_rest_requested:
             self.is_rest_requested = True
             self.rest_status = "closing"
-            print(f"[Vehicle.Warning] {self.id} 驾驶超限2小时，已切换为收车中。")
+            limit_hours = self.max_continuous_driving_seconds / 3600.0
+            print(f"[Vehicle.Warning] {self.id} 驾驶超过配置上限 {limit_hours:.2f} 小时，已切换为收车中。")
             
         # 收车预备 -> 正式深睡沉淀 判定：身上再无接驳负债
         if self.is_rest_requested and len(self.on_board_orders) == 0 and len(self.planned_route) == 0:

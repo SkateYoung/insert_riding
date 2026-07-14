@@ -21,6 +21,11 @@ from .core import CoreDispatcher
 
 city = None
 fleet = None
+city_maps = {}
+operation_area_records = {}
+default_operation_area_id = None
+default_operation_area_code = None
+fleet_by_area = {}
 matching_thread = None
 clock_thread = None
 eta_thread = None
@@ -108,7 +113,13 @@ def current_time():
             if CoreDispatcher.route_grasp_last_refresh_timestamp is not None
             else None
         ),
-        "operation_restriction_policy_signature": CoreDispatcher.current_operation_restriction_signature(),
+        "operation_restriction_policy_signatures": {
+            str(operation_area_id): CoreDispatcher.current_operation_restriction_signature(operation_area_id)
+            for operation_area_id in (city_maps or {})
+        },
+        "default_operation_area_id": None,
+        "default_operation_area_code": None,
+        "operation_area_count": len(city_maps or {}),
     }
 
 
@@ -117,7 +128,7 @@ def refresh_runtime_state(current_timestamp=None):
     global clock_last_timestamp, clock_last_dt, clock_tick_count
 
     with state_lock:
-        if not system_initialized or city is None or fleet is None:
+        if not system_initialized or not city_maps or fleet is None:
             return 0.0
 
         current_timestamp = float(current_timestamp if current_timestamp is not None else now_timestamp())
@@ -129,21 +140,44 @@ def refresh_runtime_state(current_timestamp=None):
 
         for vehicle in fleet:
             vehicle.tick(dt, current_time=current_timestamp)
-        CoreDispatcher.refresh_scheduled_rest_requests(fleet, city)
+        for operation_area_id, area_city in city_maps.items():
+            CoreDispatcher.refresh_scheduled_rest_requests(fleet_by_area.get(operation_area_id, []), area_city)
         return dt
 
 
 def refresh_order_etas_if_due(current_timestamp=None, force=False, service=None):
     """委托 CoreDispatcher 刷新订单 ETA；保留为测试和手动触发入口。"""
     current_timestamp = float(current_timestamp if current_timestamp is not None else now_timestamp())
-    return CoreDispatcher.refresh_order_etas_if_due(
-        fleet,
-        city,
-        state_lock,
-        current_timestamp=current_timestamp,
-        force=force,
-        service=service,
-    )
+    if not system_initialized:
+        return 0
+    if (
+        not force
+        and CoreDispatcher.eta_last_refresh_timestamp is not None
+        and current_timestamp - CoreDispatcher.eta_last_refresh_timestamp < ETA_REFRESH_INTERVAL_SECONDS
+    ):
+        return 0
+    changed = 0
+    if not city_maps:
+        if city is None:
+            return 0
+        return CoreDispatcher.refresh_order_etas_if_due(
+            fleet or [],
+            city,
+            state_lock,
+            current_timestamp=current_timestamp,
+            force=True,
+            service=service,
+        )
+    for operation_area_id, area_city in city_maps.items():
+        changed += CoreDispatcher.refresh_order_etas_if_due(
+            fleet_by_area.get(operation_area_id, []),
+            area_city,
+            state_lock,
+            current_timestamp=current_timestamp,
+            force=True,
+            service=service,
+        )
+    return changed
 
 
 def refresh_route_grasps_if_due(current_timestamp=None, force=False, service=None):
@@ -230,9 +264,235 @@ def load_active_operation_restriction_policy():
     Returns:
         dict | None: 当前生效策略；未配置或读取失败时返回 None。
     """
-    policy = persistence.get_active_operation_restriction_policy()
-    CoreDispatcher.set_operation_restriction_policy(policy)
-    return policy
+    active_policies = []
+    for operation_area_id in city_maps or {}:
+        policy = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        if policy:
+            active_policies.append(policy)
+    CoreDispatcher.set_operation_restriction_policies(active_policies)
+    return active_policies
+
+
+def _coerce_operation_area_id(value):
+    """把运营区 ID 统一转换为整数。"""
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def operation_area_runtime_id(area):
+    """读取运营区运行态 ID，优先使用 map_operation_area.area_id。"""
+    if not area:
+        return None
+    return _coerce_operation_area_id(area.get("area_id")) or _coerce_operation_area_id(area.get("id"))
+
+
+def normalize_operation_area_id(operation_area_id=None):
+    """规范化运营区 ID；为空时不再回退默认运营区。"""
+    return _coerce_operation_area_id(operation_area_id)
+
+
+def normalize_operation_area_code(operation_area_code=None):
+    """规范化运营区编码；为空时不再回退默认运营区。"""
+    operation_area_code = str(operation_area_code or "").strip()
+    return operation_area_code or None
+
+
+def city_for_operation_area(operation_area_id=None):
+    """按运营区 ID 读取已加载的路网。"""
+    area_id = normalize_operation_area_id(operation_area_id)
+    if area_id is not None:
+        return city_maps.get(area_id)
+    return None
+
+
+def city_for_vehicle(vehicle):
+    """按车辆所属运营区读取已加载的路网。"""
+    return city_for_operation_area(getattr(vehicle, "operation_area_id", None))
+
+
+def fleet_for_operation_area(operation_area_id=None):
+    """按运营区 ID 读取运行态车队。"""
+    area_id = normalize_operation_area_id(operation_area_id)
+    if area_id is not None:
+        return fleet_by_area.get(area_id, [])
+    return []
+
+
+def loaded_operation_areas():
+    """返回当前已加载运营区概要。"""
+    result = []
+    for operation_area_id, city_map in (city_maps or {}).items():
+        area = operation_area_records.get(operation_area_id) or {}
+        result.append({
+            "operation_area_id": operation_area_id,
+            "code": area.get("code"),
+            "name": area.get("name"),
+            "shp_path": area.get("shp_path"),
+            "is_default": False,
+            "nodes": len(getattr(city_map, "nodes_map", {}) or {}),
+            "pois": len(getattr(city_map, "pois", []) or []),
+            "edges": len(getattr(city_map, "edges", []) or []),
+            "fleet_size": len(fleet_by_area.get(operation_area_id, []) or []),
+        })
+    return result
+
+
+def _operation_area_can_load_runtime(area):
+    """判断运营区是否满足运行态加载条件。"""
+    if not area:
+        return False
+    return (
+        str(area.get("status") or "").strip() == "enabled"
+        and str(area.get("audit_status") or "").strip() == "approved"
+        and bool(str(area.get("shp_path") or "").strip())
+    )
+
+
+def _operation_area_shp_encoding(area):
+    """读取运营区 SHP/DBF 编码；为空时使用 utf-8 打底。"""
+    return str((area or {}).get("shp_encoding") or "utf-8").strip() or "utf-8"
+
+
+def _load_operation_area_city(area):
+    """加载单个运营区 SHP 并写回加载结果。"""
+    operation_area_id = operation_area_runtime_id(area)
+    area_code = str(area.get("code") or "").strip()
+    shp_path = str(area.get("shp_path") or "").strip()
+    if operation_area_id is None:
+        raise ValueError("运营区缺少 operation_area_id")
+    area_city = CityGraph(shp_path, shp_encoding=_operation_area_shp_encoding(area))
+    area_city.operation_area_id = operation_area_id
+    area_city.operation_area_code = area_code
+    area_city.operation_area = area
+    _apply_database_pois(area_city, area)
+    bounds = _city_bounds(area_city)
+    stats = {
+        "load_status": "ready",
+        "load_error": None,
+        "node_count": len(area_city.nodes_map),
+        "edge_count": len(area_city.edges),
+        "poi_count": len(area_city.pois),
+        "bounds_json": bounds,
+        "shp_encoding": getattr(area_city, "shp_encoding", _operation_area_shp_encoding(area)),
+    }
+    persistence.record_operation_area_load_result(area_code, stats)
+    return area_city, {
+        "operation_area_id": operation_area_id,
+        "code": area_code,
+        "name": area.get("name"),
+        "shp_path": shp_path,
+        "nodes": stats["node_count"],
+        "edges": stats["edge_count"],
+        "pois": stats["poi_count"],
+        "bounds": bounds,
+        "shp_encoding": stats["shp_encoding"],
+    }
+
+
+def _ensure_runtime_threads_started():
+    """确保多运营区调度相关后台线程已启动。"""
+    global matching_thread
+    if matching_thread is None or not matching_thread.is_alive():
+        matching_thread = threading.Thread(
+            target=CoreDispatcher.process_pool_matching,
+            args=(fleet, city_maps, state_lock),
+            daemon=True,
+            name="OrderMatchingEngine",
+        )
+        matching_thread.start()
+    start_clock_thread()
+    start_eta_thread()
+
+
+def load_operation_area_into_runtime(area_or_code):
+    """把单个运营区加载进当前运行态。"""
+    global city, fleet, system_initialized
+
+    area = (
+        persistence.get_operation_area(area_or_code)
+        if isinstance(area_or_code, str)
+        else dict(area_or_code or {})
+    )
+    area_code = str((area or {}).get("code") or area_or_code or "").strip()
+    operation_area_id = operation_area_runtime_id(area)
+    if not area_code:
+        return {"status": "skipped", "reason": "operation_area_code_empty"}
+    if operation_area_id is None:
+        return {"status": "skipped", "code": area_code, "reason": "operation_area_id_empty"}
+    if area is None:
+        return {"status": "skipped", "code": area_code, "reason": "operation_area_not_found"}
+    if not _operation_area_can_load_runtime(area):
+        return {"status": "skipped", "code": area_code, "reason": "operation_area_not_active"}
+
+    try:
+        area_city, loaded_item = _load_operation_area_city(area)
+    except Exception as exc:
+        error_text = str(exc)
+        try:
+            persistence.record_operation_area_load_result(area_code, {
+                "load_status": "error",
+                "load_error": error_text,
+                "node_count": None,
+                "edge_count": None,
+                "poi_count": None,
+                "bounds_json": None,
+            })
+        except Exception as write_exc:
+            print(f"[State.Area] 运营区 {area_code} 加载失败状态写回失败：{write_exc}")
+        return {"status": "error", "code": area_code, "error": error_text}
+
+    with state_lock:
+        if fleet is None:
+            fleet = []
+
+        old_area_fleet = list(fleet_by_area.get(operation_area_id, []) or [])
+        if old_area_fleet:
+            fleet[:] = [vehicle for vehicle in fleet if vehicle not in old_area_fleet]
+
+        city_maps[operation_area_id] = area_city
+        operation_area_records[operation_area_id] = dict(area)
+        active_policy = persistence.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
+        CoreDispatcher.set_operation_restriction_policy(active_policy, operation_area_id=operation_area_id)
+
+        city = None
+
+        current_timestamp = now_timestamp()
+        area_fleet = load_fleet_from_persistence(area_city, current_timestamp, operation_area_id=operation_area_id)
+        fleet_by_area[operation_area_id] = area_fleet
+        fleet.extend(area_fleet)
+
+        CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+        for vehicle in area_fleet:
+            CoreDispatcher.refresh_vehicle_route_metadata(vehicle, area_city)
+        system_initialized = True
+
+    _ensure_runtime_threads_started()
+    return {
+        "status": "ready",
+        "area": loaded_item,
+        "default_operation_area_id": None,
+        "default_operation_area_code": None,
+        "fleet_size": len(fleet_by_area.get(operation_area_id, []) or []),
+    }
+
+
+def _city_bounds(city_map):
+    """计算路网边界。"""
+    nodes = list(getattr(city_map, "nodes_map", {}).values())
+    if not nodes:
+        return None
+    lons = [node.lon for node in nodes]
+    lats = [node.lat for node in nodes]
+    return {
+        "min_lon": min(lons),
+        "max_lon": max(lons),
+        "min_lat": min(lats),
+        "max_lat": max(lats),
+    }
 
 
 def _nearest_node_from_coords(city_map, lon, lat):
@@ -266,7 +526,73 @@ def _random_poi_node(city_map):
     return runtime_random.choice(pois)
 
 
-def _vehicle_from_db_record(record, city_map, current_timestamp):
+def _operation_area_poi_ids(operation_area):
+    """提取可用于匹配 map_poi.operation_area_id 的运营区 ID。"""
+    ids = []
+    if not operation_area:
+        return ids
+    for key in ("id", "area_id"):
+        raw_value = operation_area.get(key)
+        if raw_value in (None, ""):
+            continue
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value not in ids:
+            ids.append(value)
+    return ids
+
+
+def _apply_database_pois(city_map, operation_area):
+    """使用数据库站点替换当前运营区 POI，并吸附到最近路网节点。"""
+    if isinstance(operation_area, dict):
+        area = dict(operation_area)
+    else:
+        area = persistence.get_operation_area(operation_area)
+    operation_area_code = str((area or {}).get("code") or "").strip()
+    operation_area_ids = _operation_area_poi_ids(area)
+
+    for node in getattr(city_map, "pois", []) or []:
+        node.is_poi = False
+    city_map.pois = []
+
+    if not operation_area_ids:
+        print(f"[State.Init] 运营区 {operation_area_code or 'unknown'} 缺少可匹配 map_poi.operation_area_id 的 ID，未加载 POI。")
+        return 0
+
+    try:
+        poi_records = persistence.list_pois(operation_area_ids=operation_area_ids)
+    except Exception as exc:
+        print(f"[State.Init] 运营区 {operation_area_code or operation_area_ids} 站点读取失败，当前运营区不加载 POI：{exc}")
+        return 0
+    if not poi_records:
+        return 0
+
+    snapped = []
+    seen_ids = set()
+    for record in poi_records:
+        lon = record.get("longitude")
+        lat = record.get("latitude")
+        if lon is None or lat is None:
+            continue
+        node = _nearest_node_from_coords(city_map, lon, lat)
+        if node is None or node.id in seen_ids:
+            continue
+        node.is_poi = True
+        node.name = record.get("poi_name") or record.get("station_name") or record.get("poi_code") or node.name
+        node.station_id = record.get("station_id")
+        node.poi_code = record.get("poi_code")
+        node.operation_area_id = record.get("operation_area_id")
+        node.operation_area_code = operation_area_code
+        snapped.append(node)
+        seen_ids.add(node.id)
+    if snapped:
+        city_map.pois = snapped
+    return len(snapped)
+
+
+def _vehicle_from_db_record(record, city_map, current_timestamp, operation_area_id=None):
     """把数据库车辆档案转换成运行期 Vehicle 对象。
 
     Args:
@@ -280,14 +606,23 @@ def _vehicle_from_db_record(record, city_map, current_timestamp):
     operation_status = record.get("operation_status") or "offline"
     if operation_status not in {"operating", "resting", "closing", "idle", "serving"}:
         return None
-    node = None
-    # node = city_map.nodes_map.get(record.get("next_node_code") or record.get("last_node_code"))
-    # if node is None and record.get("current_lon") is not None and record.get("current_lat") is not None:
-    #     node = _nearest_node_from_coords(city_map, record["current_lon"], record["current_lat"])
-    if node is None:
-        node = _random_poi_node(city_map)
+
+    current_lon = record.get("current_lon")
+    current_lat = record.get("current_lat")
+    if current_lon is None or current_lat is None:
+        return None
+    try:
+        current_lon = float(current_lon)
+        current_lat = float(current_lat)
+    except (TypeError, ValueError):
+        return None
+
+    node = _nearest_node_from_coords(city_map, current_lon, current_lat)
     if node is None:
         return None
+    last_node = city_map.nodes_map.get(record.get("last_node_code")) or node
+    next_node = city_map.nodes_map.get(record.get("next_node_code")) or node
+
     vehicle_code = record.get("vehicle_code")
     capacity = record.get("max_load_count") or record.get("seat_count") or 10
     vehicle = Vehicle(
@@ -300,16 +635,20 @@ def _vehicle_from_db_record(record, city_map, current_timestamp):
     vehicle.time = current_timestamp
     vehicle.vehicle_id = vehicle_code
     vehicle.plate_no = record.get("plate_no") or vehicle_code
+    vehicle.operation_area_id = operation_area_id or record.get("operation_area_id")
+    vehicle.operation_area_code = record.get("operation_area_code") or ""
     vehicle.driver_id = record.get("current_driver_code") or ""
     vehicle.driver_no = record.get("current_driver_no") or ""
-    # vehicle.gps = {
-    #     "lon": record.get("current_lon") if record.get("current_lon") is not None else node.lon,
-    #     "lat": record.get("current_lat") if record.get("current_lat") is not None else node.lat,
-    # }
     vehicle.gps = {
-        "lon": node.lon,
-        "lat": node.lat,
+        "lon": current_lon,
+        "lat": current_lat,
     }
+    vehicle.last_node = (last_node or node).id
+    vehicle.next_node = (next_node or node).id
+    try:
+        vehicle.progress = float(record.get("edge_progress") or 0.0)
+    except (TypeError, ValueError):
+        vehicle.progress = 0.0
     vehicle.operation_status = operation_status
     if operation_status == "operating":
         vehicle.rest_status = "operating"
@@ -326,7 +665,7 @@ def _vehicle_from_db_record(record, city_map, current_timestamp):
     return vehicle
 
 
-def load_fleet_from_persistence(city_map, current_timestamp):
+def load_fleet_from_persistence(city_map, current_timestamp, operation_area_id=None):
     """从数据库车辆档案加载运行车队。
 
     Args:
@@ -337,9 +676,18 @@ def load_fleet_from_persistence(city_map, current_timestamp):
         list[Vehicle]: 可运行车辆列表；读取失败或没有可用车辆时返回空列表。
     """
     loaded = []
+    expected_area_id = _coerce_operation_area_id(operation_area_id)
     try:
         for record in persistence.list_vehicles():
-            vehicle = _vehicle_from_db_record(record, city_map, current_timestamp)
+            record_area_id = _coerce_operation_area_id(record.get("operation_area_id"))
+            if expected_area_id is not None and record_area_id != expected_area_id:
+                continue
+            vehicle = _vehicle_from_db_record(
+                record,
+                city_map,
+                current_timestamp,
+                operation_area_id=record_area_id,
+            )
             if vehicle is not None:
                 loaded.append(vehicle)
     except Exception as exc:
@@ -353,7 +701,7 @@ def load_fleet_from_persistence(city_map, current_timestamp):
 # 相关方法：init_system
 # ============================================================
 
-def init_system(shp_path="shp/tianhe_shp/zjgc_osm.shp"):
+def _legacy_init_system(shp_path="shp/tianhe_shp/zjgc_osm.shp"):
     """加载路网、从数据库读取车队并启动后台匹配引擎。
 
     Args:
@@ -393,3 +741,154 @@ def init_system(shp_path="shp/tianhe_shp/zjgc_osm.shp"):
     matching_thread.start()
     start_clock_thread()
     start_eta_thread()
+
+
+def init_system(shp_path=None):
+    """从数据库生效运营区加载一个或多个 SHP 路网并启动后台调度。"""
+    global city, fleet, matching_thread, system_initialized
+    global city_maps, operation_area_records, default_operation_area_id, default_operation_area_code, fleet_by_area
+
+    loaded_areas = []
+    failed_areas = []
+
+    with state_lock:
+        startup_areas = persistence.list_startup_operation_areas()
+        if not startup_areas:
+            city = None
+            fleet = []
+            city_maps = {}
+            operation_area_records = {}
+            default_operation_area_id = None
+            default_operation_area_code = None
+            fleet_by_area = {}
+            CoreDispatcher.set_operation_restriction_policies([])
+            system_initialized = False
+            return {
+                "status": "no_operation_area",
+                "message": "数据库中没有可加载的生效运营区。",
+                "loaded_areas": [],
+                "failed_areas": [],
+            }
+
+        new_city_maps = {}
+        new_area_records = {}
+        for area in startup_areas:
+            operation_area_id = operation_area_runtime_id(area)
+            area_code = str(area.get("code") or "").strip()
+            area_shp_path = str(area.get("shp_path") or "").strip()
+            if operation_area_id is None or not area_code or not area_shp_path:
+                continue
+            try:
+                area_city = CityGraph(area_shp_path, shp_encoding=_operation_area_shp_encoding(area))
+                area_city.operation_area_id = operation_area_id
+                area_city.operation_area_code = area_code
+                area_city.operation_area = area
+                _apply_database_pois(area_city, area)
+                bounds = _city_bounds(area_city)
+                stats = {
+                    "load_status": "ready",
+                    "load_error": None,
+                    "node_count": len(area_city.nodes_map),
+                    "edge_count": len(area_city.edges),
+                    "poi_count": len(area_city.pois),
+                    "bounds_json": bounds,
+                    "shp_encoding": getattr(area_city, "shp_encoding", _operation_area_shp_encoding(area)),
+                }
+                persistence.record_operation_area_load_result(area_code, stats)
+                loaded_item = {
+                    "operation_area_id": operation_area_id,
+                    "code": area_code,
+                    "name": area.get("name"),
+                    "shp_path": area_shp_path,
+                    "nodes": stats["node_count"],
+                    "edges": stats["edge_count"],
+                    "pois": stats["poi_count"],
+                    "bounds": bounds,
+                    "shp_encoding": stats["shp_encoding"],
+                }
+                loaded_areas.append(loaded_item)
+                new_city_maps[operation_area_id] = area_city
+                new_area_records[operation_area_id] = dict(area)
+            except Exception as exc:
+                error_text = str(exc)
+                failed_areas.append({
+                    "code": area_code,
+                    "name": area.get("name"),
+                    "shp_path": area_shp_path,
+                    "error": error_text,
+                })
+                try:
+                    persistence.record_operation_area_load_result(area_code, {
+                        "load_status": "error",
+                        "load_error": error_text,
+                        "node_count": None,
+                        "edge_count": None,
+                        "poi_count": None,
+                        "bounds_json": None,
+                    })
+                except Exception as write_exc:
+                    print(f"[State.Init] 运营区 {area_code} 加载失败状态写回失败：{write_exc}")
+
+        if not new_city_maps:
+            city = None
+            fleet = []
+            city_maps = {}
+            operation_area_records = {}
+            default_operation_area_id = None
+            default_operation_area_code = None
+            fleet_by_area = {}
+            CoreDispatcher.set_operation_restriction_policies([])
+            system_initialized = False
+            return {
+                "status": "operation_area_load_failed",
+                "message": "所有生效运营区 SHP 均加载失败。",
+                "loaded_areas": [],
+                "failed_areas": failed_areas,
+            }
+
+        city_maps = new_city_maps
+        operation_area_records = new_area_records
+        default_operation_area_id = None
+        default_operation_area_code = None
+        city = None
+        load_active_operation_restriction_policy()
+
+        current_timestamp = now_timestamp()
+        fleet_by_area = {}
+        all_fleet = []
+        for operation_area_id, area_city in city_maps.items():
+            area_fleet = load_fleet_from_persistence(area_city, current_timestamp, operation_area_id=operation_area_id)
+            fleet_by_area[operation_area_id] = area_fleet
+            all_fleet.extend(area_fleet)
+        fleet = all_fleet
+
+        CoreDispatcher.configure_route_grasp_async(state_lock=state_lock, enabled=True)
+
+        for operation_area_id, area_fleet in fleet_by_area.items():
+            area_city = city_maps[operation_area_id]
+            for vehicle in area_fleet:
+                CoreDispatcher.refresh_vehicle_route_metadata(vehicle, area_city)
+
+        CoreDispatcher.completed_orders_pool = []
+        system_initialized = True
+        persistence.record_initial_state(None, fleet)
+
+    matching_thread = threading.Thread(
+        target=CoreDispatcher.process_pool_matching,
+        args=(fleet, city_maps, state_lock),
+        daemon=True,
+        name="OrderMatchingEngine",
+    )
+    matching_thread.start()
+    start_clock_thread()
+    start_eta_thread()
+    return {
+        "status": "initialized",
+        "loaded_areas": loaded_areas,
+        "failed_areas": failed_areas,
+        "default_operation_area_id": None,
+        "default_operation_area_code": None,
+        "nodes": sum(item["nodes"] for item in loaded_areas),
+        "pois": sum(item["pois"] for item in loaded_areas),
+        "edges": sum(item["edges"] for item in loaded_areas),
+    }

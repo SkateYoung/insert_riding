@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from flask import Flask
 
@@ -57,11 +58,30 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
             "city": state.city,
             "fleet": state.fleet,
             "system_initialized": state.system_initialized,
+            "city_maps": state.city_maps,
+            "operation_area_records": state.operation_area_records,
+            "default_operation_area_id": state.default_operation_area_id,
+            "default_operation_area_code": state.default_operation_area_code,
+            "fleet_by_area": state.fleet_by_area,
         }
         persistence._manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        persistence.save_operation_area({
+            "area_id": 10001,
+            "code": "test-area",
+            "name": "测试运营区",
+            "status": "enabled",
+            "audit_status": "approved",
+            "load_on_startup": 1,
+            "shp_path": "fake.shp",
+        }, create=True)
         self.city = FakeCity()
         state.city = self.city
         state.fleet = []
+        state.city_maps = {10001: self.city}
+        state.operation_area_records = {10001: {"area_id": 10001, "code": "test-area", "name": "测试运营区"}}
+        state.default_operation_area_id = None
+        state.default_operation_area_code = None
+        state.fleet_by_area = {10001: []}
         state.system_initialized = True
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.completed_orders_pool.clear()
@@ -74,6 +94,11 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         state.city = self.previous_state["city"]
         state.fleet = self.previous_state["fleet"]
         state.system_initialized = self.previous_state["system_initialized"]
+        state.city_maps = self.previous_state["city_maps"]
+        state.operation_area_records = self.previous_state["operation_area_records"]
+        state.default_operation_area_id = self.previous_state["default_operation_area_id"]
+        state.default_operation_area_code = self.previous_state["default_operation_area_code"]
+        state.fleet_by_area = self.previous_state["fleet_by_area"]
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.completed_orders_pool.clear()
 
@@ -95,6 +120,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
             "seat_count": seat_count,
             "max_load_count": max_load_count,
             "operation_status": status,
+            "operation_area_id": 10001,
         }
         if driver:
             payload["current_driver_code"] = driver
@@ -103,8 +129,46 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
     def activate_vehicle(self, code="vehicle-1", status="operating", lon=113.00002, lat=23.00001):
         return self.client.post(f"/admin/vehicles/{code}/status", json={
             "operation_status": status,
+            "operation_area_id": 10001,
             "initial_position": {"lon": lon, "lat": lat},
         })
+
+    def test_operation_area_admin_path_uses_area_id(self):
+        response = self.client.get("/admin/operation-areas/10001")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["area"]["area_id"], 10001)
+        self.assertEqual(data["area"]["code"], "test-area")
+
+        by_code = self.client.get("/admin/operation-areas/test-area")
+        self.assertEqual(by_code.status_code, 400)
+        self.assertEqual(by_code.get_json()["error"], "operation_area_id_invalid")
+
+    def test_create_operation_area_runtime_failure_does_not_persist(self):
+        payload = {
+            "area_id": 10002,
+            "org_id": 20002,
+            "dept_id": 30002,
+            "org_code": "org-2",
+            "org_name": "测试机构",
+            "name": "失败运营区",
+            "code": "failed-area",
+            "status": "enabled",
+            "audit_status": "approved",
+            "city_code": "440100",
+            "city_name": "广州",
+            "country_code": "440113",
+            "country_name": "番禺",
+            "shp_path": "missing.shp",
+            "load_on_startup": 1,
+        }
+        with patch("api.routes.CityGraph", side_effect=RuntimeError("load failed")):
+            response = self.client.post("/admin/operation-areas", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "operation_area_runtime_load_failed")
+        self.assertEqual(response.get_json()["message"], "load failed")
+        self.assertIsNone(persistence.get_operation_area_by_area_id(10002))
 
     def test_options_returns_form_enums_and_current_records(self):
         self.create_driver()
@@ -134,6 +198,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
                 "earliest": now.isoformat(sep=" "),
                 "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
             },
+            "operation_area_id": 10001,
             "passenger_count": 1,
         })
         self.assertEqual(response.status_code, 400)
@@ -149,6 +214,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
                 "earliest": now.isoformat(sep=" "),
                 "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
             },
+            "operation_area_id": 10001,
             "passenger_count": 1,
             "passenger_phone": "13900000001",
             "passenger_id": "passenger-business-1",
@@ -192,20 +258,13 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertIsNone(data["snap"])
         self.assertEqual(len(state.fleet), 0)
 
-        unbound_activation = self.activate_vehicle()
-        self.assertEqual(unbound_activation.status_code, 409)
-        self.assertEqual(unbound_activation.get_json()["error"], "driver_required")
-
-        self.create_driver()
-        bound = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": "driver-1"})
-        self.assertEqual(bound.status_code, 200)
-
         activated = self.activate_vehicle()
         self.assertEqual(activated.status_code, 200)
         active_data = activated.get_json()
         self.assertEqual(active_data["snap"]["node"]["id"], "A")
         self.assertGreaterEqual(active_data["snap"]["snap_distance_m"], 0.0)
         self.assertEqual(len(state.fleet), 1)
+        self.assertEqual(state.fleet[0].driver_id, "")
         self.assertEqual(state.fleet[0].vehicle_id, "vehicle-1")
         self.assertTrue(CoreDispatcher._vehicle_can_accept_order(state.fleet[0]))
 
@@ -215,6 +274,18 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
 
         invalid_create_status = self.create_vehicle(code="vehicle-3", plate="粤A00003", status="operating")
         self.assertEqual(invalid_create_status.status_code, 400)
+
+        deprecated_area_code = self.client.post("/admin/vehicles", json={
+            "vehicle_code": "vehicle-area-code",
+            "plate_no": "粤A00007",
+            "vehicle_type": "bus",
+            "seat_count": 10,
+            "max_load_count": 10,
+            "operation_status": "offline",
+            "operation_area_code": "test-area",
+        })
+        self.assertEqual(deprecated_area_code.status_code, 400)
+        self.assertIn("operation_area_id", deprecated_area_code.get_json()["error"])
 
         missing_seat_count = self.client.post("/admin/vehicles", json={
             "vehicle_code": "vehicle-4",
@@ -237,6 +308,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.create_vehicle(code="vehicle-6", plate="粤A00006")
         invalid_position = self.client.post("/admin/vehicles/vehicle-6/status", json={
             "operation_status": "operating",
+            "operation_area_id": 10001,
             "initial_position": {"lon": 181, "lat": 23},
         })
         self.assertEqual(invalid_position.status_code, 400)
@@ -309,8 +381,8 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(activated.status_code, 200)
 
         unbind_operating = self.client.post("/admin/vehicles/vehicle-1/bind-driver", json={"driver_code": None})
-        self.assertEqual(unbind_operating.status_code, 409)
-        self.assertEqual(unbind_operating.get_json()["error"], "driver_required")
+        self.assertEqual(unbind_operating.status_code, 200)
+        self.assertIsNone(unbind_operating.get_json()["vehicle"]["current_driver_code"])
 
 
 class DriverVehicleStateLoadTest(unittest.TestCase):
@@ -351,7 +423,7 @@ class DriverVehicleStateLoadTest(unittest.TestCase):
 
         self.assertEqual([vehicle.vehicle_id for vehicle in fleet], ["db-bus-1"])
 
-    def test_load_fleet_assigns_random_poi_when_runtime_position_is_missing(self):
+    def test_load_fleet_skips_vehicle_when_runtime_position_is_missing(self):
         persistence.save_driver({
             "driver_code": "driver-db-random",
             "driver_no": "DB099",
@@ -366,11 +438,7 @@ class DriverVehicleStateLoadTest(unittest.TestCase):
 
         fleet = state.load_fleet_from_persistence(self.city, datetime.now().timestamp())
 
-        self.assertEqual(len(fleet), 1)
-        self.assertEqual(fleet[0].vehicle_id, "db-bus-random")
-        self.assertIn(fleet[0].last_node, {poi.id for poi in self.city.pois})
-        self.assertIsNotNone(fleet[0].gps["lon"])
-        self.assertIsNotNone(fleet[0].gps["lat"])
+        self.assertEqual(fleet, [])
 
 
 if __name__ == "__main__":

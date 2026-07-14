@@ -143,7 +143,7 @@
 
         .tabs {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 6px;
             margin: 8px 0 12px;
         }
@@ -229,6 +229,23 @@
             line-height: 1.5;
         }
 
+        .json-input {
+            min-height: 88px;
+            font-family: Consolas, "Courier New", monospace;
+        }
+
+        .result-box {
+            margin-top: 8px;
+            padding: 8px;
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 6px;
+            background: rgba(2, 6, 23, 0.42);
+            color: #cbd5e1;
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
         .status {
             border-top: 1px solid rgba(148, 163, 184, 0.25);
             padding-top: 10px;
@@ -295,6 +312,7 @@
 
         <div class="tabs">
             <button class="tab-button active" type="button" data-tab="routeTab">路线展示</button>
+            <button class="tab-button" type="button" data-tab="operationAreaTab">运营区域</button>
             <button class="tab-button" type="button" data-tab="restrictionTab">运营禁区</button>
             <button class="tab-button" type="button" data-tab="adminTab">司机车辆</button>
         </div>
@@ -306,8 +324,20 @@
         </div>
 
         <div class="field">
+            <label for="routeAreaSelect">运营区域</label>
+            <select id="routeAreaSelect"></select>
+        </div>
+
+        <div class="field">
             <label for="vehicleSelect">车辆</label>
             <select id="vehicleSelect"></select>
+        </div>
+
+        <div class="field">
+            <label for="routeSegmentSelect">路线显示范围</label>
+            <select id="routeSegmentSelect">
+                <option value="all">全部路线</option>
+            </select>
         </div>
 
         <div class="actions">
@@ -371,9 +401,197 @@
         </div>
         </div>
 
+        <div id="operationAreaTab" class="tab-panel">
+            <div class="divider"></div>
+            <div class="section-title">运营区域管理</div>
+
+            <div class="field">
+                <label for="operationAreaSelect">运营区</label>
+                <select id="operationAreaSelect"></select>
+            </div>
+
+            <div class="compact-actions">
+                <button id="newOperationAreaBtn" type="button">新增运营区</button>
+                <button id="reloadOperationAreaBtn" type="button" class="secondary">查询全部运营区</button>
+                <button id="testOperationAreaBtn" type="button" class="secondary">测试加载 SHP</button>
+            </div>
+
+            <div class="two-col">
+                <div class="field">
+                    <label for="operationAreaCodeInput">运营区编码</label>
+                    <input id="operationAreaCodeInput" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaNameInput">运营区名称</label>
+                    <input id="operationAreaNameInput" required>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="field">
+                    <label for="operationAreaAreaIdInput">区域ID</label>
+                    <input id="operationAreaAreaIdInput" type="number" min="0" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaOrgIdInput">机构ID</label>
+                    <input id="operationAreaOrgIdInput" type="number" min="0" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaDeptIdInput">部门ID</label>
+                    <input id="operationAreaDeptIdInput" type="number" min="0" required>
+                </div>
+            </div>
+
+            <div class="two-col">
+                <div class="field">
+                    <label for="operationAreaOrgCodeInput">机构编码</label>
+                    <input id="operationAreaOrgCodeInput" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaOrgNameInput">机构名称</label>
+                    <input id="operationAreaOrgNameInput" required>
+                </div>
+            </div>
+
+            <div class="form-grid">
+                <div class="field">
+                    <label for="operationAreaCityCodeInput">城市编码</label>
+                    <input id="operationAreaCityCodeInput" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaCityNameInput">城市名称</label>
+                    <input id="operationAreaCityNameInput" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaCountryCodeInput">区县编码</label>
+                    <input id="operationAreaCountryCodeInput" required>
+                </div>
+                <div class="field">
+                    <label for="operationAreaCountryNameInput">区县名称</label>
+                    <input id="operationAreaCountryNameInput" required>
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="operationAreaShpPathInput">SHP 文件路径</label>
+                <input id="operationAreaShpPathInput" placeholder="例如 shp/xxx/road.shp" required>
+            </div>
+
+            <div class="form-grid">
+                <div class="field">
+                    <label for="operationAreaStatusSelect">启用状态</label>
+                    <select id="operationAreaStatusSelect">
+                        <option value="enabled">enabled</option>
+                        <option value="pending">pending</option>
+                        <option value="disabled">disabled</option>
+                        <option value="rejected">rejected</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="operationAreaAuditStatusSelect">审核状态</label>
+                    <select id="operationAreaAuditStatusSelect">
+                        <option value="approved">approved</option>
+                        <option value="pending">pending</option>
+                        <option value="rejected">rejected</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="operationAreaLoadStartupSelect">启动加载</label>
+                    <select id="operationAreaLoadStartupSelect">
+                        <option value="1">是</option>
+                        <option value="0">否</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="operationAreaCoordSystemInput">坐标系</label>
+                    <input id="operationAreaCoordSystemInput" value="gcj02">
+                </div>
+                <div class="field">
+                    <label for="operationAreaEncodingInput">SHP 编码</label>
+                    <input id="operationAreaEncodingInput" value="utf-8">
+                </div>
+                <div class="field">
+                    <label for="operationAreaVersionInput">地图版本</label>
+                    <input id="operationAreaVersionInput">
+                </div>
+            </div>
+
+            <div class="field">
+                <label for="operationAreaRemarkInput">区域描述</label>
+                <textarea id="operationAreaRemarkInput"></textarea>
+            </div>
+
+            <div class="compact-actions">
+                <button id="saveOperationAreaBtn" type="button">保存运营区</button>
+                <button id="deleteOperationAreaBtn" type="button" class="danger">删除运营区</button>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">站点管理测试</div>
+                <div class="hint">单条操作默认使用当前路线页选中的运营区；批量 JSON 可覆盖每个站点的 operation_area_id。</div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="stationAreaSelect">所属运营区</label>
+                        <select id="stationAreaSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="stationNameInput">站点名称</label>
+                        <input id="stationNameInput" placeholder="新增站点必填">
+                    </div>
+                    <div class="field">
+                        <label for="stationLonInput">经度</label>
+                        <input id="stationLonInput" type="number" step="0.00000001" placeholder="113.12345678">
+                    </div>
+                    <div class="field">
+                        <label for="stationLatInput">纬度</label>
+                        <input id="stationLatInput" type="number" step="0.00000001" placeholder="23.12345678">
+                    </div>
+                    <div class="field">
+                        <label for="stationCodeInput">站点编号</label>
+                        <input id="stationCodeInput" placeholder="可选">
+                    </div>
+                    <div class="field">
+                        <label for="stationAddressInput">站点地址</label>
+                        <input id="stationAddressInput" placeholder="可选">
+                    </div>
+                </div>
+                <div class="compact-actions">
+                    <button id="pickStationPointBtn" type="button" class="secondary">地图点选坐标</button>
+                    <button id="createStationBtn" type="button">新增站点</button>
+                    <button id="deleteStationBtn" type="button" class="danger">按坐标删除</button>
+                </div>
+                <div class="field">
+                    <label for="stationBatchInput">批量 JSON</label>
+                    <textarea id="stationBatchInput" class="json-input" placeholder='[{"operation_area_id":10001,"station_name":"大学城北门","lon":113.12345678,"lat":23.12345678}]'></textarea>
+                </div>
+                <div class="compact-actions">
+                    <button id="createStationBatchBtn" type="button">批量新增站点</button>
+                    <button id="deleteStationBatchBtn" type="button" class="danger">批量删除站点</button>
+                </div>
+                <div id="stationResultBox" class="result-box">暂无站点操作结果。</div>
+            </div>
+
+            <table class="mini-table">
+                <thead>
+                    <tr>
+                        <th>编码</th>
+                        <th>名称 / SHP</th>
+                        <th>状态</th>
+                        <th>地图统计</th>
+                    </tr>
+                </thead>
+                <tbody id="operationAreaTableBody"></tbody>
+            </table>
+        </div>
+
         <div id="restrictionTab" class="tab-panel">
         <div class="divider"></div>
         <div class="section-title">运营禁区策略</div>
+
+        <div class="field">
+            <label for="restrictionAreaSelect">运营区域</label>
+            <select id="restrictionAreaSelect"></select>
+        </div>
 
         <div class="field">
             <label for="restrictionPolicySelect">策略</label>
@@ -382,7 +600,7 @@
 
         <div class="compact-actions">
             <button id="newRestrictionPolicyBtn" type="button">新增禁区策略</button>
-            <button id="reloadRestrictionBtn" type="button" class="secondary">查询全部策略</button>
+            <button id="reloadRestrictionBtn" type="button" class="secondary">查询当前区策略</button>
         </div>
 
         <div class="two-col">
@@ -578,6 +796,10 @@
                         <select id="newVehicleTypeSelect"></select>
                     </div>
                     <div class="field">
+                        <label for="newVehicleAreaSelect">所属运营区</label>
+                        <select id="newVehicleAreaSelect"></select>
+                    </div>
+                    <div class="field">
                         <label>初始运营状态</label>
                         <input value="offline" readonly>
                     </div>
@@ -649,6 +871,10 @@
                     <select id="vehicleTypeSelect"></select>
                 </div>
                 <div class="field">
+                    <label for="vehicleAreaSelect">所属运营区</label>
+                    <select id="vehicleAreaSelect"></select>
+                </div>
+                <div class="field">
                     <label for="vehicleStatusSelect">运营状态</label>
                     <select id="vehicleStatusSelect"></select>
                 </div>
@@ -703,7 +929,9 @@
 
     <script>
         const apiBaseInput = document.getElementById("apiBaseInput");
+        const routeAreaSelect = document.getElementById("routeAreaSelect");
         const vehicleSelect = document.getElementById("vehicleSelect");
+        const routeSegmentSelect = document.getElementById("routeSegmentSelect");
         const loadFleetBtn = document.getElementById("loadFleetBtn");
         const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
         const updatePathBtn = document.getElementById("updatePathBtn");
@@ -724,7 +952,48 @@
         const resetManualPickupTimeBtn = document.getElementById("resetManualPickupTimeBtn");
         const statusEl = document.getElementById("status");
 
+        const operationAreaSelect = document.getElementById("operationAreaSelect");
+        const newOperationAreaBtn = document.getElementById("newOperationAreaBtn");
+        const reloadOperationAreaBtn = document.getElementById("reloadOperationAreaBtn");
+        const testOperationAreaBtn = document.getElementById("testOperationAreaBtn");
+        const operationAreaAreaIdInput = document.getElementById("operationAreaAreaIdInput");
+        const operationAreaOrgIdInput = document.getElementById("operationAreaOrgIdInput");
+        const operationAreaDeptIdInput = document.getElementById("operationAreaDeptIdInput");
+        const operationAreaCodeInput = document.getElementById("operationAreaCodeInput");
+        const operationAreaNameInput = document.getElementById("operationAreaNameInput");
+        const operationAreaOrgCodeInput = document.getElementById("operationAreaOrgCodeInput");
+        const operationAreaOrgNameInput = document.getElementById("operationAreaOrgNameInput");
+        const operationAreaCityCodeInput = document.getElementById("operationAreaCityCodeInput");
+        const operationAreaCityNameInput = document.getElementById("operationAreaCityNameInput");
+        const operationAreaCountryCodeInput = document.getElementById("operationAreaCountryCodeInput");
+        const operationAreaCountryNameInput = document.getElementById("operationAreaCountryNameInput");
+        const operationAreaShpPathInput = document.getElementById("operationAreaShpPathInput");
+        const operationAreaStatusSelect = document.getElementById("operationAreaStatusSelect");
+        const operationAreaAuditStatusSelect = document.getElementById("operationAreaAuditStatusSelect");
+        const operationAreaLoadStartupSelect = document.getElementById("operationAreaLoadStartupSelect");
+        const operationAreaCoordSystemInput = document.getElementById("operationAreaCoordSystemInput");
+        const operationAreaEncodingInput = document.getElementById("operationAreaEncodingInput");
+        const operationAreaVersionInput = document.getElementById("operationAreaVersionInput");
+        const operationAreaRemarkInput = document.getElementById("operationAreaRemarkInput");
+        const saveOperationAreaBtn = document.getElementById("saveOperationAreaBtn");
+        const deleteOperationAreaBtn = document.getElementById("deleteOperationAreaBtn");
+        const operationAreaTableBody = document.getElementById("operationAreaTableBody");
+        const stationAreaSelect = document.getElementById("stationAreaSelect");
+        const stationNameInput = document.getElementById("stationNameInput");
+        const stationLonInput = document.getElementById("stationLonInput");
+        const stationLatInput = document.getElementById("stationLatInput");
+        const stationCodeInput = document.getElementById("stationCodeInput");
+        const stationAddressInput = document.getElementById("stationAddressInput");
+        const pickStationPointBtn = document.getElementById("pickStationPointBtn");
+        const createStationBtn = document.getElementById("createStationBtn");
+        const deleteStationBtn = document.getElementById("deleteStationBtn");
+        const stationBatchInput = document.getElementById("stationBatchInput");
+        const createStationBatchBtn = document.getElementById("createStationBatchBtn");
+        const deleteStationBatchBtn = document.getElementById("deleteStationBatchBtn");
+        const stationResultBox = document.getElementById("stationResultBox");
+
         const restrictionPolicySelect = document.getElementById("restrictionPolicySelect");
+        const restrictionAreaSelect = document.getElementById("restrictionAreaSelect");
         const newRestrictionPolicyBtn = document.getElementById("newRestrictionPolicyBtn");
         const restrictionPolicyCodeInput = document.getElementById("restrictionPolicyCodeInput");
         const restrictionPolicyNameInput = document.getElementById("restrictionPolicyNameInput");
@@ -777,6 +1046,7 @@
         const newVehicleCodeInput = document.getElementById("newVehicleCodeInput");
         const newVehiclePlateInput = document.getElementById("newVehiclePlateInput");
         const newVehicleTypeSelect = document.getElementById("newVehicleTypeSelect");
+        const newVehicleAreaSelect = document.getElementById("newVehicleAreaSelect");
         const newVehicleSeatInput = document.getElementById("newVehicleSeatInput");
         const newVehicleLoadInput = document.getElementById("newVehicleLoadInput");
         const newVehicleColorInput = document.getElementById("newVehicleColorInput");
@@ -790,6 +1060,7 @@
         const vehicleCodeInput = document.getElementById("vehicleCodeInput");
         const vehiclePlateInput = document.getElementById("vehiclePlateInput");
         const vehicleTypeSelect = document.getElementById("vehicleTypeSelect");
+        const vehicleAreaSelect = document.getElementById("vehicleAreaSelect");
         const vehicleStatusSelect = document.getElementById("vehicleStatusSelect");
         const vehicleSeatInput = document.getElementById("vehicleSeatInput");
         const vehicleLoadInput = document.getElementById("vehicleLoadInput");
@@ -817,6 +1088,9 @@
         const fleetById = new Map();
         let layers = [];
         let markerPositionCounts = new Map();
+        let operationAreas = [];
+        let selectedOperationAreaId = "";
+        let selectedOperationAreaEditId = "";
         let restrictionPolicies = [];
         let restrictionPolygons = [];
         let restrictionLayers = [];
@@ -829,6 +1103,7 @@
         let selectedVehicleCode = null;
         let vehiclePositionTarget = null;
         let routeGpsPickMode = false;
+        let stationPickMode = false;
         let cachedPois = null;
 
         function setStatus(message) {
@@ -852,6 +1127,7 @@
             manualPassengerIdInput.disabled = isBusy;
             resetManualPickupTimeBtn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
+            routeSegmentSelect.disabled = isBusy || routeSegmentSelect.options.length <= 1;
         }
 
         function setRouteGpsPickMode(enabled) {
@@ -861,7 +1137,15 @@
             pickRouteVehiclePositionBtn.textContent = routeGpsPickMode ? "停止鼠标 GPS 上报" : "鼠标 GPS 上报模式";
         }
 
+        function setStationPickMode(enabled) {
+            stationPickMode = Boolean(enabled);
+            pickStationPointBtn.classList.toggle("mode-on", stationPickMode);
+            pickStationPointBtn.classList.toggle("secondary", !stationPickMode);
+            pickStationPointBtn.textContent = stationPickMode ? "停止点选坐标" : "地图点选坐标";
+        }
+
         function setRestrictionBusy(isBusy) {
+            restrictionAreaSelect.disabled = isBusy;
             restrictionPolicySelect.disabled = isBusy;
             newRestrictionPolicyBtn.disabled = isBusy;
             drawRestrictionBtn.disabled = isBusy;
@@ -891,8 +1175,76 @@
             deleteVehicleBtn.disabled = isBusy;
         }
 
+        function setOperationAreaBusy(isBusy) {
+            operationAreaSelect.disabled = isBusy;
+            newOperationAreaBtn.disabled = isBusy;
+            reloadOperationAreaBtn.disabled = isBusy;
+            testOperationAreaBtn.disabled = isBusy;
+            saveOperationAreaBtn.disabled = isBusy;
+            deleteOperationAreaBtn.disabled = isBusy;
+            routeAreaSelect.disabled = isBusy;
+            stationAreaSelect.disabled = isBusy;
+            stationNameInput.disabled = isBusy;
+            stationLonInput.disabled = isBusy;
+            stationLatInput.disabled = isBusy;
+            stationCodeInput.disabled = isBusy;
+            stationAddressInput.disabled = isBusy;
+            pickStationPointBtn.disabled = isBusy;
+            createStationBtn.disabled = isBusy;
+            deleteStationBtn.disabled = isBusy;
+            stationBatchInput.disabled = isBusy;
+            createStationBatchBtn.disabled = isBusy;
+            deleteStationBatchBtn.disabled = isBusy;
+        }
+
         function apiBase() {
             return apiBaseInput.value.replace(/\/+$/, "");
+        }
+
+        function currentOperationAreaId() {
+            return routeAreaSelect.value || selectedOperationAreaId || "";
+        }
+
+        function requireOperationAreaId() {
+            const areaId = currentOperationAreaId();
+            if (!areaId) {
+                throw new Error("请先选择运营区域");
+            }
+            const numericAreaId = Number(areaId);
+            if (!Number.isFinite(numericAreaId) || numericAreaId <= 0) {
+                throw new Error("运营区域 ID 无效，请重新选择运营区域");
+            }
+            return numericAreaId;
+        }
+
+        function currentRestrictionOperationAreaId() {
+            return restrictionAreaSelect.value || currentOperationAreaId();
+        }
+
+        function requireRestrictionOperationAreaId() {
+            const areaId = currentRestrictionOperationAreaId();
+            if (!areaId) {
+                throw new Error("请先选择禁区策略所属运营区");
+            }
+            const numericAreaId = Number(areaId);
+            if (!Number.isFinite(numericAreaId) || numericAreaId <= 0) {
+                throw new Error("禁区策略所属运营区 ID 无效");
+            }
+            return numericAreaId;
+        }
+
+        function setCurrentOperationAreaId(areaId) {
+            const normalized = areaId == null ? "" : String(areaId);
+            selectedOperationAreaId = normalized;
+            if (routeAreaSelect) {
+                routeAreaSelect.value = normalized;
+            }
+            cachedPois = null;
+        }
+
+        function areaQuery(prefix = "?") {
+            const areaId = currentOperationAreaId();
+            return areaId ? `${prefix}operation_area_id=${encodeURIComponent(areaId)}` : "";
         }
 
         async function fetchJson(url, options) {
@@ -1092,6 +1444,52 @@
                 || normalizePoint((segment.points || segment.path || [])[Math.max(0, (segment.points || segment.path || []).length - 1)]);
         }
 
+        function segmentLabel(segment, index) {
+            const type = String(segment?.type || "").toUpperCase();
+            const action = type === "O" ? "上车" : (type === "D" ? "下车" : "路径");
+            const requestId = segment?.request_id ? ` ${segment.request_id}` : "";
+            const target = segmentTarget(segment);
+            const targetName = segment?.node_name || segment?.target_name || target?.name || "";
+            const pointCount = normalizePoints(segment?.points || segment?.path || []).length;
+            return `${index + 1}. ${action}${requestId}${targetName ? ` - ${targetName}` : ""}${pointCount ? ` (${pointCount}点)` : ""}`;
+        }
+
+        function updateRouteSegmentOptions(vehicle) {
+            const segments = Array.isArray(vehicle?.planned_route_segment_grasped_point)
+                ? vehicle.planned_route_segment_grasped_point
+                : [];
+            const previousValue = routeSegmentSelect.value || "all";
+            routeSegmentSelect.innerHTML = "";
+
+            const allOption = document.createElement("option");
+            allOption.value = "all";
+            allOption.textContent = `全部路线${segments.length ? `（${segments.length}段）` : ""}`;
+            routeSegmentSelect.appendChild(allOption);
+
+            segments.forEach((segment, index) => {
+                const option = document.createElement("option");
+                option.value = `segment:${index}`;
+                option.textContent = segmentLabel(segment, index);
+                routeSegmentSelect.appendChild(option);
+            });
+
+            const values = Array.from(routeSegmentSelect.options).map(option => option.value);
+            routeSegmentSelect.value = values.includes(previousValue) ? previousValue : "all";
+            routeSegmentSelect.disabled = segments.length === 0;
+        }
+
+        function selectedRouteSegmentIndex(segments) {
+            const value = routeSegmentSelect.value || "all";
+            if (!value.startsWith("segment:")) {
+                return null;
+            }
+            const index = Number(value.slice("segment:".length));
+            if (!Number.isInteger(index) || index < 0 || index >= segments.length) {
+                return null;
+            }
+            return index;
+        }
+
         const BOARDING_DISTANCE_THRESHOLD_M = 30;
 
         function currentBoardingStep(vehicle) {
@@ -1155,34 +1553,54 @@
             const rawPoints = vehicleRawPoints.length ? vehicleRawPoints : normalizePoints(options.rawPoints || []);
             const graspedPoints = normalizePoints(vehicle.planned_route_grasped_point || []);
             const segments = vehicle.planned_route_segment_grasped_point || [];
+            updateRouteSegmentOptions(vehicle);
+            const selectedSegmentIndex = selectedRouteSegmentIndex(segments);
+            const selectedSegment = selectedSegmentIndex === null ? null : segments[selectedSegmentIndex];
+            const selectedSegmentPoints = selectedSegment
+                ? normalizePoints(selectedSegment.points || selectedSegment.path || [])
+                : [];
+            const selectedSegmentTarget = selectedSegment ? segmentTarget(selectedSegment) : null;
+            const isSingleSegmentView = Boolean(selectedSegment);
 
-            addPolyline(rawPoints, {
-                strokeColor: "#2563eb",
-                strokeWeight: 5,
-                strokeOpacity: 0.75,
-                strokeStyle: "dashed",
-                zIndex: 40
-            });
-
-            for (const [index, segment] of segments.entries()) {
-                addPolyline(segment.points || segment.path || [], {
-                    strokeColor: "#f97316",
-                    strokeWeight: 7,
-                    strokeOpacity: 0.42,
-                    zIndex: 45 + index
+            if (!isSingleSegmentView) {
+                addPolyline(rawPoints, {
+                    strokeColor: "#2563eb",
+                    strokeWeight: 5,
+                    strokeOpacity: 0.75,
+                    strokeStyle: "dashed",
+                    zIndex: 40
                 });
-                const target = segmentTarget(segment);
-                if (target) {
-                    addRouteStopMarker(target, segment, index);
+
+                for (const [index, segment] of segments.entries()) {
+                    addPolyline(segment.points || segment.path || [], {
+                        strokeColor: "#f97316",
+                        strokeWeight: 7,
+                        strokeOpacity: 0.42,
+                        zIndex: 45 + index
+                    });
+                    const target = segmentTarget(segment);
+                    if (target) {
+                        addRouteStopMarker(target, segment, index);
+                    }
+                }
+
+                addPolyline(graspedPoints, {
+                    strokeColor: "#a855f7",
+                    strokeWeight: 6,
+                    strokeOpacity: 0.95,
+                    zIndex: 80
+                });
+            } else {
+                addPolyline(selectedSegmentPoints, {
+                    strokeColor: "#f97316",
+                    strokeWeight: 8,
+                    strokeOpacity: 0.95,
+                    zIndex: 90
+                });
+                if (selectedSegmentTarget) {
+                    addRouteStopMarker(selectedSegmentTarget, selectedSegment, selectedSegmentIndex);
                 }
             }
-
-            addPolyline(graspedPoints, {
-                strokeColor: "#a855f7",
-                strokeWeight: 6,
-                strokeOpacity: 0.95,
-                zIndex: 80
-            });
 
             const gps = normalizePoint(vehicle.gps);
             if (gps) {
@@ -1192,7 +1610,9 @@
             updateBoardingPanel(vehicle);
 
             const fitPoints = [
-                ...(graspedPoints.length >= 2 ? graspedPoints : rawPoints),
+                ...(isSingleSegmentView
+                    ? [...selectedSegmentPoints, ...(selectedSegmentTarget ? [selectedSegmentTarget] : [])]
+                    : (graspedPoints.length >= 2 ? graspedPoints : rawPoints)),
                 ...(gps ? [gps] : [])
             ];
             if (!options.preserveView) {
@@ -1206,18 +1626,424 @@
                 return `${index + 1}. ${segment.type || "-"} ${segment.request_id || ""} ${source} ${count}点${requestPoints ? ` 输入${requestPoints}点` : ""}`;
             });
             const displayVehicleId = vehicle.vehicle_id || vehicle.id || "";
+            const displayMode = isSingleSegmentView
+                ? `单段路线：${segmentLabel(selectedSegment, selectedSegmentIndex)}`
+                : `全部路线：${segments.length}段`;
 
             setStatus([
                 `车辆：${displayVehicleId}`,
+                `显示范围：${displayMode}`,
                 `纠偏状态：${vehicle.planned_route_grasp_status || "none"}`,
                 vehicle.operation_restriction_policy_signature ? `禁区策略：${vehicle.operation_restriction_policy_signature}` : null,
                 vehicle.planned_route_grasp_error ? `纠偏错误：${vehicle.planned_route_grasp_error}` : null,
                 `原始路线点：${rawPoints.length}`,
                 `纠偏总路线点：${graspedPoints.length}`,
                 `纠偏分段数：${segments.length}`,
-                segmentStats.length ? `分段：\n${segmentStats.join("\n")}` : null,
+                isSingleSegmentView
+                    ? `当前分段点：${selectedSegmentPoints.length}`
+                    : (segmentStats.length ? `分段：\n${segmentStats.join("\n")}` : null),
                 options.message || null
             ].filter(Boolean).join("\n"));
+        }
+
+        function operationAreaPayload() {
+            return {
+                area_id: operationAreaAreaIdInput.value.trim(),
+                org_id: operationAreaOrgIdInput.value.trim(),
+                dept_id: operationAreaDeptIdInput.value.trim(),
+                code: operationAreaCodeInput.value.trim(),
+                name: operationAreaNameInput.value.trim(),
+                org_code: operationAreaOrgCodeInput.value.trim(),
+                org_name: operationAreaOrgNameInput.value.trim(),
+                city_code: operationAreaCityCodeInput.value.trim(),
+                city_name: operationAreaCityNameInput.value.trim(),
+                country_code: operationAreaCountryCodeInput.value.trim(),
+                country_name: operationAreaCountryNameInput.value.trim(),
+                shp_path: operationAreaShpPathInput.value.trim(),
+                status: operationAreaStatusSelect.value,
+                audit_status: operationAreaAuditStatusSelect.value,
+                load_on_startup: operationAreaLoadStartupSelect.value === "1" ? 1 : 0,
+                coord_system: operationAreaCoordSystemInput.value.trim() || "gcj02",
+                shp_encoding: operationAreaEncodingInput.value.trim() || "utf-8",
+                shp_version: operationAreaVersionInput.value.trim(),
+                area_control: operationAreaRemarkInput.value.trim()
+            };
+        }
+
+        function resetOperationAreaForm() {
+            selectedOperationAreaEditId = "";
+            operationAreaSelect.value = "";
+            operationAreaAreaIdInput.readOnly = false;
+            operationAreaCodeInput.readOnly = false;
+            operationAreaAreaIdInput.value = "";
+            operationAreaOrgIdInput.value = "";
+            operationAreaDeptIdInput.value = "";
+            operationAreaCodeInput.value = "";
+            operationAreaNameInput.value = "";
+            operationAreaOrgCodeInput.value = "";
+            operationAreaOrgNameInput.value = "";
+            operationAreaCityCodeInput.value = "";
+            operationAreaCityNameInput.value = "";
+            operationAreaCountryCodeInput.value = "";
+            operationAreaCountryNameInput.value = "";
+            operationAreaShpPathInput.value = "";
+            operationAreaStatusSelect.value = "enabled";
+            operationAreaAuditStatusSelect.value = "approved";
+            operationAreaLoadStartupSelect.value = "1";
+            operationAreaCoordSystemInput.value = "gcj02";
+            operationAreaEncodingInput.value = "utf-8";
+            operationAreaVersionInput.value = "";
+            operationAreaRemarkInput.value = "";
+        }
+
+        function loadOperationAreaIntoForm(area) {
+            selectedOperationAreaEditId = area.area_id != null ? String(area.area_id) : "";
+            if (area.area_id != null && area.area_id !== "") {
+                setCurrentOperationAreaId(area.area_id);
+            }
+            operationAreaSelect.value = selectedOperationAreaEditId;
+            operationAreaAreaIdInput.readOnly = true;
+            operationAreaCodeInput.readOnly = false;
+            operationAreaAreaIdInput.value = area.area_id ?? "";
+            operationAreaOrgIdInput.value = area.org_id ?? "";
+            operationAreaDeptIdInput.value = area.dept_id ?? "";
+            operationAreaCodeInput.value = area.code || "";
+            operationAreaNameInput.value = area.name || "";
+            operationAreaOrgCodeInput.value = area.org_code || "";
+            operationAreaOrgNameInput.value = area.org_name || "";
+            operationAreaCityCodeInput.value = area.city_code || "";
+            operationAreaCityNameInput.value = area.city_name || "";
+            operationAreaCountryCodeInput.value = area.country_code || area.county_code || "";
+            operationAreaCountryNameInput.value = area.country_name || area.county_name || "";
+            operationAreaShpPathInput.value = area.shp_path || "";
+            operationAreaStatusSelect.value = area.status || "pending";
+            operationAreaAuditStatusSelect.value = area.audit_status || "pending";
+            operationAreaLoadStartupSelect.value = Number(area.load_on_startup ?? 1) ? "1" : "0";
+            operationAreaCoordSystemInput.value = area.coord_system || "gcj02";
+            operationAreaEncodingInput.value = area.shp_encoding || "utf-8";
+            operationAreaVersionInput.value = area.shp_version || "";
+            operationAreaRemarkInput.value = area.area_control || "";
+        }
+
+        function renderOperationAreaOptions() {
+            routeAreaSelect.innerHTML = "";
+            operationAreaSelect.innerHTML = "";
+            const emptyRoute = document.createElement("option");
+            emptyRoute.value = "";
+            emptyRoute.textContent = operationAreas.length ? "请选择运营区" : "暂无运营区";
+            routeAreaSelect.appendChild(emptyRoute);
+
+            const emptyEdit = document.createElement("option");
+            emptyEdit.value = "";
+            emptyEdit.textContent = operationAreas.length ? "请选择运营区" : "暂无运营区";
+            operationAreaSelect.appendChild(emptyEdit);
+
+            for (const area of operationAreas) {
+                const label = `${area.name || area.code || "未命名"} (${area.code || "-"})`;
+                const routeOption = document.createElement("option");
+                routeOption.value = area.area_id != null ? String(area.area_id) : "";
+                routeOption.textContent = label;
+                routeAreaSelect.appendChild(routeOption);
+
+                const editOption = document.createElement("option");
+                editOption.value = area.area_id != null ? String(area.area_id) : "";
+                editOption.textContent = label;
+                operationAreaSelect.appendChild(editOption);
+            }
+
+            if (selectedOperationAreaId && operationAreas.some(area => String(area.area_id ?? "") === String(selectedOperationAreaId))) {
+                routeAreaSelect.value = String(selectedOperationAreaId);
+            }
+            if (selectedOperationAreaEditId && operationAreas.some(area => String(area.area_id ?? "") === String(selectedOperationAreaEditId))) {
+                operationAreaSelect.value = selectedOperationAreaEditId;
+            }
+            fillOperationAreaSelect(
+                restrictionAreaSelect,
+                currentRestrictionOperationAreaId(),
+                { fallbackToCurrent: true }
+            );
+            fillOperationAreaSelect(stationAreaSelect, stationAreaSelect.value || currentOperationAreaId(), {
+                fallbackToCurrent: true
+            });
+            fillOperationAreaSelect(newVehicleAreaSelect, newVehicleAreaSelect.value || currentOperationAreaId(), {
+                fallbackToCurrent: true
+            });
+            const selectedVehicle = adminVehicles.find(vehicle => vehicle.vehicle_code === selectedVehicleCode);
+            fillOperationAreaSelect(
+                vehicleAreaSelect,
+                selectedVehicle ? (selectedVehicle.operation_area_id || selectedVehicle.operation_area_code || "") : "",
+                { fallbackToCurrent: false }
+            );
+        }
+
+        function fillOperationAreaSelect(selectEl, selectedCode, options = {}) {
+            if (!selectEl) {
+                return;
+            }
+            selectEl.innerHTML = "";
+            const emptyOption = document.createElement("option");
+            emptyOption.value = "";
+            emptyOption.textContent = operationAreas.length ? "请选择运营区" : "暂无运营区";
+            selectEl.appendChild(emptyOption);
+            for (const area of operationAreas) {
+                const option = document.createElement("option");
+                option.value = area.area_id != null ? String(area.area_id) : "";
+                option.textContent = `${area.name || area.code || "未命名"} (${area.code || "-"})`;
+                selectEl.appendChild(option);
+            }
+            const code = selectedCode || (options.fallbackToCurrent ? currentOperationAreaId() : "");
+            const matched = operationAreas.find(area =>
+                String(area.area_id ?? "") === String(code)
+                || String(area.code || "") === String(code)
+            );
+            if (matched && matched.area_id != null) {
+                selectEl.value = String(matched.area_id);
+            } else {
+                selectEl.value = "";
+            }
+        }
+
+        function renderOperationAreaTable() {
+            operationAreaTableBody.innerHTML = "";
+            for (const area of operationAreas) {
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                    <td>${area.code || ""}</td>
+                    <td>${area.name || ""}<br>${area.shp_path || ""}</td>
+                    <td>${area.status || ""}<br>${area.audit_status || ""}</td>
+                    <td>${area.load_status || "pending"}<br>${area.node_count || 0}/${area.edge_count || 0}/${area.poi_count || 0}</td>
+                `;
+                row.addEventListener("click", () => loadOperationAreaIntoForm(area));
+                operationAreaTableBody.appendChild(row);
+            }
+        }
+
+        async function loadOperationAreas(message) {
+            setOperationAreaBusy(true);
+            try {
+                const data = await apiJson("/admin/operation-areas");
+                operationAreas = data.areas || [];
+                if (selectedOperationAreaId && !operationAreas.some(area => String(area.area_id ?? "") === String(selectedOperationAreaId))) {
+                    setCurrentOperationAreaId("");
+                }
+                renderOperationAreaOptions();
+                renderOperationAreaTable();
+                const selected = operationAreas.find(area => String(area.area_id ?? "") === String(selectedOperationAreaEditId));
+                if (selected) {
+                    loadOperationAreaIntoForm(selected);
+                }
+                if (message) {
+                    setStatus(message);
+                }
+            } catch (error) {
+                setStatus(`加载运营区失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        }
+
+        function operationAreaRuntimeMessage(runtimeLoad) {
+            if (!runtimeLoad || !runtimeLoad.status) {
+                return "运营区已保存。";
+            }
+            if (runtimeLoad.status === "ready") {
+                const area = runtimeLoad.area || {};
+                return `运营区已保存，并已加入运行态：${area.code || ""}，节点 ${area.nodes || 0}，边 ${area.edges || 0}，POI ${area.pois || 0}`;
+            }
+            if (runtimeLoad.status === "error") {
+                return `运营区已保存，但加入运行态失败：${runtimeLoad.error || "未知错误"}`;
+            }
+            return "运营区已保存，当前状态未触发运行态加载。";
+        }
+
+        async function saveOperationArea() {
+            const payload = operationAreaPayload();
+            const requiredFields = [
+                ["area_id", "区域ID"],
+                ["org_id", "机构ID"],
+                ["dept_id", "部门ID"],
+                ["org_code", "机构编码"],
+                ["org_name", "机构名称"],
+                ["name", "运营区名称"],
+                ["code", "运营区编码"],
+                ["status", "启用状态"],
+                ["city_code", "城市编码"],
+                ["city_name", "城市名称"],
+                ["country_code", "区县编码"],
+                ["country_name", "区县名称"],
+                ["shp_path", "SHP 文件路径"],
+                ["load_on_startup", "启动加载"]
+            ];
+            const missing = requiredFields
+                .filter(([key]) => payload[key] === null || payload[key] === undefined || String(payload[key]).trim() === "")
+                .map(([, label]) => label);
+            if (missing.length) {
+                throw new Error(`请填写运营区必填字段：${missing.join("、")}`);
+            }
+            let result;
+            if (selectedOperationAreaEditId) {
+                result = await apiJson(`/admin/operation-areas/${encodeURIComponent(selectedOperationAreaEditId)}`, {
+                    method: "PUT",
+                    body: payload
+                });
+            } else {
+                result = await apiJson("/admin/operation-areas", {
+                    method: "POST",
+                    body: payload
+                });
+                selectedOperationAreaEditId = payload.area_id != null ? String(payload.area_id) : "";
+            }
+            cachedPois = null;
+            await loadOperationAreas(operationAreaRuntimeMessage(result.runtime_load));
+        }
+
+        async function deleteOperationArea() {
+            const areaId = selectedOperationAreaEditId || operationAreaAreaIdInput.value.trim();
+            if (!areaId) {
+                throw new Error("请先选择运营区");
+            }
+            await apiJson(`/admin/operation-areas/${encodeURIComponent(areaId)}`, { method: "DELETE" });
+            resetOperationAreaForm();
+            cachedPois = null;
+            await loadOperationAreas("运营区已删除。");
+        }
+
+        async function testOperationAreaLoad() {
+            const areaId = selectedOperationAreaEditId || operationAreaAreaIdInput.value.trim();
+            if (!areaId) {
+                throw new Error("请先选择运营区");
+            }
+            const data = await apiJson(`/admin/operation-areas/${encodeURIComponent(areaId)}/load-test`, {
+                method: "POST"
+            });
+            await loadOperationAreas(`SHP 测试完成：${data.status}`);
+        }
+
+        function selectedStationOperationAreaId() {
+            const raw = stationAreaSelect.value || currentOperationAreaId();
+            if (!raw) {
+                return null;
+            }
+            const areaId = Number(raw);
+            return Number.isFinite(areaId) && areaId > 0 ? areaId : null;
+        }
+
+        function stationPointPayload() {
+            const lon = toNumber(stationLonInput.value);
+            const lat = toNumber(stationLatInput.value);
+            if (lon === null || lat === null) {
+                throw new Error("请填写合法的站点经纬度");
+            }
+            return { lon, lat };
+        }
+
+        function singleStationCreatePayload() {
+            const operationAreaId = selectedStationOperationAreaId();
+            if (!operationAreaId) {
+                throw new Error("请先选择站点所属运营区");
+            }
+            const stationName = stationNameInput.value.trim();
+            if (!stationName) {
+                throw new Error("请填写站点名称");
+            }
+            const payload = {
+                operation_area_id: operationAreaId,
+                station_name: stationName,
+                ...stationPointPayload()
+            };
+            if (stationCodeInput.value.trim()) {
+                payload.poi_code = stationCodeInput.value.trim();
+            }
+            if (stationAddressInput.value.trim()) {
+                payload.address = stationAddressInput.value.trim();
+            }
+            return payload;
+        }
+
+        function singleStationDeletePayload() {
+            const payload = stationPointPayload();
+            const operationAreaId = selectedStationOperationAreaId();
+            if (operationAreaId) {
+                payload.operation_area_id = operationAreaId;
+            }
+            return payload;
+        }
+
+        function parseStationBatchPayload(fillOperationArea) {
+            const text = stationBatchInput.value.trim();
+            if (!text) {
+                throw new Error("请填写批量 JSON");
+            }
+            const parsed = JSON.parse(text);
+            const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.stations) ? parsed.stations : [parsed]);
+            if (!items.length) {
+                throw new Error("批量 JSON 至少需要 1 个站点");
+            }
+            const operationAreaId = selectedStationOperationAreaId();
+            return {
+                stations: items.map(item => {
+                    const next = { ...item };
+                    if (fillOperationArea && operationAreaId && !next.operation_area_id) {
+                        next.operation_area_id = operationAreaId;
+                    }
+                    return next;
+                })
+            };
+        }
+
+        function stationResultLines(data, httpStatus) {
+            const lines = [`HTTP ${httpStatus}`, `总数：${data.total ?? "-"}`, `成功：${data.success_count ?? 0}，失败：${data.failure_count ?? 0}`];
+            const results = data.results || [];
+            for (const item of results) {
+                if (item.success) {
+                    const station = item.station || {};
+                    lines.push(`#${item.index} 成功：${station.station_name || station.poi_name || station.poi_code || ""} (${station.lon ?? station.longitude}, ${station.lat ?? station.latitude})`);
+                } else {
+                    lines.push(`#${item.index} 失败：${item.code || item.error || "unknown"} ${item.message || ""}`);
+                }
+            }
+            const runtime = data.runtime_refresh || {};
+            if ((runtime.refreshed || []).length || (runtime.skipped || []).length) {
+                lines.push(`运行态刷新：${JSON.stringify(runtime)}`);
+            }
+            if (!results.length && (data.code || data.error)) {
+                lines.push(`错误：${data.code || data.error} ${data.message || ""}`);
+            }
+            return lines.join("\n");
+        }
+
+        async function submitStationRequest(method, body, successMessage) {
+            const response = await fetch(`${apiBase()}/admin/stations`, {
+                method,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            const data = await response.json().catch(() => ({}));
+            stationResultBox.textContent = stationResultLines(data, response.status);
+            if (Number(data.success_count || 0) > 0) {
+                cachedPois = null;
+                await loadOperationAreas();
+            }
+            const ok = response.ok || response.status === 207;
+            const summary = `${successMessage}：成功 ${data.success_count || 0}，失败 ${data.failure_count || 0}`;
+            setStatus(ok ? summary : `站点操作完成但存在错误：${data.code || data.error || response.status}`);
+            return data;
+        }
+
+        async function createSingleStation() {
+            await submitStationRequest("POST", singleStationCreatePayload(), "新增站点完成");
+        }
+
+        async function deleteSingleStation() {
+            await submitStationRequest("DELETE", singleStationDeletePayload(), "删除站点完成");
+        }
+
+        async function createBatchStations() {
+            await submitStationRequest("POST", parseStationBatchPayload(true), "批量新增站点完成");
+        }
+
+        async function deleteBatchStations() {
+            await submitStationRequest("DELETE", parseStationBatchPayload(false), "批量删除站点完成");
         }
 
         function selectedVehicleId() {
@@ -1227,7 +2053,7 @@
         async function loadFleet() {
             setBusy(true);
             try {
-                const data = await fetchJson(`${apiBase()}/fleet`);
+                const data = await fetchJson(`${apiBase()}/fleet${areaQuery()}`);
                 const fleet = data.fleet || [];
                 fleetById.clear();
                 vehicleSelect.innerHTML = "";
@@ -1249,6 +2075,7 @@
                 const selected = fleet.find(vehicle => vehicle.vehicle_id && (vehicle.planned_route_grasped_point || []).length >= 2)
                     || fleet.find(vehicle => vehicle.vehicle_id);
                 vehicleSelect.value = selected.vehicle_id;
+                routeSegmentSelect.value = "all";
                 drawVehicle(selected, { message: "车队已加载。" });
             } catch (error) {
                 setStatus(`加载车队失败：${error.message}`);
@@ -1428,10 +2255,11 @@
         }
 
         async function loadPoisForRandomOrders() {
+            requireOperationAreaId();
             if (cachedPois && cachedPois.length >= 2) {
                 return cachedPois;
             }
-            const data = await apiJson("/pois");
+            const data = await apiJson(`/pois${areaQuery()}`);
             cachedPois = (data.pois || [])
                 .map(poi => {
                     const point = normalizePoint(poi);
@@ -1463,8 +2291,10 @@
             const passengerCount = options.passengerCount || (1 + Math.floor(Math.random() * 3));
             const passengerPhone = options.passengerPhone || buildDemoPassengerPhone(index);
             const passengerId = options.passengerId || `demo-pax-${Date.now()}-${index + 1}`;
+            const operationAreaId = requireOperationAreaId();
             return {
                 request_id: `demo-${Date.now()}-${index + 1}-${Math.floor(Math.random() * 100000)}`,
+                operation_area_id: operationAreaId,
                 passenger_phone: passengerPhone,
                 passenger_id: passengerId,
                 origin: { lon: origin.lon, lat: origin.lat },
@@ -1641,7 +2471,17 @@
         async function loadRestrictionPolicies(message, preferredPolicyCode) {
             setRestrictionBusy(true);
             try {
-                const data = await apiJson("/operation-restrictions/policies");
+                const areaId = currentRestrictionOperationAreaId();
+                if (!areaId) {
+                    restrictionPolicies = [];
+                    restrictionPolicySelect.innerHTML = "";
+                    resetRestrictionPolicyForm(message || "请先选择运营区后再查询禁区策略。");
+                    return;
+                }
+                if (restrictionAreaSelect && restrictionAreaSelect.value !== String(areaId)) {
+                    restrictionAreaSelect.value = String(areaId);
+                }
+                const data = await apiJson(`/operation-restrictions/policies?operation_area_id=${encodeURIComponent(areaId)}`);
                 restrictionPolicies = data.policies || [];
             restrictionPolicySelect.innerHTML = "";
                 const emptyOption = document.createElement("option");
@@ -1674,6 +2514,7 @@
         }
 
         async function saveRestrictionPolicy() {
+            const operationAreaId = requireRestrictionOperationAreaId();
             if (!restrictionPolicyCodeInput.value.trim()) {
                 throw new Error("请填写策略编号");
             }
@@ -1681,6 +2522,7 @@
                 throw new Error("请至少绘制并闭合一个禁区");
             }
             const payload = {
+                operation_area_id: operationAreaId,
                 policy_code: restrictionPolicyCodeInput.value.trim(),
                 policy_name: restrictionPolicyNameInput.value.trim() || restrictionPolicyCodeInput.value.trim(),
                 description: restrictionDescriptionInput.value.trim(),
@@ -1708,10 +2550,14 @@
         }
 
         async function activateRestrictionPolicy() {
+            const operationAreaId = requireRestrictionOperationAreaId();
             const policyName = restrictionPolicyNameInput.value.trim();
             await apiJson("/operation-restrictions/active", {
                 method: "POST",
-                body: { policy_name: policyName || null }
+                body: {
+                    operation_area_id: operationAreaId,
+                    policy_name: policyName || null
+                }
             });
             await loadRestrictionPolicies("当前禁区策略已更新。");
         }
@@ -1821,6 +2667,7 @@
             newVehicleCodeInput.value = "";
             newVehiclePlateInput.value = "";
             newVehicleTypeSelect.value = "bus";
+            fillOperationAreaSelect(newVehicleAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
             newVehicleSeatInput.value = "";
             newVehicleLoadInput.value = "";
             newVehicleColorInput.value = "#64748b";
@@ -1837,6 +2684,7 @@
             vehicleCodeInput.value = "";
             vehiclePlateInput.value = "";
             vehicleTypeSelect.value = "bus";
+            fillOperationAreaSelect(vehicleAreaSelect, "", { fallbackToCurrent: false });
             vehicleStatusSelect.value = "offline";
             vehicleSeatInput.value = "10";
             vehicleLoadInput.value = "10";
@@ -1878,7 +2726,7 @@
                 const row = document.createElement("tr");
                 row.innerHTML = `
                     <td>${vehicle.vehicle_code || ""}</td>
-                    <td>${vehicle.plate_no || ""}<br>${vehicle.current_driver_name || vehicle.current_driver_code || "未绑定"}</td>
+                    <td>${vehicle.plate_no || ""}<br>${vehicle.current_driver_name || vehicle.current_driver_code || "未绑定"}<br>${vehicle.operation_area_code || "未设置运营区"}</td>
                     <td>${vehicle.operation_status || ""}<br>${vehicle.current_lon != null ? `${vehicle.current_lon}, ${vehicle.current_lat}` : "未定位"}</td>
                     <td><button type="button" data-vehicle-code="${vehicle.vehicle_code}">编辑</button></td>
                 `;
@@ -1912,6 +2760,7 @@
             vehicleCodeInput.value = vehicle.vehicle_code || "";
             vehiclePlateInput.value = vehicle.plate_no || "";
             vehicleTypeSelect.value = vehicle.vehicle_type || "bus";
+            fillOperationAreaSelect(vehicleAreaSelect, vehicle.operation_area_id || vehicle.operation_area_code || "", { fallbackToCurrent: false });
             vehicleStatusSelect.value = vehicle.operation_status || "offline";
             vehicleSeatInput.value = vehicle.seat_count || 0;
             vehicleLoadInput.value = vehicle.max_load_count || 0;
@@ -1931,6 +2780,14 @@
                 const data = await apiJson("/admin/driver-vehicle/options");
                 adminDrivers = data.drivers || [];
                 adminVehicles = data.vehicles || [];
+                if (Array.isArray(data.operation_areas) && data.operation_areas.length) {
+                    operationAreas = data.operation_areas;
+                    if (selectedOperationAreaId && !operationAreas.some(area => String(area.area_id ?? "") === String(selectedOperationAreaId))) {
+                        setCurrentOperationAreaId("");
+                    }
+                    renderOperationAreaOptions();
+                    renderOperationAreaTable();
+                }
                 fillSelect(newDriverWorkStatusSelect, data.driver_work_statuses || [], newDriverWorkStatusSelect.value || "off_duty");
                 fillSelect(newDriverEmploymentStatusSelect, data.driver_employment_statuses || [], newDriverEmploymentStatusSelect.value || "active");
                 fillSelect(driverWorkStatusSelect, data.driver_work_statuses || [], driverWorkStatusSelect.value || "off_duty");
@@ -2020,6 +2877,7 @@
                 plate_no: newVehiclePlateInput.value.trim(),
                 vehicle_type: newVehicleTypeSelect.value,
                 operation_status: "offline",
+                operation_area_id: newVehicleAreaSelect.value ? Number(newVehicleAreaSelect.value) : null,
                 seat_count: Number(newVehicleSeatInput.value || 0),
                 max_load_count: Number(newVehicleLoadInput.value || 0),
                 vehicle_color: newVehicleColorInput.value.trim(),
@@ -2048,6 +2906,9 @@
             };
             if (lon !== null && lat !== null) {
                 payload.initial_position = { lon, lat };
+            }
+            if (vehicleAreaSelect.value) {
+                payload.operation_area_id = Number(vehicleAreaSelect.value);
             }
             return payload;
         }
@@ -2141,12 +3002,14 @@
             if (!vehicleCode) {
                 throw new Error("请先选择车辆");
             }
-            if (vehicleStatusSelect.value === "operating" && !vehicleDriverSelect.value) {
-                throw new Error("车辆开始运营前必须先绑定司机");
-            }
             const lon = toNumber(vehicleLonInput.value);
             const lat = toNumber(vehicleLatInput.value);
-            const body = { operation_status: vehicleStatusSelect.value };
+            const body = {
+                operation_status: vehicleStatusSelect.value
+            };
+            if (vehicleAreaSelect.value) {
+                body.operation_area_id = Number(vehicleAreaSelect.value);
+            }
             if (lon !== null && lat !== null) {
                 body.initial_position = { lon, lat };
             }
@@ -2185,6 +3048,14 @@
                 } finally {
                     setBusy(false);
                 }
+                return;
+            }
+            if (stationPickMode) {
+                const point = pointFromLngLat(event.lnglat);
+                stationLonInput.value = point.lon.toFixed(8);
+                stationLatInput.value = point.lat.toFixed(8);
+                setStationPickMode(false);
+                setStatus(`站点坐标已填入：${stationLonInput.value}, ${stationLatInput.value}`);
                 return;
             }
             if (vehiclePositionTarget) {
@@ -2237,6 +3108,7 @@
         });
         pickRouteVehiclePositionBtn.addEventListener("click", () => {
             setRouteGpsPickMode(!routeGpsPickMode);
+            setStationPickMode(false);
             vehiclePositionTarget = null;
             setStatus(routeGpsPickMode
                 ? "鼠标 GPS 上报模式已开启：每次点击地图都会同步上报车辆 GPS，并由后端吸附到道路。"
@@ -2284,6 +3156,7 @@
         vehicleSelect.addEventListener("change", async () => {
             setBusy(true);
             try {
+                routeSegmentSelect.value = "all";
                 await loadSelectedVehicle("车辆已切换。");
             } catch (error) {
                 setStatus(`切换车辆失败：${error.message}`);
@@ -2291,12 +3164,132 @@
                 setBusy(false);
             }
         });
+        routeSegmentSelect.addEventListener("change", () => {
+            const vehicle = fleetById.get(selectedVehicleId());
+            if (!vehicle) {
+                setStatus("请先选择车辆并加载路线。");
+                return;
+            }
+            drawVehicle(vehicle, { message: "路线显示范围已切换。", preserveView: true });
+        });
         tabButtons.forEach(button => {
             button.addEventListener("click", () => setTab(button.dataset.tab));
         });
 
+        routeAreaSelect.addEventListener("change", async () => {
+            setCurrentOperationAreaId(routeAreaSelect.value || "");
+            fillOperationAreaSelect(restrictionAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
+            fillOperationAreaSelect(stationAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
+            fillOperationAreaSelect(newVehicleAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
+            if (!selectedVehicleCode) {
+                fillOperationAreaSelect(vehicleAreaSelect, "", { fallbackToCurrent: false });
+            }
+            try {
+                await loadFleet();
+                await loadRestrictionPolicies();
+                const selectedArea = operationAreas.find(area => String(area.area_id ?? "") === String(selectedOperationAreaId));
+                setStatus(selectedOperationAreaId
+                    ? `运营区域已切换：${selectedArea ? (selectedArea.name || selectedArea.code || selectedOperationAreaId) : selectedOperationAreaId}`
+                    : "未选择运营区域");
+            } catch (error) {
+                setStatus(`切换运营区域失败：${error.message}`);
+            }
+        });
+        operationAreaSelect.addEventListener("change", () => {
+            const area = operationAreas.find(item => String(item.area_id ?? "") === String(operationAreaSelect.value));
+            if (area) {
+                loadOperationAreaIntoForm(area);
+            } else {
+                resetOperationAreaForm();
+            }
+        });
+        newOperationAreaBtn.addEventListener("click", () => {
+            resetOperationAreaForm();
+            setStatus("已进入新增运营区模式。");
+        });
+        reloadOperationAreaBtn.addEventListener("click", () => loadOperationAreas("运营区列表已刷新。"));
+        saveOperationAreaBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await saveOperationArea();
+            } catch (error) {
+                setStatus(`保存运营区失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        deleteOperationAreaBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await deleteOperationArea();
+            } catch (error) {
+                setStatus(`删除运营区失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        testOperationAreaBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await testOperationAreaLoad();
+            } catch (error) {
+                setStatus(`测试加载运营区失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        createStationBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await createSingleStation();
+            } catch (error) {
+                setStatus(`新增站点失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        pickStationPointBtn.addEventListener("click", () => {
+            const nextMode = !stationPickMode;
+            setRouteGpsPickMode(false);
+            vehiclePositionTarget = null;
+            isDrawingRestriction = false;
+            setStationPickMode(nextMode);
+            setStatus(nextMode ? "站点坐标点选已开启：请在地图上点击一个点。" : "站点坐标点选已关闭。");
+        });
+        deleteStationBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await deleteSingleStation();
+            } catch (error) {
+                setStatus(`删除站点失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        createStationBatchBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await createBatchStations();
+            } catch (error) {
+                setStatus(`批量新增站点失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+        deleteStationBatchBtn.addEventListener("click", async () => {
+            setOperationAreaBusy(true);
+            try {
+                await deleteBatchStations();
+            } catch (error) {
+                setStatus(`批量删除站点失败：${error.message}`);
+            } finally {
+                setOperationAreaBusy(false);
+            }
+        });
+
         drawRestrictionBtn.addEventListener("click", () => {
             setRouteGpsPickMode(false);
+            setStationPickMode(false);
             isDrawingRestriction = true;
             draftRestrictionPoints = [];
             renderDraftRestrictionLine();
@@ -2342,6 +3335,9 @@
             draftRestrictionPoints = [];
             renderRestrictionPolygons();
             setStatus("禁区图形已清空，已保存策略不会自动删除。");
+        });
+        restrictionAreaSelect.addEventListener("change", () => {
+            loadRestrictionPolicies("禁区策略运营区已切换。");
         });
         reloadRestrictionBtn.addEventListener("click", () => loadRestrictionPolicies());
         restrictionPolicySelect.addEventListener("change", () => {
@@ -2438,6 +3434,7 @@
         });
         pickVehiclePositionBtn.addEventListener("click", () => {
             setRouteGpsPickMode(false);
+            setStationPickMode(false);
             vehiclePositionTarget = "edit";
             isDrawingRestriction = false;
             renderDraftRestrictionLine();
@@ -2495,8 +3492,10 @@
         });
 
         resetManualPickupTimeWindow();
-        loadFleet();
-        loadRestrictionPolicies();
+        loadOperationAreas().then(async () => {
+            await loadFleet();
+            await loadRestrictionPolicies();
+        });
         loadAdminOptions();
     </script>
 </body>

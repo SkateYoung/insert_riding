@@ -35,10 +35,17 @@ class CoreDispatcher:
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
     completed_orders_pool = []
 
-    # 空车热点预测缓存：避免后台循环每 5 秒重复训练/预测。
+    # 空车热点预测缓存：按运营区分桶，避免多运营区轮询时互相覆盖。
     IDLE_FORECAST_CACHE_SECONDS = 15 * 60
+    IDLE_FORECAST_REFRESH_RETRY_SECONDS = 60
     IDLE_MIN_HOTSPOT_DISTANCE_METERS = 800.0
-    idle_hotspot_cache = None
+    idle_hotspot_cache = {}
+    idle_hotspot_cache_lock = threading.RLock()
+    idle_hotspot_refresh_executor = None
+    idle_hotspot_refresh_workers = 2
+    idle_hotspot_refresh_inflight = set()
+    idle_hotspot_refresh_lock = threading.Lock()
+    idle_hotspot_refresh_failures = {}
 
     # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
@@ -57,7 +64,7 @@ class CoreDispatcher:
     route_grasp_executor_workers = 4
     route_grasp_inflight = set()
     route_grasp_inflight_lock = threading.Lock()
-    operation_restriction_policy = None
+    operation_restriction_policies_by_area = {}
     operation_restriction_lock = threading.Lock()
 
     @staticmethod
@@ -73,22 +80,52 @@ class CoreDispatcher:
         return f"{prefix}:v1:{digest}"
 
     @classmethod
-    def set_operation_restriction_policy(cls, policy):
-        """更新进程内当前生效的运营禁区策略。"""
+    def set_operation_restriction_policy(cls, policy, operation_area_id=None):
+        """更新指定运营区当前生效的运营禁区策略。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        if area_id is None and isinstance(policy, dict):
+            area_id = cls._coerce_operation_area_id(policy.get("operation_area_id"))
         with cls.operation_restriction_lock:
-            cls.operation_restriction_policy = copy.deepcopy(policy) if policy else None
-        return cls.current_operation_restriction_policy()
+            if area_id is None:
+                if policy is None:
+                    cls.operation_restriction_policies_by_area = {}
+                return None
+            if policy:
+                snapshot = copy.deepcopy(policy)
+                snapshot["operation_area_id"] = area_id
+                cls.operation_restriction_policies_by_area[area_id] = snapshot
+            else:
+                cls.operation_restriction_policies_by_area.pop(area_id, None)
+        return cls.current_operation_restriction_policy(area_id)
 
     @classmethod
-    def current_operation_restriction_policy(cls):
-        """返回当前运营禁区策略副本，避免调用方误改全局状态。"""
+    def set_operation_restriction_policies(cls, policies):
+        """批量替换进程内按运营区生效的禁区策略。"""
+        snapshots = {}
+        for policy in policies or []:
+            area_id = cls._coerce_operation_area_id((policy or {}).get("operation_area_id"))
+            if area_id is None:
+                continue
+            snapshot = copy.deepcopy(policy)
+            snapshot["operation_area_id"] = area_id
+            snapshots[area_id] = snapshot
         with cls.operation_restriction_lock:
-            return copy.deepcopy(cls.operation_restriction_policy)
+            cls.operation_restriction_policies_by_area = snapshots
+        return copy.deepcopy(snapshots)
 
     @classmethod
-    def current_operation_restriction_signature(cls):
-        """返回当前禁区策略签名，用于 A* 路径缓存隔离。"""
-        return restriction_signature(cls.current_operation_restriction_policy())
+    def current_operation_restriction_policy(cls, operation_area_id=None):
+        """返回指定运营区禁区策略副本，避免调用方误改全局状态。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        if area_id is None:
+            return None
+        with cls.operation_restriction_lock:
+            return copy.deepcopy(cls.operation_restriction_policies_by_area.get(area_id))
+
+    @classmethod
+    def current_operation_restriction_signature(cls, operation_area_id=None):
+        """返回指定运营区禁区策略签名，用于 A* 路径缓存隔离。"""
+        return restriction_signature(cls.current_operation_restriction_policy(operation_area_id))
 
     @staticmethod
     def _vehicle_restriction_policy(vehicle):
@@ -218,6 +255,10 @@ class CoreDispatcher:
         sim_time = vehicle_state['time']
         sim_last_node = vehicle_state['last_node']
         sim_next_node = vehicle_state['next_node']
+        operation_area_id = CoreDispatcher._coerce_operation_area_id(vehicle_state.get("operation_area_id"))
+        if operation_area_id is None and route:
+            operation_area_id = CoreDispatcher._order_operation_area_id(route[0].get("order"))
+        restriction_policy = CoreDispatcher.current_operation_restriction_policy(operation_area_id)
         
         current_load = sum(order.passenger_count for order in on_board_orders)
         empty_dist = 0.0
@@ -249,7 +290,7 @@ class CoreDispatcher:
                 city_map,
                 city_map.nodes_map[sim_next_node],
                 target_node,
-                restriction_policy=CoreDispatcher.current_operation_restriction_policy(),
+                restriction_policy=restriction_policy,
             )
             
             if dist == float('inf'):
@@ -475,7 +516,8 @@ class CoreDispatcher:
             'time': vehicle.time,
             'last_node': vehicle.last_node,
             'next_node': vehicle.next_node,
-            'progress': vehicle.progress
+            'progress': vehicle.progress,
+            'operation_area_id': getattr(vehicle, "operation_area_id", None),
         }
         
         # 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
@@ -572,7 +614,8 @@ class CoreDispatcher:
             'time': vehicle.time,
             'last_node': vehicle.last_node,
             'next_node': vehicle.next_node,
-            'progress': vehicle.progress
+            'progress': vehicle.progress,
+            'operation_area_id': getattr(vehicle, "operation_area_id", None),
         }
         is_feasible, cost, _ = CoreDispatcher.evaluate_route(
             vehicle.planned_route,
@@ -627,6 +670,180 @@ class CoreDispatcher:
         return 100.0
 
     @staticmethod
+    def _coerce_operation_area_id(value):
+        """把运营区 ID 统一转换为整数。"""
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _operation_area_id_of(obj):
+        """读取订单或车辆所属运营区 ID。"""
+        return CoreDispatcher._coerce_operation_area_id(getattr(obj, "operation_area_id", None))
+
+    @staticmethod
+    def _order_operation_area_id(order):
+        """读取订单运营区 ID；为空时不再按默认运营区参与匹配。"""
+        return CoreDispatcher._operation_area_id_of(order)
+
+    @staticmethod
+    def _process_pool_matching_area_cycle(fleet, city_map, operation_area_id=None):
+        """对单个运营区执行一轮订单池匹配。"""
+        area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
+        
+        area_fleet = [
+            vehicle for vehicle in (fleet or [])
+            if area_id is None or CoreDispatcher._operation_area_id_of(vehicle) == area_id
+        ]
+        area_order_indices = [
+            index for index, order in enumerate(CoreDispatcher.order_pool)
+            if area_id is None or CoreDispatcher._order_operation_area_id(order) == area_id
+        ]
+        # 需要解决的地方：空车预测会阻塞接口
+        if not area_order_indices:
+            CoreDispatcher.assign_idle_parking_targets(area_fleet, city_map, operation_area_id=area_id)
+            return 0
+
+        assign_count = 0
+        while True:
+            area_order_indices = [
+                index for index, order in enumerate(CoreDispatcher.order_pool)
+                if area_id is None or CoreDispatcher._order_operation_area_id(order) == area_id
+            ]
+            
+            if not area_order_indices:
+                break
+
+            best_o_idx = -1
+            global_best_v = None
+            global_best_route = None
+            best_priority_score = 0.0
+            best_cancel_risk_score = 0.0
+            order_candidates = []
+            current_timestamp = max(
+                (getattr(v, "time", 0.0) for v in area_fleet),
+                default=time.time(),
+            ) or time.time()
+
+            for i in area_order_indices:
+                order = CoreDispatcher.order_pool[i]
+                # if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
+                #     continue
+
+                c1, c2 = float("inf"), float("inf")
+                v1, r1 = None, None
+
+                for v in area_fleet:
+                    if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
+                        continue
+                    if not CoreDispatcher._vehicle_can_accept_order(v):
+                        continue
+
+                    original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(v, city_map)
+                    route, absolute_cost = CoreDispatcher._try_insert_order(v, order, city_map)
+                    is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
+                    cost = (
+                        absolute_cost - original_cost
+                        if route is not None and absolute_cost != float("inf")
+                        else float("inf")
+                    )
+                    if not is_idle and absolute_cost > 200.0:
+                        cost = float("inf")
+                    if cost < c1:
+                        c2 = c1
+                        c1 = cost
+                        v1 = v
+                        r1 = route
+                    elif cost < c2:
+                        c2 = cost
+
+                if c1 == float("inf"):
+                    continue
+
+                regret = None if c2 == float("inf") else max(0.0, c2 - c1)
+                order_candidates.append({
+                    "order_index": i,
+                    "vehicle": v1,
+                    "route": r1,
+                    "regret": regret,
+                    "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
+                })
+
+            finite_regrets = [
+                item["regret"]
+                for item in order_candidates
+                if item["regret"] is not None
+            ]
+            max_finite_regret = max(finite_regrets, default=0.0)
+            for item in order_candidates:
+                if item["regret"] is None:
+                    normalized_regret_score = 100.0
+                elif max_finite_regret > 0.0:
+                    normalized_regret_score = min(100.0, (item["regret"] / max_finite_regret) * 100.0)
+                else:
+                    normalized_regret_score = 0.0
+                item["normalized_regret_score"] = normalized_regret_score
+                item["priority_score"] = (
+                    0.6 * item["cancel_risk_score"]
+                    + 0.4 * normalized_regret_score
+                )
+
+            if order_candidates:
+                best_candidate = max(
+                    order_candidates,
+                    key=lambda item: (
+                        item["priority_score"],
+                        item["cancel_risk_score"],
+                        item["normalized_regret_score"],
+                    ),
+                )
+                best_o_idx = best_candidate["order_index"]
+                global_best_v = best_candidate["vehicle"]
+                global_best_route = best_candidate["route"]
+                best_priority_score = best_candidate["priority_score"]
+                best_cancel_risk_score = best_candidate["cancel_risk_score"]
+
+            if best_o_idx == -1:
+                break
+
+            target_o = CoreDispatcher.order_pool.pop(best_o_idx)
+            was_idle_before_assignment = (
+                len(getattr(global_best_v, "on_board_orders", []) or []) == 0
+                and len(getattr(global_best_v, "planned_route", []) or []) == 0
+            )
+            CoreDispatcher._clear_idle_parking(global_best_v)
+            global_best_v.planned_route = global_best_route
+            route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                global_best_v,
+                city_map,
+                fleet_push_event={
+                    "event_reason": "order_assigned" if was_idle_before_assignment else "order_inserted",
+                    "request_id": target_o.request_id,
+                },
+            )
+            target_o.status = "waiting_pickup"
+            persistence.record_dispatch_assignment(
+                target_o,
+                global_best_v,
+                city_map=city_map,
+                path_result=route_result,
+                details={
+                    "cancel_risk_score": best_cancel_risk_score,
+                    "priority_score": best_priority_score,
+                },
+            )
+            assign_count += 1
+            print(
+                f"[Core.Pool] [Match] 运营区 {area_id or 'default'} 订单 {target_o.request_id} "
+                f"划拨给 {global_best_v.id}，风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
+            )
+
+        return assign_count
+
+    @staticmethod
     def process_pool_matching(fleet, city_map, state_lock=None):
         """【订单池实时匹配引擎】：核心升级为主流【后悔值插入法】。
         
@@ -647,6 +864,29 @@ class CoreDispatcher:
         print("[Core.Pool] 订单池匹配引擎已启动，每 5 秒进行一轮后悔值统筹调度...")
         
         lock_context = state_lock if state_lock is not None else nullcontext()
+        if isinstance(city_map, dict):
+            while True:
+                if not CoreDispatcher.order_pool:
+                    print(f"[Core.Pool] 池中暂无订单...")
+                if CoreDispatcher.order_pool:
+                    print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
+                with lock_context:
+                    assign_count = 0
+                    for operation_area_id, area_city in city_map.items():
+                        area_fleet = [
+                            vehicle for vehicle in (fleet or [])
+                            if CoreDispatcher._operation_area_id_of(vehicle) == operation_area_id
+                        ]
+                        CoreDispatcher.refresh_scheduled_rest_requests(area_fleet, area_city)
+                        assign_count += CoreDispatcher._process_pool_matching_area_cycle(
+                            area_fleet,
+                            area_city,
+                            operation_area_id=operation_area_id,
+                        )
+                    if assign_count > 0:
+                        print(f"[Core.Pool] 多运营区本轮调度完毕：成功释放 {assign_count} 个积压订单。")
+                time.sleep(5)
+
         while True:
             with lock_context:
                 CoreDispatcher.refresh_scheduled_rest_requests(fleet, city_map)
@@ -795,30 +1035,6 @@ class CoreDispatcher:
                             f"被 {global_best_v.id} 优先划拨！风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
                         )
 
-                        # ==========================================
-                        # 打印车辆更新后的轨迹点 (途径站点)
-                        # ==========================================
-                        # waypoints = []
-                        # total_path = []
-                        # full_path_node_count = 0
-                        # curr_node_id = global_best_v.next_node
-
-                        # for step in global_best_route:
-                        #     o = step['order']
-                        #     target_node = o.o_node if step['type'] == 'O' else o.d_node
-                        #     action_name = "接驾" if step['type'] == 'O' else "送驾"
-                        #     waypoints.append(f"[{action_name}{o.request_id}] {target_node.name} ({target_node.lon:.5f},{target_node.lat:.5f})")
-
-                        #     # 顺便统计底层 A* 寻路的精细轨迹点总数
-                        #     dist, path = city_map.get_path(city_map.nodes_map[curr_node_id], target_node)
-                        #     for nodes in path:
-                        #         total_path.append([nodes.lon,nodes.lat])
-                        #     full_path_node_count += len(path)
-                        #     curr_node_id = target_node.id
-
-                        # print(f"    [轨迹] {global_best_v.id} 任务途径点序列: {' -> '.join(waypoints)}")
-                        # print(f"    [明细] 该路线底层共包含 {full_path_node_count} 个路网轨迹点")
-                        # print(f"    [明细] 该路线总里程: {total_path} ")
                     else:
                         # 池中剩余订单当前均无法匹配
                         break
@@ -1274,6 +1490,7 @@ class CoreDispatcher:
                 "type": step["type"],
                 "request_id": order.request_id,
                 "node": target_node,
+                "amap_target_point": CoreDispatcher._order_original_path_point(order, step["type"], target_node),
             })
         return targets
 
@@ -1294,6 +1511,33 @@ class CoreDispatcher:
             "name": node.name,
             "zone": node.zone,
         }
+
+    @staticmethod
+    def _order_original_path_point(order, step_type, fallback_node=None):
+        """生成订单原始 O/D 坐标点，供高德驾车规划请求使用。"""
+        if step_type == "O":
+            lon = getattr(order, "o_lon", None)
+            lat = getattr(order, "o_lat", None)
+        else:
+            lon = getattr(order, "d_lon", None)
+            lat = getattr(order, "d_lat", None)
+
+        if lon is None or lat is None:
+            return CoreDispatcher._node_to_path_point(fallback_node) if fallback_node is not None else None
+
+        point = {
+            "id": f"order:{getattr(order, 'request_id', '')}:{step_type}:raw",
+            "lon": float(lon),
+            "lat": float(lat),
+            "name": getattr(fallback_node, "name", None) or ("上车点" if step_type == "O" else "下车点"),
+            "zone": getattr(fallback_node, "zone", None),
+            "source": "order_original_coord",
+        }
+        if fallback_node is not None:
+            point["snapped_node_id"] = fallback_node.id
+            point["snapped_lon"] = fallback_node.lon
+            point["snapped_lat"] = fallback_node.lat
+        return point
 
     # ============================================================
     # 功能六：空车停靠预测辅助函数
@@ -1403,7 +1647,7 @@ class CoreDispatcher:
         return "bus_order 中没有 status 为 completed/complete 的有效订单"
 
     @staticmethod
-    def _collect_forecast_orders(fleet=None):
+    def _collect_forecast_orders(fleet=None, operation_area_id=None):
         """收集可供 OD 预测使用的已完成订单样本。
 
         Args:
@@ -1412,11 +1656,24 @@ class CoreDispatcher:
         Returns:
             list[Order|dict]: 去重后的订单样本列表。
         """
+        area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
         orders = []
         seen_ids = set()
 
+        def order_area_matches(order):
+            """判断内存样本是否属于当前运营区。"""
+            if area_id is None:
+                return True
+            if isinstance(order, dict):
+                order_area_id = order.get("operation_area_id")
+            else:
+                order_area_id = getattr(order, "operation_area_id", None)
+            return CoreDispatcher._coerce_operation_area_id(order_area_id) == area_id
+
         def add_order(order):
             """按订单 ID 去重后加入预测样本集合。"""
+            if not order_area_matches(order):
+                return
             request_id = CoreDispatcher._forecast_sample_request_id(order)
             key = str(request_id) if request_id is not None else id(order)
             if key in seen_ids:
@@ -1424,9 +1681,9 @@ class CoreDispatcher:
             seen_ids.add(key)
             orders.append(order)
 
-        for order in persistence.fetch_completed_orders_for_forecast():
+        for order in persistence.fetch_completed_orders_for_forecast(operation_area_id=area_id):
             add_order(order)
-        for order in CoreDispatcher.completed_orders_pool:
+        for order in list(CoreDispatcher.completed_orders_pool):
             add_order(order)
 
         return orders
@@ -1448,13 +1705,48 @@ class CoreDispatcher:
         return len(orders), latest_time
 
     @staticmethod
+    def _idle_forecast_time_slot(now_ts):
+        """计算当前系统时间对应的空车热点预测窗口。"""
+        return od_forecast_module._slot_floor(
+            datetime.fromtimestamp(now_ts) + timedelta(minutes=15)
+        )
+
+    @staticmethod
+    def _idle_hotspot_cache_key(operation_area_id, city_map):
+        """生成空车热点预测缓存分桶键。"""
+        area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
+        if area_id is not None:
+            return f"operation_area:{area_id}"
+        return f"city_map:{id(city_map)}"
+
+    @staticmethod
+    def _idle_hotspot_cache_store():
+        """读取空车热点预测缓存池，并兼容旧的单缓存结构。"""
+        with CoreDispatcher.idle_hotspot_cache_lock:
+            cache_store = CoreDispatcher.idle_hotspot_cache
+            if not isinstance(cache_store, dict) or "hotspots" in cache_store:
+                cache_store = {}
+                CoreDispatcher.idle_hotspot_cache = cache_store
+            return cache_store
+
+    @staticmethod
     def _idle_forecast_cache_is_valid(cache, city_map, order_signature, now_ts):
         """判断空车热点预测缓存是否仍在有效期内。"""
         return (
             cache
             and cache.get("city_map_id") == id(city_map)
             and cache.get("order_signature") == order_signature
+            and cache.get("forecast_time") == CoreDispatcher._idle_forecast_time_slot(now_ts)
             and float(cache.get("expires_at", 0.0)) > now_ts
+        )
+
+    @staticmethod
+    def _idle_forecast_cache_can_serve(cache, city_map):
+        """判断缓存是否可直接服务空车分配，不在接口路径上强制重算签名。"""
+        return (
+            cache
+            and cache.get("city_map_id") == id(city_map)
+            and bool(cache.get("hotspots"))
         )
 
     @staticmethod
@@ -1503,7 +1795,7 @@ class CoreDispatcher:
         )
 
     @staticmethod
-    def _build_idle_hotspot_cache(orders, order_signature, city_map, now_ts):
+    def _build_idle_hotspot_cache(orders, order_signature, city_map, now_ts, operation_area_id=None, cache_key=None):
         """刷新未来 15 分钟空车热点预测缓存。"""
         try:
             clean_orders = od_forecast_module.orders_from_insert_riding(
@@ -1519,8 +1811,8 @@ class CoreDispatcher:
             print("[Core.Planner] 已完成订单样本无法转换为预测输入，空车热点预测跳过。")
             return None
 
-        # 沿用现有预测窗口：最近一条历史订单之后的下一个 15 分钟窗口。
-        forecast_time = max(order.request_time for order in clean_orders) + timedelta(minutes=15)
+        # 使用当前系统时间之后的 15 分钟窗口，避免历史最新订单时间影响在线热点预测。
+        forecast_time = CoreDispatcher._idle_forecast_time_slot(now_ts)
         predictions = []
         metrics = []
         try:
@@ -1550,7 +1842,11 @@ class CoreDispatcher:
             return None
 
         generated_at_text = datetime.fromtimestamp(now_ts).isoformat(sep=" ", timespec="seconds")
+        area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
+        cache_key = cache_key or CoreDispatcher._idle_hotspot_cache_key(area_id, city_map)
         cache = {
+            "cache_key": cache_key,
+            "operation_area_id": area_id,
             "city_map_id": id(city_map),
             "order_signature": order_signature,
             "generated_at": now_ts,
@@ -1561,14 +1857,123 @@ class CoreDispatcher:
             "hotspots": hotspots,
             "metrics": metrics,
         }
-        CoreDispatcher.idle_hotspot_cache = cache
-        print(f"[Core.Planner] 已刷新空车热点预测缓存，候选热点 {len(hotspots)} 个。")
+        with CoreDispatcher.idle_hotspot_cache_lock:
+            CoreDispatcher._idle_hotspot_cache_store()[cache_key] = cache
+        area_text = f"运营区 {area_id}" if area_id is not None else f"地图 {id(city_map)}"
+        print(f"[Core.Planner] 已刷新{area_text}空车热点预测缓存，候选热点 {len(hotspots)} 个。")
         return cache
 
+    @classmethod
+    def _idle_hotspot_executor(cls):
+        """延迟创建空车热点预测线程池。"""
+        with cls.idle_hotspot_refresh_lock:
+            if cls.idle_hotspot_refresh_executor is None:
+                cls.idle_hotspot_refresh_executor = ThreadPoolExecutor(
+                    max_workers=cls.idle_hotspot_refresh_workers,
+                    thread_name_prefix="IdleHotspotForecast",
+                )
+            return cls.idle_hotspot_refresh_executor
+
+    @classmethod
+    def _idle_hotspot_refresh_failed_recently(cls, cache_key, now_ts):
+        """判断指定缓存桶是否刚刷新失败，避免空样本或数据库异常时刷屏重试。"""
+        last_failed_at = float(cls.idle_hotspot_refresh_failures.get(cache_key, 0.0) or 0.0)
+        return now_ts - last_failed_at < cls.IDLE_FORECAST_REFRESH_RETRY_SECONDS
+
+    @classmethod
+    def _refresh_idle_hotspot_cache_job(cls, city_map, operation_area_id, cache_key):
+        """在线程池中刷新空车热点预测缓存，避免阻塞接口共享锁。"""
+        try:
+            orders = cls._collect_forecast_orders(operation_area_id=operation_area_id)
+            if not orders:
+                print(
+                    "[Core.Planner] 未找到可用已完成订单预测样本，空车热点预测跳过："
+                    f"{cls._forecast_history_unavailable_reason()}。"
+                )
+                cls.idle_hotspot_refresh_failures[cache_key] = time.time()
+                return None
+
+            now_ts = time.time()
+            order_signature = cls._forecast_order_signature(orders)
+            with cls.idle_hotspot_cache_lock:
+                cache = cls._idle_hotspot_cache_store().get(cache_key)
+            if cls._idle_forecast_cache_is_valid(cache, city_map, order_signature, now_ts):
+                return cache
+
+            cache = cls._build_idle_hotspot_cache(
+                orders,
+                order_signature,
+                city_map,
+                now_ts,
+                operation_area_id=operation_area_id,
+                cache_key=cache_key,
+            )
+            if cache:
+                cls.idle_hotspot_refresh_failures.pop(cache_key, None)
+            else:
+                cls.idle_hotspot_refresh_failures[cache_key] = time.time()
+            return cache
+        except Exception as exc:
+            cls.idle_hotspot_refresh_failures[cache_key] = time.time()
+            print(f"[Core.Planner] 空车热点预测后台刷新失败：{exc}")
+            return None
+        finally:
+            with cls.idle_hotspot_refresh_lock:
+                cls.idle_hotspot_refresh_inflight.discard(cache_key)
+
+    @classmethod
+    def _schedule_idle_hotspot_cache_refresh(cls, city_map, operation_area_id=None, cache_key=None):
+        """提交空车热点预测缓存刷新任务；已有任务在途时直接复用。"""
+        cache_key = cache_key or cls._idle_hotspot_cache_key(operation_area_id, city_map)
+        now_ts = time.time()
+        with cls.idle_hotspot_refresh_lock:
+            if cache_key in cls.idle_hotspot_refresh_inflight:
+                return False
+            if cls._idle_hotspot_refresh_failed_recently(cache_key, now_ts):
+                return False
+            cls.idle_hotspot_refresh_inflight.add(cache_key)
+
+        executor = cls._idle_hotspot_executor()
+        executor.submit(
+            cls._refresh_idle_hotspot_cache_job,
+            city_map,
+            cls._coerce_operation_area_id(operation_area_id),
+            cache_key,
+        )
+        return True
+
     @staticmethod
-    def _get_idle_hotspot_cache(fleet, city_map):
+    def _get_idle_hotspot_cache(fleet, city_map, operation_area_id=None, refresh_mode="sync"):
         """读取或刷新车队级空车热点预测缓存。"""
-        orders = CoreDispatcher._collect_forecast_orders(fleet)
+        cache_key = CoreDispatcher._idle_hotspot_cache_key(operation_area_id, city_map)
+        with CoreDispatcher.idle_hotspot_cache_lock:
+            cache = CoreDispatcher._idle_hotspot_cache_store().get(cache_key)
+
+        if refresh_mode == "async":
+            now_ts = time.time()
+            if (
+                CoreDispatcher._idle_forecast_cache_can_serve(cache, city_map)
+                and cache.get("forecast_time") == CoreDispatcher._idle_forecast_time_slot(now_ts)
+                and float(cache.get("expires_at", 0.0) or 0.0) > now_ts
+            ):
+                return cache
+
+            CoreDispatcher._schedule_idle_hotspot_cache_refresh(
+                city_map,
+                operation_area_id=operation_area_id,
+                cache_key=cache_key,
+            )
+            if (
+                CoreDispatcher._idle_forecast_cache_can_serve(cache, city_map)
+                and cache.get("forecast_time") == CoreDispatcher._idle_forecast_time_slot(now_ts)
+            ):
+                return cache
+            return None
+
+        orders = CoreDispatcher._collect_forecast_orders(
+            fleet,
+            operation_area_id=operation_area_id,
+        )
         if not orders:
             print(
                 "[Core.Planner] 未找到可用已完成订单预测样本，空车热点预测跳过："
@@ -1578,11 +1983,19 @@ class CoreDispatcher:
 
         now_ts = time.time()
         order_signature = CoreDispatcher._forecast_order_signature(orders)
-        cache = CoreDispatcher.idle_hotspot_cache
+        with CoreDispatcher.idle_hotspot_cache_lock:
+            cache = CoreDispatcher._idle_hotspot_cache_store().get(cache_key)
         if CoreDispatcher._idle_forecast_cache_is_valid(cache, city_map, order_signature, now_ts):
             return cache
 
-        return CoreDispatcher._build_idle_hotspot_cache(orders, order_signature, city_map, now_ts)
+        return CoreDispatcher._build_idle_hotspot_cache(
+            orders,
+            order_signature,
+            city_map,
+            now_ts,
+            operation_area_id=operation_area_id,
+            cache_key=cache_key,
+        )
 
     @staticmethod
     def _is_idle_vehicle_available(vehicle):
@@ -1602,9 +2015,11 @@ class CoreDispatcher:
     @staticmethod
     def _idle_target_matches_cache(vehicle, cache):
         """判断车辆当前空车目标是否来自本轮有效预测缓存。"""
+        forecast = getattr(vehicle, "idle_forecast", None) or {}
         return (
             getattr(vehicle, "idle_target", None)
             and getattr(vehicle, "planned_route_point", None)
+            and forecast.get("forecast_cache_key") == cache.get("cache_key")
             and CoreDispatcher._idle_target_cache_time(vehicle) == cache.get("generated_at")
         )
 
@@ -1670,7 +2085,7 @@ class CoreDispatcher:
 
     @staticmethod
     def _write_idle_hotspot_to_vehicle(vehicle, city_map, cache, hotspot, assignment_rank, fleet=None):
-        """把一个热点写入车辆，并刷新前端展示轨迹。"""
+        """把一个热点写入车辆"""
         start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
         if start_node is None:
             return False
@@ -1678,6 +2093,8 @@ class CoreDispatcher:
         row = hotspot["row"]
         target_node = hotspot["node"]
         vehicle.idle_forecast = {
+            "operation_area_id": cache.get("operation_area_id"),
+            "forecast_cache_key": cache.get("cache_key"),
             "forecast_start_time": row.get("forecast_start_time"),
             "forecast_end_time": row.get("forecast_end_time"),
             "horizon_min": int(row.get("horizon_min", 15)),
@@ -1722,23 +2139,34 @@ class CoreDispatcher:
         return True
 
     @staticmethod
-    def assign_idle_parking_targets(fleet, city_map, target_vehicle=None):
+    def assign_idle_parking_targets(fleet, city_map, target_vehicle=None, operation_area_id=None):
         """按车队级预测热点池为空车分散分配停靠目标。
 
         Args:
             fleet (list[Vehicle]): 当前车队。
             city_map (CityGraph): 路网对象。
             target_vehicle (Vehicle | None): 兼容单车入口；为空时批量处理全部空车。
+            operation_area_id (int | str | None): 当前运营区 ID，用于隔离预测缓存。
 
         Returns:
             int: 本次新分配成功的车辆数量。
         """
-        cache = CoreDispatcher._get_idle_hotspot_cache(fleet, city_map)
-        if not cache or not cache.get("hotspots"):
-            return 0
+        if operation_area_id is None and target_vehicle is not None:
+            operation_area_id = getattr(target_vehicle, "operation_area_id", None)
 
         idle_vehicles = [v for v in fleet if CoreDispatcher._is_idle_vehicle_available(v)]
         if target_vehicle is not None and target_vehicle not in idle_vehicles:
+            return 0
+        if not idle_vehicles:
+            return 0
+
+        cache = CoreDispatcher._get_idle_hotspot_cache(
+            fleet,
+            city_map,
+            operation_area_id=operation_area_id,
+            refresh_mode="async",
+        )
+        if not cache or not cache.get("hotspots"):
             return 0
 
         assigned_nodes = []
@@ -1889,6 +2317,7 @@ class CoreDispatcher:
         path_points = []
         route_segments = []
         current_node = start_node
+        current_amap_point = CoreDispatcher._node_to_path_point(start_node)
         total_distance = 0.0
 
         for target in CoreDispatcher._planned_route_targets(vehicle):
@@ -1913,9 +2342,14 @@ class CoreDispatcher:
                 "target_node": CoreDispatcher._node_to_path_point(target["node"]),
                 "distance": dist,
                 "path": segment_points,
+                "amap_request_points": [
+                    copy.deepcopy(current_amap_point),
+                    copy.deepcopy(target.get("amap_target_point") or CoreDispatcher._node_to_path_point(target["node"])),
+                ],
             })
             total_distance += dist
             current_node = target["node"]
+            current_amap_point = target.get("amap_target_point") or CoreDispatcher._node_to_path_point(target["node"])
 
         return {
             "start_node": CoreDispatcher._node_to_path_point(start_node),
@@ -1976,6 +2410,9 @@ class CoreDispatcher:
                 "aStarDistanceM": segment.get("distance"),
                 "points": points,
             }
+            amap_request_points = copy.deepcopy(segment.get("amap_request_points") or [])
+            if len(amap_request_points) >= 2:
+                raw_segment["amap_request_points"] = [amap_request_points[0], amap_request_points[-1]]
             if "forecast" in segment:
                 raw_segment["forecast"] = copy.deepcopy(segment.get("forecast"))
             raw_segments.append(raw_segment)
@@ -2553,7 +2990,9 @@ class CoreDispatcher:
             CoreDispatcher._clear_idle_parking(vehicle)
 
         vehicle.gps = {"lon": start_node.lon, "lat": start_node.lat}
-        restriction_policy = CoreDispatcher.current_operation_restriction_policy()
+        restriction_policy = CoreDispatcher.current_operation_restriction_policy(
+            getattr(vehicle, "operation_area_id", None)
+        )
         if not vehicle.planned_route and vehicle.idle_target:
             result = CoreDispatcher._build_idle_route_from_node(
                 vehicle,
@@ -3408,13 +3847,14 @@ class CoreDispatcher:
             dict: 形如 {"ok": bool, "segment": dict, "reason": str | None} 的分段规划结果。
         """
         points = copy.deepcopy(segment.get("points") or [])
+        request_points = copy.deepcopy(segment.get("amap_request_points") or points)
         same_endpoint = False
-        if len(points) >= 2:
+        if len(request_points) >= 2:
             try:
-                same_endpoint = CoreDispatcher._point_distance_m(points[0], points[-1]) <= 2.0
+                same_endpoint = CoreDispatcher._point_distance_m(request_points[0], request_points[-1]) <= 2.0
             except (TypeError, ValueError, KeyError):
                 same_endpoint = False
-        if len(points) < 2 or same_endpoint:
+        if len(request_points) < 2 or same_endpoint:
             # O/D 点重合或相邻停靠点吸附到同一路网节点时，A* 会返回单点零长度分段。
             # 这类分段直接复用上一段规划终点，确保多个重合 O/D 在高德路线里表现为同一个点。
             return {
@@ -3429,18 +3869,18 @@ class CoreDispatcher:
                 "segment": segment,
             }
 
-        # 只用分段起终点规划，保持与前端 amap_route_demo.html 的 OD 驾车规划方式一致。
+        # 只用分段起终点规划
         if hasattr(client, "plan_segment_sync"):
             try:
-                driving = client.plan_segment_sync(points, restriction_policy=restriction_policy)
+                driving = client.plan_segment_sync(request_points, restriction_policy=restriction_policy)
             except TypeError as exc:
                 text = str(exc)
                 if "restriction_policy" in text or "unexpected keyword" in text:
-                    driving = client.plan_segment_sync(points)
+                    driving = client.plan_segment_sync(request_points)
                 else:
                     raise
         elif hasattr(client, "driving_eta_sync"):
-            driving = client.driving_eta_sync([points[0], points[-1]])
+            driving = client.driving_eta_sync([request_points[0], request_points[-1]])
         else:
             driving = {"ok": False, "reason": "missing_plan_segment_sync"}
         if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
@@ -3457,7 +3897,8 @@ class CoreDispatcher:
                 "distance_m": grasped["distance_m"],
                 "duration_sec": driving.get("duration_sec"),
                 "traffic_status": driving.get("traffic_status"),
-                "request_points": 2,
+                "request_points": len(request_points),
+                "request_point_source": "order_original_coord" if segment.get("amap_request_points") else "astar_path",
                 "waypoint_count": driving.get("waypoint_count", 0),
                 "cached": driving.get("cached"),
                 "error": None,

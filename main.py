@@ -112,8 +112,17 @@ app = create_app()
 if __name__ == "__main__":
     print("调度系统后端节点启动初始化中...")
     try:
-        state.init_system()
-        print(f"[系统] 路网加载完成：{len(state.city.nodes_map)} 节点，{len(state.city.pois)} POI")
+        init_result = state.init_system()
+        if init_result.get("status") != "initialized":
+            raise RuntimeError(init_result.get("message") or init_result.get("status"))
+        loaded_area_count = len(state.city_maps or {})
+        nodes_count = sum(len(city_map.nodes_map) for city_map in (state.city_maps or {}).values())
+        pois_count = sum(len(city_map.pois) for city_map in (state.city_maps or {}).values())
+        if not nodes_count:
+            nodes_count = int(init_result.get("nodes") or 0)
+        if not pois_count:
+            pois_count = int(init_result.get("pois") or 0)
+        print(f"[系统] 路网加载完成：{loaded_area_count} 个运营区，{nodes_count} 节点，{pois_count} POI")
         print("[系统] 后台统筹派单引擎、真实时间时钟、路线纠偏与订单 ETA 刷新线程已启动。")
     except Exception as e:
         print(f"[警告] 自动初始化失败: {e}")

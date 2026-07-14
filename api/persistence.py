@@ -203,6 +203,7 @@ def _forecast_order_from_row(row):
 
     return {
         "request_id": str(request_id),
+        "operation_area_id": _int_or_none(row.get("operation_area_id")),
         "request_time": row.get("request_time") or row.get("completion_time"),
         "status": row.get("status"),
         "passenger_count": _int_or_none(row.get("passenger_count")) or 1,
@@ -505,10 +506,11 @@ class MySqlPersistence:
         self._connection = None
         self._lock = threading.Lock()
         self._restriction_memory = {}
-        self._restriction_memory_active = None
+        self._restriction_memory_active_by_area = {}
         self._driver_memory = {}
         self._vehicle_memory = {}
         self._vehicle_bind_memory = []
+        self._operation_area_memory = {}
 
     @classmethod
     def from_env(cls):
@@ -589,7 +591,7 @@ class MySqlPersistence:
         kwargs.update(self._ssl_connect_kwargs())
         return kwargs
 
-    def fetch_completed_orders_for_forecast(self, limit=None):
+    def fetch_completed_orders_for_forecast(self, limit=None, operation_area_id=None):
         """读取 bus_order 中已完成订单，供 OD 热点预测使用。
 
         该读取使用独立短连接，避免和异步写库线程共享连接。status 同时兼容
@@ -612,13 +614,26 @@ class MySqlPersistence:
         if limit <= 0:
             return []
 
+        area_id = _int_or_none(operation_area_id)
         connection = None
         try:
             connection = pymysql.connect(**self._connect_kwargs(autocommit=True))
             with connection.cursor() as cursor:
-                cursor.execute("""
+                conditions = [
+                    "tenant_id = %s",
+                    "deleted = 0",
+                    "LOWER(status) IN ('completed', 'complete')",
+                ]
+                params = [self.tenant_id]
+                if area_id is not None:
+                    conditions.append("operation_area_id = %s")
+                    params.append(area_id)
+                where_sql = " AND ".join(conditions)
+                params.append(limit)
+                cursor.execute(f"""
                     SELECT
                         request_id,
+                        operation_area_id,
                         passenger_count,
                         status,
                         origin_lon,
@@ -633,24 +648,30 @@ class MySqlPersistence:
                         completion_time,
                         route_distance_m
                     FROM bus_order
-                    WHERE tenant_id = %s
-                      AND deleted = 0
-                      AND LOWER(status) IN ('completed', 'complete')
+                    WHERE {where_sql}
                     ORDER BY COALESCE(completion_time, request_time) DESC
                     LIMIT %s
-                """, (self.tenant_id, limit))
+                """, tuple(params))
                 rows = cursor.fetchall()
                 status_groups = []
                 if not rows:
-                    cursor.execute("""
+                    group_conditions = [
+                        "LOWER(status) IN ('completed', 'complete')",
+                        "request_id NOT LIKE 'mock-completed-%%'",
+                    ]
+                    group_params = []
+                    if area_id is not None:
+                        group_conditions.append("operation_area_id = %s")
+                        group_params.append(area_id)
+                    group_where_sql = " AND ".join(group_conditions)
+                    cursor.execute(f"""
                         SELECT tenant_id, status, deleted, COUNT(*) AS count
                         FROM bus_order
-                        WHERE LOWER(status) IN ('completed', 'complete')
-                          AND request_id NOT LIKE 'mock-completed-%%'
+                        WHERE {group_where_sql}
                         GROUP BY tenant_id, status, deleted
                         ORDER BY count DESC
                         LIMIT 10
-                    """)
+                    """, tuple(group_params))
                     status_groups = cursor.fetchall()
         except Exception as exc:  # pragma: no cover - depends on local MySQL.
             self.last_error = f"forecast_history_read_failed: {exc}"
@@ -660,6 +681,7 @@ class MySqlPersistence:
                 "error": str(exc),
                 "database": self.database,
                 "tenant_id": self.tenant_id,
+                "operation_area_id": area_id,
             }
             return []
         finally:
@@ -678,6 +700,7 @@ class MySqlPersistence:
             "ok": True,
             "database": self.database,
             "tenant_id": self.tenant_id,
+            "operation_area_id": area_id,
             "limit": limit,
             "matched_row_count": len(rows or []),
             "usable_order_count": len(orders),
@@ -820,6 +843,7 @@ class MySqlPersistence:
             "policy_code": row.get("policy_code"),
             "policy_name": row.get("policy_name"),
             "description": row.get("description"),
+            "operation_area_id": row.get("operation_area_id"),
             "polygons": polygons or [],
             "polygons_json": polygons or [],
             "amap_avoidpolygons": row.get("amap_avoidpolygons") or "",
@@ -910,6 +934,11 @@ class MySqlPersistence:
             ),
             "operation_status": row.get("operation_status") or "offline",
             "operation_mode": row.get("operation_mode") or "dynamic_bus",
+            "operation_area_id": row.get("operation_area_id"),
+            "operation_area_code": row.get("operation_area_code"),
+            "operation_area_name": row.get("operation_area_name"),
+            "operation_area_org_code": row.get("operation_area_org_code"),
+            "operation_area_org_name": row.get("operation_area_org_name"),
             "current_driver_code": row.get("current_driver_code"),
             "current_driver_no": row.get("current_driver_no"),
             "current_driver_name": row.get("current_driver_name"),
@@ -1149,7 +1178,7 @@ class MySqlPersistence:
                 connection.close()
 
     def get_active_operation_restriction_policy(self):
-        """读取当前全局生效的运营禁区策略。"""
+        """旧版全局读取入口，已由后续同名方法覆盖。"""
         if not self.enabled or pymysql is None:
             if not self._restriction_memory_active:
                 return None
@@ -1174,7 +1203,7 @@ class MySqlPersistence:
                 connection.close()
 
     def set_active_operation_restriction_policy(self, policy_identity):
-        """设置当前全局禁区策略；传入 None 表示关闭禁区。"""
+        """旧版全局设置入口，已由后续同名方法覆盖。"""
         policy_identity = str(policy_identity).strip() if policy_identity not in (None, "") else None
         if not self.enabled or pymysql is None:
             if policy_identity is None:
@@ -1226,6 +1255,1083 @@ class MySqlPersistence:
             if connection is not None:
                 connection.close()
         return self.get_active_operation_restriction_policy()
+
+    def _memory_operation_area_exists(self, operation_area_id):
+        """内存模式下校验运营区是否存在。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            return False
+        if not self._operation_area_memory:
+            return True
+        for area in self._operation_area_memory.values():
+            if (
+                _int_or_none(area.get("area_id")) == area_id
+                and not int(area.get("deleted") or 0)
+                and not int(area.get("is_deleted") or 0)
+            ):
+                return True
+        return False
+
+    def _db_operation_area_exists(self, cursor, operation_area_id):
+        """数据库模式下校验运营区 area_id 是否存在。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            return False
+        cursor.execute("""
+            SELECT id
+            FROM map_operation_area
+            WHERE tenant_id=%s AND area_id=%s AND deleted=0 AND is_deleted=0
+            LIMIT 1
+        """, (self.tenant_id, area_id))
+        return cursor.fetchone() is not None
+
+    def _memory_policy_list(self, operation_area_id=None):
+        """读取内存兜底模式下的禁区策略列表。"""
+        area_filter = _int_or_none(operation_area_id)
+        policies = []
+        for policy in self._restriction_memory.values():
+            policy_area_id = _int_or_none(policy.get("operation_area_id"))
+            if area_filter is not None and policy_area_id != area_filter:
+                continue
+            item = copy.deepcopy(policy)
+            item["operation_area_id"] = policy_area_id
+            item["is_active"] = bool(
+                policy_area_id is not None
+                and item.get("policy_name") == self._restriction_memory_active_by_area.get(policy_area_id)
+            )
+            policies.append(item)
+        return sorted(
+            policies,
+            key=lambda item: (
+                not item.get("is_active"),
+                item.get("operation_area_id") is None,
+                item.get("operation_area_id") or 0,
+                item.get("policy_name") or "",
+            ),
+        )
+
+    def _memory_policy_by_identity(self, policy_identity, operation_area_id=None):
+        """内存兜底模式下按名称优先、编号次之查找禁区策略。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return None
+        area_filter = _int_or_none(operation_area_id)
+        policy = self._restriction_memory.get(policy_identity)
+        if policy is not None and (
+            area_filter is None or _int_or_none(policy.get("operation_area_id")) == area_filter
+        ):
+            return policy
+        matches = [
+            item
+            for item in self._restriction_memory.values()
+            if str(item.get("policy_code") or "").strip() == policy_identity
+            and (area_filter is None or _int_or_none(item.get("operation_area_id")) == area_filter)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def list_operation_restriction_policies(self, operation_area_id=None):
+        """读取未软删除的运营禁区策略，可按运营区过滤。"""
+        if not self.enabled or pymysql is None:
+            return self._memory_policy_list(operation_area_id=operation_area_id)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                area_id = _int_or_none(operation_area_id)
+                where_sql = "tenant_id=%s AND deleted=0"
+                params = [self.tenant_id]
+                if area_id is not None:
+                    where_sql += " AND operation_area_id=%s"
+                    params.append(area_id)
+                cursor.execute(f"""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE {where_sql}
+                    ORDER BY is_active DESC, operation_area_id ASC, updated_at DESC, id DESC
+                """, tuple(params))
+                return [self._policy_from_row(row) for row in cursor.fetchall()]
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_list_failed: {exc}"
+            return self._memory_policy_list(operation_area_id=operation_area_id)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_operation_restriction_policy(self, policy_identity, operation_area_id=None):
+        """按策略名称优先读取运营禁区策略，编号仅作兼容查询。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return None
+        if not self.enabled or pymysql is None:
+            policy = self._memory_policy_by_identity(policy_identity, operation_area_id=operation_area_id)
+            if not policy:
+                return None
+            result = copy.deepcopy(policy)
+            area_id = _int_or_none(result.get("operation_area_id"))
+            result["is_active"] = bool(
+                area_id is not None
+                and result.get("policy_name") == self._restriction_memory_active_by_area.get(area_id)
+            )
+            return result
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                area_id = _int_or_none(operation_area_id)
+                name_where = "tenant_id=%s AND policy_name=%s AND deleted=0"
+                name_params = [self.tenant_id, policy_identity]
+                if area_id is not None:
+                    name_where += " AND operation_area_id=%s"
+                    name_params.append(area_id)
+                cursor.execute(f"""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE {name_where}
+                    LIMIT 1
+                """, tuple(name_params))
+                row = cursor.fetchone()
+                if row is None:
+                    code_where = "tenant_id=%s AND policy_code=%s AND deleted=0"
+                    code_params = [self.tenant_id, policy_identity]
+                    if area_id is not None:
+                        code_where += " AND operation_area_id=%s"
+                        code_params.append(area_id)
+                    cursor.execute(f"""
+                        SELECT *
+                        FROM bus_operation_restriction_policy
+                        WHERE {code_where}
+                        ORDER BY updated_at DESC, id DESC
+                        LIMIT 2
+                    """, tuple(code_params))
+                    rows = cursor.fetchall()
+                    if len(rows) > 1:
+                        self.last_error = f"operation_restriction_policy_code_ambiguous:{policy_identity}"
+                        return None
+                    row = rows[0] if rows else None
+                return self._policy_from_row(row)
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_get_failed: {exc}"
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_operation_restriction_policy(self, policy):
+        """同步写入或更新某个运营区的禁区策略。"""
+        payload = copy.deepcopy(policy or {})
+        policy_code = str(payload.get("policy_code") or "").strip()
+        policy_name = str(payload.get("policy_name") or "").strip()
+        operation_area_id = _int_or_none(payload.get("operation_area_id"))
+        if not policy_code:
+            raise ValueError("policy_code 不能为空")
+        if not policy_name:
+            raise ValueError("policy_name 不能为空")
+        if operation_area_id is None:
+            raise ValueError("operation_area_id 不能为空")
+        policy_status = payload.get("status") or "enabled"
+        active_requested = bool(payload.get("is_active")) and policy_status == "enabled"
+        if not self.enabled or pymysql is None:
+            if not self._memory_operation_area_exists(operation_area_id):
+                raise ValueError("operation_area_id 对应的运营区不存在")
+            payload["tenant_id"] = self.tenant_id
+            payload["operation_area_id"] = operation_area_id
+            payload["is_active"] = bool(active_requested or (
+                policy_name == self._restriction_memory_active_by_area.get(operation_area_id)
+                and policy_status == "enabled"
+            ))
+            self._restriction_memory[policy_name] = payload
+            if payload.get("is_active"):
+                self._restriction_memory_active_by_area[operation_area_id] = policy_name
+            elif self._restriction_memory_active_by_area.get(operation_area_id) == policy_name:
+                self._restriction_memory_active_by_area.pop(operation_area_id, None)
+            return self.get_operation_restriction_policy(policy_name, operation_area_id=operation_area_id)
+
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                if not self._db_operation_area_exists(cursor, operation_area_id):
+                    raise ValueError("operation_area_id 对应的运营区不存在")
+                cursor.execute("""
+                    SELECT id
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, policy_name))
+                existing = cursor.fetchone()
+                values = (
+                    policy_code,
+                    policy_name,
+                    payload.get("description"),
+                    operation_area_id,
+                    _json(payload.get("polygons") or payload.get("polygons_json") or []),
+                    payload.get("amap_avoidpolygons") or "",
+                    payload.get("polygon_count") or 0,
+                    payload.get("vertex_count") or 0,
+                    payload.get("total_area_km2") or 0.0,
+                    policy_status,
+                )
+                if existing:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET policy_code=%s,
+                            policy_name=%s,
+                            description=%s,
+                            operation_area_id=%s,
+                            polygons_json=%s,
+                            amap_avoidpolygons=%s,
+                            polygon_count=%s,
+                            vertex_count=%s,
+                            total_area_km2=%s,
+                            status=%s,
+                            updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND id=%s AND deleted=0
+                    """, values + (self.tenant_id, existing["id"]))
+                else:
+                    cursor.execute("""
+                        INSERT INTO bus_operation_restriction_policy
+                            (policy_code, policy_name, description, operation_area_id, polygons_json,
+                             amap_avoidpolygons, polygon_count, vertex_count, total_area_km2,
+                             status, is_active, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s)
+                    """, values + (self.tenant_id,))
+                if policy_status != "enabled":
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                    """, (self.tenant_id, policy_name))
+                if active_requested:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND operation_area_id=%s AND deleted=0
+                    """, (self.tenant_id, operation_area_id))
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=1, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND policy_name=%s AND operation_area_id=%s AND deleted=0
+                    """, (self.tenant_id, policy_name, operation_area_id))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_operation_restriction_policy(policy_name, operation_area_id=operation_area_id)
+
+    def delete_operation_restriction_policy(self, policy_identity):
+        """软删除运营禁区策略。"""
+        policy_identity = str(policy_identity or "").strip()
+        if not policy_identity:
+            return False
+        if not self.enabled or pymysql is None:
+            policy = self._memory_policy_by_identity(policy_identity)
+            if not policy:
+                return False
+            policy_name = policy.get("policy_name")
+            area_id = _int_or_none(policy.get("operation_area_id"))
+            self._restriction_memory.pop(policy_name, None)
+            if self._restriction_memory_active_by_area.get(area_id) == policy_name:
+                self._restriction_memory_active_by_area.pop(area_id, None)
+            return True
+        policy = self.get_operation_restriction_policy(policy_identity)
+        if not policy:
+            return False
+        policy_name = policy.get("policy_name")
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                affected = cursor.execute("""
+                    UPDATE bus_operation_restriction_policy
+                    SET deleted=1, is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND policy_name=%s AND deleted=0
+                """, (self.tenant_id, policy_name))
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_active_operation_restriction_policy(self, operation_area_id=None):
+        """按运营区读取当前生效的运营禁区策略。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            return None
+        if not self.enabled or pymysql is None:
+            active_name = self._restriction_memory_active_by_area.get(area_id)
+            if not active_name:
+                return None
+            return self.get_operation_restriction_policy(active_name, operation_area_id=area_id)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_operation_restriction_policy
+                    WHERE tenant_id=%s
+                      AND operation_area_id=%s
+                      AND deleted=0
+                      AND status='enabled'
+                      AND is_active=1
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                """, (self.tenant_id, area_id))
+                return self._policy_from_row(cursor.fetchone())
+        except Exception as exc:  # pragma: no cover - depends on local MySQL.
+            self.last_error = f"operation_restriction_active_read_failed: {exc}"
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def set_active_operation_restriction_policy(self, policy_identity, operation_area_id=None):
+        """设置指定运营区当前生效禁区策略；传入 None 表示关闭该区禁区。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id 不能为空")
+        policy_identity = str(policy_identity).strip() if policy_identity not in (None, "") else None
+        if not self.enabled or pymysql is None:
+            if policy_identity is None:
+                self._restriction_memory_active_by_area.pop(area_id, None)
+                return None
+            policy = self._memory_policy_by_identity(policy_identity, operation_area_id=area_id)
+            if not policy or policy.get("status") != "enabled":
+                return None
+            self._restriction_memory_active_by_area[area_id] = policy.get("policy_name")
+            return self.get_operation_restriction_policy(policy.get("policy_name"), operation_area_id=area_id)
+
+        target_policy = (
+            self.get_operation_restriction_policy(policy_identity, operation_area_id=area_id)
+            if policy_identity is not None
+            else None
+        )
+        if policy_identity is not None and (
+            not target_policy or target_policy.get("status") != "enabled"
+        ):
+            return None
+        policy_name = target_policy.get("policy_name") if target_policy else None
+
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                if not self._db_operation_area_exists(cursor, area_id):
+                    raise ValueError("operation_area_id 对应的运营区不存在")
+                cursor.execute("""
+                    UPDATE bus_operation_restriction_policy
+                    SET is_active=0, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND operation_area_id=%s AND deleted=0
+                """, (self.tenant_id, area_id))
+                if policy_name is not None:
+                    cursor.execute("""
+                        UPDATE bus_operation_restriction_policy
+                        SET is_active=1, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s
+                          AND policy_name=%s
+                          AND operation_area_id=%s
+                          AND deleted=0
+                          AND status='enabled'
+                    """, (self.tenant_id, policy_name, area_id))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        return self.get_active_operation_restriction_policy(operation_area_id=area_id)
+
+    def _operation_area_from_row(self, row):
+        """把运营区数据库行转换为接口可返回的字典。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        result["country_code"] = result.get("county_code")
+        result["country_name"] = result.get("county_name")
+        return result
+
+    def list_operation_areas(self, include_deleted=False):
+        """读取运营区列表。"""
+        if not self.enabled or pymysql is None:
+            areas = [copy.deepcopy(area) for area in self._operation_area_memory.values()]
+            if not include_deleted:
+                areas = [
+                    area for area in areas
+                    if not int(area.get("deleted") or 0) and not int(area.get("is_deleted") or 0)
+                ]
+            return sorted(areas, key=lambda item: (item.get("id") or 0, item.get("code") or ""))
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                condition = "" if include_deleted else "AND deleted=0 AND is_deleted=0"
+                cursor.execute(f"""
+                    SELECT *
+                    FROM map_operation_area
+                    WHERE tenant_id=%s {condition}
+                    ORDER BY id ASC
+                """, (self.tenant_id,))
+                return [self._operation_area_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_startup_operation_areas(self):
+        """读取系统初始化时需要加载的生效运营区。"""
+        if not self.enabled or pymysql is None:
+            return [
+                area for area in self.list_operation_areas()
+                if area.get("status") == "enabled"
+                and area.get("audit_status") == "approved"
+                and int(area.get("load_on_startup") or 0) == 1
+                and area.get("shp_path")
+            ]
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM map_operation_area
+                    WHERE tenant_id=%s
+                      AND deleted=0
+                      AND is_deleted=0
+                      AND status='enabled'
+                      AND audit_status='approved'
+                      AND load_on_startup=1
+                      AND shp_path IS NOT NULL
+                      AND shp_path<>''
+                    ORDER BY id ASC
+                """, (self.tenant_id,))
+                return [self._operation_area_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_operation_area(self, area_code):
+        """按运营区编码读取运营区。"""
+        area_code = str(area_code or "").strip()
+        if not area_code:
+            return None
+        if not self.enabled or pymysql is None:
+            area = self._operation_area_memory.get(area_code)
+            if not area or int(area.get("deleted") or 0) or int(area.get("is_deleted") or 0):
+                return None
+            return copy.deepcopy(area)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM map_operation_area
+                    WHERE tenant_id=%s AND code=%s AND deleted=0 AND is_deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, area_code))
+                return self._operation_area_from_row(cursor.fetchone())
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_operation_area_by_area_id(self, area_id):
+        """按运营区业务 area_id 读取运营区。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return None
+        if not self.enabled or pymysql is None:
+            for area in self._operation_area_memory.values():
+                if (
+                    _int_or_none(area.get("area_id")) == operation_area_id
+                    and not int(area.get("deleted") or 0)
+                    and not int(area.get("is_deleted") or 0)
+                ):
+                    return copy.deepcopy(area)
+            return None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM map_operation_area
+                    WHERE tenant_id=%s AND area_id=%s AND deleted=0 AND is_deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_id))
+                return self._operation_area_from_row(cursor.fetchone())
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_operation_area(self, area, *, create=False):
+        """创建或更新运营区。"""
+        payload = copy.deepcopy(area or {})
+        code = str(payload.get("code") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not code:
+            raise ValueError("code 不能为空")
+        if not name:
+            raise ValueError("name 不能为空")
+        normalized = {
+            "area_id": _int_or_none(payload.get("area_id")),
+            "org_id": _int_or_none(payload.get("org_id")),
+            "dept_id": _int_or_none(payload.get("dept_id")),
+            "org_code": str(payload.get("org_code") or "").strip() or None,
+            "org_name": str(payload.get("org_name") or "").strip() or None,
+            "name": name,
+            "code": code,
+            "type": str(payload.get("type") or "").strip() or None,
+            "status": str(payload.get("status") or "pending").strip(),
+            "area_control": payload.get("area_control"),
+            "area_type": str(payload.get("area_type") or "").strip() or None,
+            "city_code": str(payload.get("city_code") or "").strip() or None,
+            "city_name": str(payload.get("city_name") or "").strip() or None,
+            "county_code": str(payload.get("county_code") or payload.get("country_code") or "").strip() or None,
+            "county_name": str(payload.get("county_name") or payload.get("country_name") or "").strip() or None,
+            "area_shape": str(payload.get("area_shape") or "").strip() or None,
+            "area_points": payload.get("area_points"),
+            "area_polygon": payload.get("area_polygon"),
+            "area_center": payload.get("area_center"),
+            "area_radius": payload.get("area_radius"),
+            "area_area": payload.get("area_area"),
+            "nearest_station_distance": _int_or_none(payload.get("nearest_station_distance")),
+            "surrounding_station_distance": _int_or_none(payload.get("surrounding_station_distance")),
+            "max_return_stops": _int_or_none(payload.get("max_return_stops")),
+            "time_rule": str(payload.get("time_rule") or "").strip() or None,
+            "start_time": str(payload.get("start_time") or "").strip() or None,
+            "end_time": str(payload.get("end_time") or "").strip() or None,
+            "audit_status": str(payload.get("audit_status") or "pending").strip(),
+            "is_deleted": 1 if payload.get("is_deleted") else 0,
+            "source_create_time": _to_datetime(payload.get("source_create_time")),
+            "shp_path": str(payload.get("shp_path") or "").strip() or None,
+            "shp_name": str(payload.get("shp_name") or "").strip() or None,
+            "shp_version": str(payload.get("shp_version") or "").strip() or None,
+            "shp_hash": str(payload.get("shp_hash") or "").strip() or None,
+            "shp_encoding": str(payload.get("shp_encoding") or "utf-8").strip() or "utf-8",
+            "coord_system": str(payload.get("coord_system") or "gcj02").strip() or "gcj02",
+            "load_on_startup": 1 if payload.get("load_on_startup", 1) in (1, "1", True, "true", "on", "yes") else 0,
+            "load_status": str(payload.get("load_status") or "pending").strip(),
+            "load_error": payload.get("load_error"),
+        }
+        if not self.enabled or pymysql is None:
+            existing = self._operation_area_memory.get(code)
+            existing_by_area_id = (
+                self.get_operation_area_by_area_id(normalized["area_id"])
+                if normalized["area_id"] is not None
+                else None
+            )
+            if create and existing and not int(existing.get("deleted") or 0):
+                raise PersistenceConflict("运营区编码已存在", code="operation_area_code_exists", field="code")
+            if create and existing_by_area_id:
+                raise PersistenceConflict("运营区 area_id 已存在", code="operation_area_id_exists", field="area_id")
+            if not create:
+                if existing_by_area_id is None:
+                    return None
+                previous_code = str(existing_by_area_id.get("code") or "").strip()
+                if previous_code and previous_code != code:
+                    conflict = self._operation_area_memory.get(code)
+                    if conflict and not int(conflict.get("deleted") or 0):
+                        raise PersistenceConflict("杩愯惀鍖虹紪鐮佸凡瀛樺湪", code="operation_area_code_exists", field="code")
+                    self._operation_area_memory.pop(previous_code, None)
+                existing = existing_by_area_id
+            normalized["id"] = existing.get("id") if existing else len(self._operation_area_memory) + 1
+            normalized["tenant_id"] = self.tenant_id
+            normalized["deleted"] = 0
+            self._operation_area_memory[code] = normalized
+            return copy.deepcopy(normalized)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id
+                    FROM map_operation_area
+                    WHERE tenant_id=%s AND code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, code))
+                existing = cursor.fetchone()
+                existing_by_area_id = None
+                if normalized["area_id"] is not None:
+                    cursor.execute("""
+                        SELECT id, area_id, code
+                        FROM map_operation_area
+                        WHERE tenant_id=%s AND area_id=%s AND deleted=0
+                        LIMIT 1
+                    """, (self.tenant_id, normalized["area_id"]))
+                    existing_by_area_id = cursor.fetchone()
+                if create and existing is not None:
+                    raise PersistenceConflict("运营区编码已存在", code="operation_area_code_exists", field="code")
+                if create and existing_by_area_id is not None:
+                    raise PersistenceConflict("运营区 area_id 已存在", code="operation_area_id_exists", field="area_id")
+                if create:
+                    cursor.execute("""
+                        INSERT INTO map_operation_area
+                            (area_id, org_id, dept_id, org_code, org_name, name, code, type, status,
+                             area_control, area_type, city_code, city_name, county_code, county_name,
+                             area_shape, area_points, area_polygon, area_center, area_radius, area_area,
+                             nearest_station_distance, surrounding_station_distance, max_return_stops,
+                             time_rule, start_time, end_time, audit_status, is_deleted, source_create_time,
+                             shp_path, shp_name, shp_version, shp_hash, shp_encoding, coord_system,
+                             load_on_startup, load_status, load_error, tenant_id)
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        normalized["area_id"], normalized["org_id"], normalized["dept_id"],
+                        normalized["org_code"], normalized["org_name"], normalized["name"], normalized["code"],
+                        normalized["type"], normalized["status"], normalized["area_control"], normalized["area_type"],
+                        normalized["city_code"], normalized["city_name"], normalized["county_code"],
+                        normalized["county_name"], normalized["area_shape"], normalized["area_points"],
+                        normalized["area_polygon"], normalized["area_center"], normalized["area_radius"],
+                        normalized["area_area"], normalized["nearest_station_distance"],
+                        normalized["surrounding_station_distance"], normalized["max_return_stops"],
+                        normalized["time_rule"], normalized["start_time"], normalized["end_time"],
+                        normalized["audit_status"], normalized["is_deleted"], normalized["source_create_time"],
+                        normalized["shp_path"], normalized["shp_name"], normalized["shp_version"],
+                        normalized["shp_hash"], normalized["shp_encoding"], normalized["coord_system"],
+                        normalized["load_on_startup"], normalized["load_status"], normalized["load_error"],
+                        self.tenant_id,
+                    ))
+                else:
+                    if existing_by_area_id is None:
+                        connection.rollback()
+                        return None
+                    if existing is not None and int(existing.get("id") or 0) != int(existing_by_area_id.get("id") or 0):
+                        raise PersistenceConflict("杩愯惀鍖虹紪鐮佸凡瀛樺湪", code="operation_area_code_exists", field="code")
+                    cursor.execute("""
+                        UPDATE map_operation_area
+                        SET org_id=%s, dept_id=%s, org_code=%s, org_name=%s,
+                            name=%s, code=%s, type=%s, status=%s, area_control=%s, area_type=%s,
+                            city_code=%s, city_name=%s, county_code=%s, county_name=%s,
+                            area_shape=%s, area_points=%s, area_polygon=%s, area_center=%s,
+                            area_radius=%s, area_area=%s, nearest_station_distance=%s,
+                            surrounding_station_distance=%s, max_return_stops=%s, time_rule=%s,
+                            start_time=%s, end_time=%s, audit_status=%s, is_deleted=%s,
+                            source_create_time=%s, shp_path=%s, shp_name=%s, shp_version=%s,
+                            shp_hash=%s, shp_encoding=%s, coord_system=%s, load_on_startup=%s,
+                            load_status=%s, load_error=%s, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND area_id=%s AND deleted=0
+                    """, (
+                        normalized["org_id"], normalized["dept_id"],
+                        normalized["org_code"], normalized["org_name"], normalized["name"],
+                        normalized["code"], normalized["type"], normalized["status"], normalized["area_control"],
+                        normalized["area_type"], normalized["city_code"], normalized["city_name"],
+                        normalized["county_code"], normalized["county_name"], normalized["area_shape"],
+                        normalized["area_points"], normalized["area_polygon"], normalized["area_center"],
+                        normalized["area_radius"], normalized["area_area"], normalized["nearest_station_distance"],
+                        normalized["surrounding_station_distance"], normalized["max_return_stops"],
+                        normalized["time_rule"], normalized["start_time"], normalized["end_time"],
+                        normalized["audit_status"], normalized["is_deleted"], normalized["source_create_time"],
+                        normalized["shp_path"], normalized["shp_name"], normalized["shp_version"],
+                        normalized["shp_hash"], normalized["shp_encoding"], normalized["coord_system"],
+                        normalized["load_on_startup"], normalized["load_status"], normalized["load_error"],
+                        self.tenant_id, normalized["area_id"],
+                    ))
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+        if create:
+            return self.get_operation_area(code)
+        return self.get_operation_area_by_area_id(normalized["area_id"])
+
+    def delete_operation_area(self, area_code):
+        """软删除运营区。"""
+        area_code = str(area_code or "").strip()
+        if not area_code:
+            return False
+        if not self.enabled or pymysql is None:
+            area = self._operation_area_memory.get(area_code)
+            if not area:
+                return False
+            area["deleted"] = 1
+            area["is_deleted"] = 1
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE map_operation_area
+                    SET deleted=1, is_deleted=1, load_status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND code=%s AND deleted=0
+                """, (self.tenant_id, area_code))
+                affected = cursor.rowcount
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def delete_operation_area_by_area_id(self, area_id):
+        """按运营区业务 area_id 软删除运营区。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return False
+        if not self.enabled or pymysql is None:
+            area = self.get_operation_area_by_area_id(operation_area_id)
+            if not area:
+                return False
+            code = str(area.get("code") or "").strip()
+            if code not in self._operation_area_memory:
+                return False
+            self._operation_area_memory[code]["deleted"] = 1
+            self._operation_area_memory[code]["is_deleted"] = 1
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE map_operation_area
+                    SET deleted=1, is_deleted=1, load_status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND area_id=%s AND deleted=0
+                """, (self.tenant_id, operation_area_id))
+                affected = cursor.rowcount
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def hard_delete_operation_area_by_area_id(self, area_id):
+        """按运营区业务 area_id 物理删除运营区，用于新增失败回滚。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return False
+        if not self.enabled or pymysql is None:
+            area = self.get_operation_area_by_area_id(operation_area_id)
+            if not area:
+                return False
+            code = str(area.get("code") or "").strip()
+            return self._operation_area_memory.pop(code, None) is not None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM map_operation_area
+                    WHERE tenant_id=%s AND area_id=%s
+                """, (self.tenant_id, operation_area_id))
+                affected = cursor.rowcount
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def record_operation_area_load_result(self, area_code, result):
+        """写回运营区 SHP 加载结果。"""
+        area_code = str(area_code or "").strip()
+        if not area_code:
+            return False
+        payload = copy.deepcopy(result or {})
+        if not self.enabled or pymysql is None:
+            area = self._operation_area_memory.get(area_code)
+            if not area:
+                return False
+            area.update(payload)
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE map_operation_area
+                    SET load_status=%s, load_error=%s, node_count=%s, edge_count=%s,
+                        poi_count=%s, bounds_json=%s,
+                        shp_encoding=COALESCE(NULLIF(%s, ''), shp_encoding),
+                        last_loaded_at=CURRENT_TIMESTAMP(3),
+                        updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND code=%s AND deleted=0
+                """, (
+                    payload.get("load_status") or "pending",
+                    payload.get("load_error"),
+                    payload.get("node_count"),
+                    payload.get("edge_count"),
+                    payload.get("poi_count"),
+                    _json(payload.get("bounds_json")),
+                    str(payload.get("shp_encoding") or "").strip(),
+                    self.tenant_id,
+                    area_code,
+                ))
+            connection.commit()
+            return True
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def record_operation_area_load_result_by_area_id(self, area_id, result):
+        """按运营区业务 area_id 写回 SHP 加载结果。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return False
+        payload = copy.deepcopy(result or {})
+        if not self.enabled or pymysql is None:
+            area = self.get_operation_area_by_area_id(operation_area_id)
+            if not area:
+                return False
+            code = str(area.get("code") or "").strip()
+            if code not in self._operation_area_memory:
+                return False
+            self._operation_area_memory[code].update(payload)
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE map_operation_area
+                    SET load_status=%s, load_error=%s, node_count=%s, edge_count=%s,
+                        poi_count=%s, bounds_json=%s,
+                        shp_encoding=COALESCE(NULLIF(%s, ''), shp_encoding),
+                        last_loaded_at=CURRENT_TIMESTAMP(3),
+                        updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND area_id=%s AND deleted=0
+                """, (
+                    payload.get("load_status") or "pending",
+                    payload.get("load_error"),
+                    payload.get("node_count"),
+                    payload.get("edge_count"),
+                    payload.get("poi_count"),
+                    _json(payload.get("bounds_json")),
+                    str(payload.get("shp_encoding") or "").strip(),
+                    self.tenant_id,
+                    operation_area_id,
+                ))
+            connection.commit()
+            return True
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_pois(self, operation_area_id=None, operation_area_ids=None):
+        """按运营区 ID 读取站点 POI。"""
+        area_ids = []
+        if operation_area_ids:
+            for item in operation_area_ids:
+                value = _int_or_none(item)
+                if value is not None and value not in area_ids:
+                    area_ids.append(value)
+        value = _int_or_none(operation_area_id)
+        if value is not None and value not in area_ids:
+            area_ids.append(value)
+        if not self.enabled or pymysql is None:
+            return []
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                if area_ids:
+                    placeholders = ",".join(["%s"] * len(area_ids))
+                    cursor.execute("""
+                        SELECT *
+                        FROM map_poi
+                        WHERE tenant_id=%s AND deleted=0 AND status='enabled'
+                          AND operation_area_id IN ({placeholders})
+                        ORDER BY id ASC
+                    """.format(placeholders=placeholders), tuple([self.tenant_id] + area_ids))
+                else:
+                    cursor.execute("""
+                        SELECT *
+                        FROM map_poi
+                        WHERE tenant_id=%s AND deleted=0 AND status='enabled'
+                        ORDER BY id ASC
+                    """, (self.tenant_id,))
+                return [{key: _api_value(value) for key, value in row.items()} for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _station_from_row(self, row):
+        """将 map_poi 行转换为站点接口返回结构。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        result["station_name"] = result.get("poi_name")
+        result["lon"] = result.get("longitude")
+        result["lat"] = result.get("latitude")
+        return result
+
+    def _station_decimal_coordinate(self, value):
+        """将站点经纬度规整到数据库 DECIMAL 小数精度。"""
+        return Decimal(str(value)).quantize(Decimal("0.00000001"))
+
+    def _fetch_operation_area_for_station_sync(self, cursor, operation_area_id):
+        """按运营区业务 area_id 读取站点所属运营区。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id_required")
+        cursor.execute("""
+            SELECT area_id, code
+            FROM map_operation_area
+            WHERE tenant_id=%s AND area_id=%s AND deleted=0 AND is_deleted=0
+            LIMIT 1
+        """, (self.tenant_id, area_id))
+        area = cursor.fetchone()
+        if area is None:
+            raise KeyError("operation_area_not_found")
+        return area
+
+    def create_station(self, station):
+        """创建单个站点 POI。"""
+        if not self.enabled or pymysql is None:
+            raise PersistenceUnavailable("database_unavailable")
+        payload = copy.deepcopy(station or {})
+        operation_area_id = _int_or_none(payload.get("operation_area_id"))
+        station_name = str(payload.get("station_name") or payload.get("poi_name") or "").strip()
+        lon = self._station_decimal_coordinate(payload.get("longitude", payload.get("lon", payload.get("lng"))))
+        lat = self._station_decimal_coordinate(payload.get("latitude", payload.get("lat")))
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                area = self._fetch_operation_area_for_station_sync(cursor, operation_area_id)
+                operation_area_code = str(area.get("code") or "").strip()
+                cursor.execute("""
+                    SELECT *
+                    FROM map_poi
+                    WHERE tenant_id=%s AND operation_area_id=%s AND longitude=%s AND latitude=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_id, lon, lat))
+                if cursor.fetchone():
+                    raise PersistenceConflict("同一运营区已有相同经纬度站点", code="station_coordinate_exists", field="lon,lat")
+                poi_code = str(payload.get("poi_code") or "").strip()
+                if not poi_code:
+                    lon_code = str(lon).replace("-", "m").replace(".", "_")
+                    lat_code = str(lat).replace("-", "m").replace(".", "_")
+                    poi_code = f"station_{operation_area_id}_{lon_code}_{lat_code}"
+                cursor.execute("""
+                    SELECT id
+                    FROM map_poi
+                    WHERE tenant_id=%s AND operation_area_code=%s AND poi_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_code, poi_code))
+                if cursor.fetchone():
+                    raise PersistenceConflict("同一运营区站点编号已存在", code="station_code_exists", field="poi_code")
+                cursor.execute("""
+                    INSERT INTO map_poi
+                        (operation_area_id, operation_area_code, station_id, poi_code, poi_name, poi_type,
+                         station_type, station_direction, direction_angle, longitude, latitude, zone,
+                         address, areas, dept_id, org_code, status, source_status, audit_status,
+                         source_create_time, tenant_id)
+                    VALUES
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    operation_area_id,
+                    operation_area_code,
+                    _int_or_none(payload.get("station_id")),
+                    poi_code,
+                    station_name,
+                    str(payload.get("poi_type") or "pickup_dropoff").strip(),
+                    str(payload.get("station_type") or "").strip() or None,
+                    str(payload.get("station_direction") or "").strip() or None,
+                    _int_or_none(payload.get("direction_angle")),
+                    lon,
+                    lat,
+                    str(payload.get("zone") or "").strip() or None,
+                    str(payload.get("address") or "").strip() or None,
+                    str(payload.get("areas") or "").strip() or None,
+                    _int_or_none(payload.get("dept_id")),
+                    str(payload.get("org_code") or "").strip() or None,
+                    str(payload.get("status") or "enabled").strip() or "enabled",
+                    str(payload.get("source_status") or "").strip() or None,
+                    str(payload.get("audit_status") or "").strip() or None,
+                    _to_datetime(payload.get("source_create_time")),
+                    self.tenant_id,
+                ))
+                station_id = cursor.lastrowid
+                cursor.execute("SELECT * FROM map_poi WHERE id=%s", (station_id,))
+                result = self._station_from_row(cursor.fetchone())
+            connection.commit()
+            return result
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def delete_station_by_coordinate(self, lon, lat, operation_area_id=None):
+        """按经纬度软删除单个站点 POI。"""
+        if not self.enabled or pymysql is None:
+            raise PersistenceUnavailable("database_unavailable")
+        lon_value = self._station_decimal_coordinate(lon)
+        lat_value = self._station_decimal_coordinate(lat)
+        area_id = _int_or_none(operation_area_id)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                where_sql = "tenant_id=%s AND longitude=%s AND latitude=%s AND deleted=0"
+                params = [self.tenant_id, lon_value, lat_value]
+                if area_id is not None:
+                    where_sql += " AND operation_area_id=%s"
+                    params.append(area_id)
+                cursor.execute(f"""
+                    SELECT *
+                    FROM map_poi
+                    WHERE {where_sql}
+                    ORDER BY id ASC
+                """, tuple(params))
+                matches = cursor.fetchall()
+                if not matches:
+                    return None
+                if len(matches) > 1:
+                    raise PersistenceConflict(
+                        "同一坐标匹配到多个站点",
+                        code="station_coordinate_ambiguous",
+                        field="lon,lat",
+                    )
+                station = self._station_from_row(matches[0])
+                cursor.execute("""
+                    UPDATE map_poi
+                    SET deleted=1, status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE id=%s AND tenant_id=%s
+                """, (matches[0]["id"], self.tenant_id))
+            connection.commit()
+            return station
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
 
     def list_drivers(self):
         """读取司机档案列表。
@@ -1472,6 +2578,10 @@ class MySqlPersistence:
             with connection.cursor() as cursor:
                 cursor.execute("""
                     SELECT v.*,
+                           oa.code AS operation_area_code,
+                           oa.name AS operation_area_name,
+                           oa.org_code AS operation_area_org_code,
+                           oa.org_name AS operation_area_org_name,
                            d.driver_code AS current_driver_code,
                            d.driver_no AS current_driver_no,
                            d.driver_name AS current_driver_name,
@@ -1479,6 +2589,11 @@ class MySqlPersistence:
                            r.segment_route AS runtime_segment_route,
                            r.edge_progress, r.rest_status, r.can_accept_order, r.reported_at
                     FROM bus_vehicle v
+                    LEFT JOIN map_operation_area oa
+                      ON oa.tenant_id=v.tenant_id
+                     AND oa.area_id=v.operation_area_id
+                     AND oa.deleted=0
+                     AND oa.is_deleted=0
                     LEFT JOIN bus_driver d ON d.id=v.current_driver_id
                     LEFT JOIN bus_vehicle_runtime r ON r.vehicle_id=v.id AND r.tenant_id=v.tenant_id AND r.deleted=0
                     WHERE v.tenant_id=%s AND v.deleted=0
@@ -1510,6 +2625,10 @@ class MySqlPersistence:
             with connection.cursor() as cursor:
                 cursor.execute("""
                     SELECT v.*,
+                           oa.code AS operation_area_code,
+                           oa.name AS operation_area_name,
+                           oa.org_code AS operation_area_org_code,
+                           oa.org_name AS operation_area_org_name,
                            d.driver_code AS current_driver_code,
                            d.driver_no AS current_driver_no,
                            d.driver_name AS current_driver_name,
@@ -1517,6 +2636,11 @@ class MySqlPersistence:
                            r.segment_route AS runtime_segment_route,
                            r.edge_progress, r.rest_status, r.can_accept_order, r.reported_at
                     FROM bus_vehicle v
+                    LEFT JOIN map_operation_area oa
+                      ON oa.tenant_id=v.tenant_id
+                     AND oa.area_id=v.operation_area_id
+                     AND oa.deleted=0
+                     AND oa.is_deleted=0
                     LEFT JOIN bus_driver d ON d.id=v.current_driver_id
                     LEFT JOIN bus_vehicle_runtime r ON r.vehicle_id=v.id AND r.tenant_id=v.tenant_id AND r.deleted=0
                     WHERE v.tenant_id=%s AND v.vehicle_code=%s AND v.deleted=0
@@ -1570,6 +2694,14 @@ class MySqlPersistence:
         finally:
             if connection is not None:
                 connection.close()
+
+    def _memory_operation_area_area_id(self, operation_area_id=None):
+        """在内存兜底模式下解析运营区业务 area_id。"""
+        return _int_or_none(operation_area_id)
+
+    def _resolve_operation_area_area_id(self, cursor, operation_area_id=None):
+        """解析车辆表要保存的运营区业务 area_id。"""
+        return _int_or_none(operation_area_id)
 
     def _resolve_driver_id(self, cursor, driver_code):
         """把司机业务编码解析为数据库主键。
@@ -1717,8 +2849,7 @@ class MySqlPersistence:
                         raise PersistenceConflict("车牌号已存在", code="plate_no_exists", field="plate_no")
         operation_status = str(payload.get("operation_status") or "offline").strip()
         driver_code = str(payload.get("current_driver_code") or payload.get("driver_code") or "").strip() or None
-        if operation_status == "operating" and not driver_code:
-            raise PersistenceConflict("车辆未绑定司机，不能开始运营", code="driver_required", field="current_driver_code")
+        operation_area_code = str(payload.get("operation_area_code") or "").strip() or None
         if driver_code and not self.get_driver(driver_code):
             raise KeyError("driver_not_found")
         normalized = {
@@ -1731,6 +2862,8 @@ class MySqlPersistence:
             "vehicle_model": str(payload.get("vehicle_model") or "").strip() or None,
             "operation_status": operation_status,
             "operation_mode": str(payload.get("operation_mode") or "dynamic_bus").strip(),
+            "operation_area_id": _int_or_none(payload.get("operation_area_id")),
+            "operation_area_code": operation_area_code,
             "current_driver_code": driver_code,
             "remark": str(payload.get("remark") or "").strip() or None,
             "tenant_id": self.tenant_id,
@@ -1743,6 +2876,9 @@ class MySqlPersistence:
             "can_accept_order": payload.get("can_accept_order"),
         }
         if not self.enabled or pymysql is None:
+            normalized["operation_area_id"] = self._memory_operation_area_area_id(
+                normalized["operation_area_id"],
+            )
             self._check_memory_driver_binding_available(driver_code, vehicle_code)
             driver = self.get_driver(driver_code) if driver_code else None
             normalized["current_driver_no"] = driver.get("driver_no") if driver else None
@@ -1759,19 +2895,23 @@ class MySqlPersistence:
             connection = self._sync_connection(autocommit=False)
             with connection.cursor() as cursor:
                 driver_id = self._resolve_driver_id(cursor, driver_code)
+                normalized["operation_area_id"] = self._resolve_operation_area_area_id(
+                    cursor,
+                    normalized["operation_area_id"],
+                )
                 self._check_driver_binding_available_sync(cursor, driver_id, vehicle_code)
                 if create:
                     cursor.execute("""
                         INSERT INTO bus_vehicle
                             (vehicle_code, plate_no, vehicle_type, seat_count, max_load_count,
                              vehicle_color, vehicle_model, operation_status, operation_mode,
-                             current_driver_id, remark, tenant_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             operation_area_id, current_driver_id, remark, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         normalized["vehicle_code"], normalized["plate_no"], normalized["vehicle_type"],
                         normalized["seat_count"], normalized["max_load_count"], normalized["vehicle_color"],
                         normalized["vehicle_model"], normalized["operation_status"], normalized["operation_mode"],
-                        driver_id, normalized["remark"], self.tenant_id,
+                        normalized["operation_area_id"], driver_id, normalized["remark"], self.tenant_id,
                     ))
                     vehicle_id = cursor.lastrowid
                 else:
@@ -1780,14 +2920,15 @@ class MySqlPersistence:
                         UPDATE bus_vehicle
                         SET plate_no=%s, vehicle_type=%s, seat_count=%s, max_load_count=%s,
                             vehicle_color=%s, vehicle_model=%s, operation_status=%s,
-                            operation_mode=%s, current_driver_id=%s, remark=%s,
+                            operation_mode=%s, operation_area_id=%s,
+                            current_driver_id=%s, remark=%s,
                             updated_at=CURRENT_TIMESTAMP(3)
                         WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
                     """, (
                         normalized["plate_no"], normalized["vehicle_type"], normalized["seat_count"],
                         normalized["max_load_count"], normalized["vehicle_color"], normalized["vehicle_model"],
-                        normalized["operation_status"], normalized["operation_mode"], driver_id,
-                        normalized["remark"], self.tenant_id, vehicle_code,
+                        normalized["operation_status"], normalized["operation_mode"],
+                        normalized["operation_area_id"], driver_id, normalized["remark"], self.tenant_id, vehicle_code,
                     ))
                 self._sync_vehicle_binding(cursor, vehicle_id, driver_id, payload.get("operator"))
                 self._upsert_vehicle_runtime_sync(cursor, normalized, vehicle_id, driver_id)
@@ -2016,6 +3157,23 @@ class MySqlPersistence:
         row = cursor.fetchone()
         return row["id"] if row else None
 
+    def _fetch_poi_id(self, cursor, poi_code, tenant_id, operation_area_id=None):
+        """按运营区 ID 优先查找 POI 主键。"""
+        if poi_code in (None, ""):
+            return None
+        operation_area_id = _int_or_none(operation_area_id)
+        if operation_area_id is not None:
+            cursor.execute("""
+                SELECT id
+                FROM map_poi
+                WHERE tenant_id=%s AND poi_code=%s AND operation_area_id=%s AND deleted=0
+                LIMIT 1
+            """, (tenant_id, str(poi_code), operation_area_id))
+            row = cursor.fetchone()
+            if row:
+                return row["id"]
+        return self._fetch_id(cursor, "map_poi", "poi_code", poi_code, tenant_id)
+
     def _execute_task(self, task):
         """执行单个入队任务并提交事务。"""
         conn = self._connect()
@@ -2108,15 +3266,19 @@ class MySqlPersistence:
 
     def _op_vehicle(self, cursor, tenant_id, payload):
         driver_id = self._fetch_id(cursor, "bus_driver", "driver_code", payload.get("driver_code"), tenant_id)
+        operation_area_id = self._resolve_operation_area_area_id(
+            cursor,
+            payload.get("operation_area_id"),
+        )
         self._execute(cursor, """
             INSERT INTO bus_vehicle
                 (vehicle_code, plate_no, vehicle_type, seat_count, max_load_count, vehicle_color,
-                 operation_status, operation_mode, current_driver_id, tenant_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 operation_status, operation_mode, operation_area_id, current_driver_id, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 plate_no=VALUES(plate_no), seat_count=VALUES(seat_count), max_load_count=VALUES(max_load_count),
                 vehicle_color=VALUES(vehicle_color), operation_status=VALUES(operation_status),
-                current_driver_id=VALUES(current_driver_id),
+                operation_area_id=VALUES(operation_area_id), current_driver_id=VALUES(current_driver_id),
                 updated_at=CURRENT_TIMESTAMP(3)
         """, (
             payload["vehicle_code"],
@@ -2127,6 +3289,7 @@ class MySqlPersistence:
             payload.get("vehicle_color"),
             payload.get("operation_status") or "idle",
             payload.get("operation_mode") or "dynamic_bus",
+            operation_area_id,
             driver_id,
             tenant_id,
         ))
@@ -2153,11 +3316,13 @@ class MySqlPersistence:
     def _op_order(self, cursor, tenant_id, payload):
         vehicle_id = self._fetch_id(cursor, "bus_vehicle", "vehicle_code", payload.get("assigned_vehicle_code"), tenant_id)
         driver_id = self._fetch_id(cursor, "bus_driver", "driver_code", payload.get("assigned_driver_code"), tenant_id)
-        origin_poi_id = self._fetch_id(cursor, "map_poi", "poi_code", payload.get("origin_poi_code"), tenant_id)
-        destination_poi_id = self._fetch_id(cursor, "map_poi", "poi_code", payload.get("destination_poi_code"), tenant_id)
+        operation_area_id = _int_or_none(payload.get("operation_area_id"))
+        origin_poi_id = self._fetch_poi_id(cursor, payload.get("origin_poi_code"), tenant_id, operation_area_id)
+        destination_poi_id = self._fetch_poi_id(cursor, payload.get("destination_poi_code"), tenant_id, operation_area_id)
         self._execute(cursor, """
             INSERT INTO bus_order
-                (request_id, passenger_code, passenger_phone, passenger_count, order_source, status,
+                (request_id, passenger_code, passenger_phone, passenger_count, order_source,
+                 operation_area_id, status,
                  origin_lon, origin_lat, destination_lon, destination_lat, origin_poi_id, destination_poi_id,
                  origin_node_code, destination_node_code, origin_name, destination_name, request_time,
                  expected_pickup_earliest, expected_pickup_latest, passenger_ready_time, max_pickup_time,
@@ -2169,12 +3334,14 @@ class MySqlPersistence:
                  estimated_arrival_time, estimated_dropoff_time, estimated_arrival_eta_seconds,
                  estimated_dropoff_eta_seconds, eta_status, eta_error, eta_updated_at, tenant_id)
             VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                 %s, %s, %s, %s, %s, %s, %s, %s)
+                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                  passenger_code=VALUES(passenger_code), passenger_phone=VALUES(passenger_phone),
-                 passenger_count=VALUES(passenger_count), status=VALUES(status),
+                 passenger_count=VALUES(passenger_count),
+                 operation_area_id=VALUES(operation_area_id),
+                 status=VALUES(status),
                  assigned_vehicle_id=VALUES(assigned_vehicle_id), assigned_driver_id=VALUES(assigned_driver_id),
                  assigned_plate_no=VALUES(assigned_plate_no), answer_time=COALESCE(VALUES(answer_time), answer_time),
                  actual_pickup_time=COALESCE(VALUES(actual_pickup_time), actual_pickup_time),
@@ -2204,6 +3371,7 @@ class MySqlPersistence:
             payload.get("passenger_phone"),
             payload.get("passenger_count") or 1,
             payload.get("order_source"),
+            operation_area_id,
             payload.get("status") or "pooled",
             payload.get("origin_lon"),
             payload.get("origin_lat"),
@@ -2561,9 +3729,12 @@ def status():
     return _manager.status()
 
 
-def fetch_completed_orders_for_forecast(limit=None):
+def fetch_completed_orders_for_forecast(limit=None, operation_area_id=None):
     """读取已完成订单预测样本；数据库不可用时返回空列表。"""
-    return _manager.fetch_completed_orders_for_forecast(limit=limit)
+    return _manager.fetch_completed_orders_for_forecast(
+        limit=limit,
+        operation_area_id=operation_area_id,
+    )
 
 
 def query_orders(filters=None):
@@ -2571,14 +3742,14 @@ def query_orders(filters=None):
     return _manager.query_orders(filters=filters)
 
 
-def list_operation_restriction_policies():
+def list_operation_restriction_policies(operation_area_id=None):
     """读取运营禁区策略列表。"""
-    return _manager.list_operation_restriction_policies()
+    return _manager.list_operation_restriction_policies(operation_area_id=operation_area_id)
 
 
-def get_operation_restriction_policy(policy_code):
+def get_operation_restriction_policy(policy_code, operation_area_id=None):
     """按编码读取运营禁区策略。"""
-    return _manager.get_operation_restriction_policy(policy_code)
+    return _manager.get_operation_restriction_policy(policy_code, operation_area_id=operation_area_id)
 
 
 def save_operation_restriction_policy(policy):
@@ -2591,14 +3762,86 @@ def delete_operation_restriction_policy(policy_code):
     return _manager.delete_operation_restriction_policy(policy_code)
 
 
-def get_active_operation_restriction_policy():
+def get_active_operation_restriction_policy(operation_area_id=None):
     """读取当前生效的运营禁区策略。"""
-    return _manager.get_active_operation_restriction_policy()
+    return _manager.get_active_operation_restriction_policy(operation_area_id=operation_area_id)
 
 
-def set_active_operation_restriction_policy(policy_code):
+def set_active_operation_restriction_policy(policy_code, operation_area_id=None):
     """设置当前生效的运营禁区策略。"""
-    return _manager.set_active_operation_restriction_policy(policy_code)
+    return _manager.set_active_operation_restriction_policy(policy_code, operation_area_id=operation_area_id)
+
+
+def list_operation_areas(include_deleted=False):
+    """读取运营区列表。"""
+    return _manager.list_operation_areas(include_deleted=include_deleted)
+
+
+def list_startup_operation_areas():
+    """读取系统初始化时需要加载的生效运营区。"""
+    return _manager.list_startup_operation_areas()
+
+
+def get_operation_area(area_code):
+    """按编码读取运营区。"""
+    return _manager.get_operation_area(area_code)
+
+
+def get_operation_area_by_area_id(area_id):
+    """按运营区业务 area_id 读取运营区。"""
+    return _manager.get_operation_area_by_area_id(area_id)
+
+
+def save_operation_area(area, *, create=False):
+    """创建或更新运营区。"""
+    return _manager.save_operation_area(area, create=create)
+
+
+def delete_operation_area(area_code):
+    """软删除运营区。"""
+    return _manager.delete_operation_area(area_code)
+
+
+def delete_operation_area_by_area_id(area_id):
+    """按运营区业务 area_id 软删除运营区。"""
+    return _manager.delete_operation_area_by_area_id(area_id)
+
+
+def hard_delete_operation_area_by_area_id(area_id):
+    """按运营区业务 area_id 物理删除运营区，用于新增失败回滚。"""
+    return _manager.hard_delete_operation_area_by_area_id(area_id)
+
+
+def record_operation_area_load_result(area_code, result):
+    """写回运营区地图加载结果。"""
+    return _manager.record_operation_area_load_result(area_code, result)
+
+
+def record_operation_area_load_result_by_area_id(area_id, result):
+    """按运营区业务 area_id 写回地图加载结果。"""
+    return _manager.record_operation_area_load_result_by_area_id(area_id, result)
+
+
+def list_pois(operation_area_id=None, operation_area_ids=None):
+    """按运营区 ID 读取站点 POI。"""
+    return _manager.list_pois(
+        operation_area_id=operation_area_id,
+        operation_area_ids=operation_area_ids,
+    )
+
+
+def create_station(station):
+    """创建单个站点 POI。"""
+    return _manager.create_station(station)
+
+
+def delete_station_by_coordinate(lon, lat, operation_area_id=None):
+    """按经纬度软删除单个站点 POI。"""
+    return _manager.delete_station_by_coordinate(
+        lon,
+        lat,
+        operation_area_id=operation_area_id,
+    )
 
 
 def list_drivers():
@@ -2754,7 +3997,7 @@ def enqueue(op, payload):
 # ============================================================
 
 def record_initial_state(city_map, fleet):
-    """系统初始化后落库基础静态数据与车辆运行初始态。
+    """系统初始化后只刷新车辆运行初始态。
 
     Args:
         city_map (CityGraph): 已加载的城市路网与 POI。
@@ -2781,9 +4024,6 @@ def record_initial_state(city_map, fleet):
     #         "node_code": poi.id,
     #     })
     for vehicle in fleet or []:
-        record_driver(vehicle)
-        record_vehicle(vehicle)
-        record_vehicle_route(vehicle)
         record_vehicle_runtime(vehicle)
 
 
@@ -2814,6 +4054,7 @@ def record_vehicle(vehicle):
         "max_load_count": getattr(vehicle, "capacity", 0),
         "vehicle_color": getattr(vehicle, "color", None),
         "operation_status": _operation_status(vehicle),
+        "operation_area_id": getattr(vehicle, "operation_area_id", None),
         "driver_code": _driver_code(vehicle),
     })
 
@@ -2903,13 +4144,22 @@ def _order_payload(order, city_map=None, status=None, vehicle=None, route_overri
         "passenger_phone": getattr(order, "passenger_phone", None) or None,
         "passenger_count": getattr(order, "passenger_count", 1),
         "order_source": "dynamic_bus",
+        "operation_area_id": getattr(order, "operation_area_id", None) or (
+            getattr(vehicle, "operation_area_id", None) if vehicle is not None else None
+        ),
         "status": status or _order_status(order),
         "origin_lon": getattr(order, "o_lon", None),
         "origin_lat": getattr(order, "o_lat", None),
         "destination_lon": getattr(order, "d_lon", None),
         "destination_lat": getattr(order, "d_lat", None),
-        "origin_poi_code": getattr(getattr(order, "o_node", None), "id", None),
-        "destination_poi_code": getattr(getattr(order, "d_node", None), "id", None),
+        "origin_poi_code": (
+            getattr(getattr(order, "o_node", None), "poi_code", None)
+            or getattr(getattr(order, "o_node", None), "id", None)
+        ),
+        "destination_poi_code": (
+            getattr(getattr(order, "d_node", None), "poi_code", None)
+            or getattr(getattr(order, "d_node", None), "id", None)
+        ),
         "origin_node_code": getattr(getattr(order, "o_node", None), "id", None),
         "destination_node_code": getattr(getattr(order, "d_node", None), "id", None),
         "origin_name": getattr(getattr(order, "o_node", None), "name", None),

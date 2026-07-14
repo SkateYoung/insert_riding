@@ -731,6 +731,43 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(len(self.vehicle.planned_route_segment_grasped_point), 1)
         self.assertGreater(self.vehicle.planned_route_grasped_point[0]["lon"], self.city.a.lon)
 
+    def test_route_grasp_uses_original_order_coordinates_for_amap_request(self):
+        request_time = datetime.now().replace(microsecond=0)
+        order = Order(
+            request_id="raw-order-1",
+            o_lon=self.city.b.lon + 0.0002,
+            o_lat=self.city.b.lat + 0.0002,
+            d_lon=self.city.c.lon + 0.0003,
+            d_lat=self.city.c.lat + 0.0003,
+            request_time=request_time,
+            expected_pickup_earliest=request_time,
+            expected_pickup_latest=request_time + timedelta(minutes=20),
+            passenger_count=1,
+            city_map=self.city,
+            req_time=request_time.timestamp(),
+        )
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        CoreDispatcher.refresh_vehicle_route_metadata(self.vehicle, self.city)
+
+        raw_segments = self.vehicle.planned_route_segment_raw_point
+        self.assertEqual(raw_segments[0]["points"][-1]["lon"], self.city.b.lon)
+        self.assertEqual(raw_segments[0]["amap_request_points"][-1]["lon"], order.o_lon)
+        self.assertEqual(raw_segments[1]["amap_request_points"][0]["lon"], order.o_lon)
+        self.assertEqual(raw_segments[1]["amap_request_points"][-1]["lon"], order.d_lon)
+
+        fake_service = FakeRouteGraspService()
+        job = CoreDispatcher._collect_route_grasp_jobs([self.vehicle])[0]
+        result = CoreDispatcher._run_route_grasp_job(fake_service, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(fake_service.calls[0][-1]["lon"], order.o_lon)
+        self.assertEqual(fake_service.calls[0][-1]["lat"], order.o_lat)
+        self.assertEqual(fake_service.calls[1][0]["lon"], order.o_lon)
+        self.assertEqual(fake_service.calls[1][-1]["lon"], order.d_lon)
+
     def test_position_update_does_not_auto_pickup_or_mark_pending(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
