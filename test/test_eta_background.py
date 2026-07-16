@@ -873,6 +873,214 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual([segment["type"] for segment in self.vehicle.planned_route_segment_grasped_point], ["D"])
         self.assertEqual([o.request_id for o in self.vehicle.on_board_orders], [order.request_id])
 
+    def test_driver_push_confirmation_success_moves_matched_to_waiting_pickup(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+
+        confirmed = []
+        original_confirmed = persistence.record_order_driver_push_confirmed
+        original_runtime = persistence.record_vehicle_runtime
+        persistence.record_order_driver_push_confirmed = lambda order_arg, vehicle_arg: confirmed.append((order_arg.status, vehicle_arg.id))
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        try:
+            result = CoreDispatcher.confirm_driver_push_delivery(
+                order.request_id,
+                [self.vehicle],
+                self.city,
+                received=True,
+                vehicle_id=self.vehicle.vehicle_id,
+                route_version=self.vehicle.planned_route_grasp_route_version,
+                occurred_at=1100.0,
+            )
+        finally:
+            persistence.record_order_driver_push_confirmed = original_confirmed
+            persistence.record_vehicle_runtime = original_runtime
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(order.status, "waiting_pickup")
+        self.assertFalse(getattr(order, "driver_push_pending", False))
+        self.assertFalse(getattr(self.vehicle, "driver_push_pending", False))
+        self.assertIsNotNone(order.answer_time)
+        self.assertEqual(confirmed, [("waiting_pickup", self.vehicle.id)])
+
+    def test_driver_push_confirmation_ignores_route_version(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+
+        original_confirmed = persistence.record_order_driver_push_confirmed
+        original_runtime = persistence.record_vehicle_runtime
+        persistence.record_order_driver_push_confirmed = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        try:
+            result = CoreDispatcher.confirm_driver_push_delivery(
+                order.request_id,
+                [self.vehicle],
+                self.city,
+                received=True,
+                vehicle_id=self.vehicle.vehicle_id,
+                route_version="stale-version-from-platform-cache",
+                occurred_at=1100.0,
+            )
+        finally:
+            persistence.record_order_driver_push_confirmed = original_confirmed
+            persistence.record_vehicle_runtime = original_runtime
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(order.status, "waiting_pickup")
+
+    def test_driver_push_not_received_requeues_order_and_removes_vehicle_steps(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+
+        original_requeued = persistence.record_order_requeued_after_push_failure
+        original_route = persistence.record_vehicle_route
+        original_runtime = persistence.record_vehicle_runtime
+        persistence.record_order_requeued_after_push_failure = lambda *args, **kwargs: None
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        try:
+            result = CoreDispatcher.confirm_driver_push_delivery(
+                order.request_id,
+                [self.vehicle],
+                self.city,
+                received=False,
+                vehicle_id=self.vehicle.vehicle_id,
+                route_version=self.vehicle.planned_route_grasp_route_version,
+                reason="driver_push_unreachable",
+            )
+        finally:
+            persistence.record_order_requeued_after_push_failure = original_requeued
+            persistence.record_vehicle_route = original_route
+            persistence.record_vehicle_runtime = original_runtime
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "requeued")
+        self.assertEqual(order.status, "pooled")
+        self.assertIn(order, CoreDispatcher.order_pool)
+        self.assertEqual(self.vehicle.planned_route, [])
+        self.assertFalse(getattr(self.vehicle, "driver_push_pending", False))
+        self.assertTrue(CoreDispatcher._vehicle_excluded_for_order(order, self.vehicle, current_timestamp=time.time()))
+        self.assertEqual(result["vehicle_exclusion"]["mode"], "cooldown")
+
+    def test_driver_push_unreachable_excludes_vehicle_only_during_cooldown(self):
+        order = make_order(self.city)
+        CoreDispatcher._record_driver_push_vehicle_exclusion(
+            order,
+            self.vehicle,
+            "driver_push_unreachable",
+            current_timestamp=1000.0,
+        )
+
+        self.assertTrue(CoreDispatcher._vehicle_excluded_for_order(order, self.vehicle, current_timestamp=1000.0 + 60.0))
+        self.assertFalse(CoreDispatcher._vehicle_excluded_for_order(order, self.vehicle, current_timestamp=1000.0 + 181.0))
+
+    def test_driver_declined_excludes_vehicle_permanently_for_order(self):
+        order = make_order(self.city)
+        other_vehicle = Vehicle("vehicle-2", self.city.a.id, "#2563eb", zone=1)
+        other_vehicle.vehicle_id = "vehicle-2"
+        CoreDispatcher._record_driver_push_vehicle_exclusion(
+            order,
+            self.vehicle,
+            "driver_declined",
+            current_timestamp=1000.0,
+        )
+
+        self.assertTrue(CoreDispatcher._vehicle_excluded_for_order(order, self.vehicle, current_timestamp=1000.0 + 3600.0))
+        self.assertFalse(CoreDispatcher._vehicle_excluded_for_order(order, other_vehicle, current_timestamp=1000.0 + 3600.0))
+
+    def test_driver_push_not_received_only_removes_target_order(self):
+        order_a = make_order(self.city, request_id="order-a")
+        order_b = make_order(self.city, request_id="order-b")
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order_a},
+            {"type": "O", "order": order_b},
+            {"type": "D", "order": order_a},
+            {"type": "D", "order": order_b},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order_a, self.vehicle, current_timestamp=1000.0)
+        CoreDispatcher._set_driver_push_pending(order_b, self.vehicle, current_timestamp=1001.0)
+
+        original_requeued = persistence.record_order_requeued_after_push_failure
+        original_route = persistence.record_vehicle_route
+        original_runtime = persistence.record_vehicle_runtime
+        persistence.record_order_requeued_after_push_failure = lambda *args, **kwargs: None
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        try:
+            result = CoreDispatcher.confirm_driver_push_delivery(
+                order_a.request_id,
+                [self.vehicle],
+                self.city,
+                received=False,
+                vehicle_id=self.vehicle.vehicle_id,
+                route_version=self.vehicle.planned_route_grasp_route_version,
+                reason="driver_push_unreachable",
+            )
+        finally:
+            persistence.record_order_requeued_after_push_failure = original_requeued
+            persistence.record_vehicle_route = original_route
+            persistence.record_vehicle_runtime = original_runtime
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(order_a.status, "pooled")
+        self.assertEqual(order_b.status, "matched")
+        self.assertTrue(getattr(order_b, "driver_push_pending", False))
+        self.assertIn(order_a, CoreDispatcher.order_pool)
+        self.assertEqual(
+            [step["order"].request_id for step in self.vehicle.planned_route],
+            [order_b.request_id, order_b.request_id],
+        )
+        self.assertTrue(getattr(self.vehicle, "driver_push_pending", False))
+        self.assertIn(order_b.request_id, getattr(self.vehicle, "driver_push_pending_orders", {}))
+        self.assertNotIn(order_a.request_id, getattr(self.vehicle, "driver_push_pending_orders", {}))
+
+    def test_driver_push_timeout_scan_is_disabled(self):
+        order = make_order(self.city)
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+
+        original_requeued = persistence.record_order_requeued_after_push_failure
+        original_route = persistence.record_vehicle_route
+        original_runtime = persistence.record_vehicle_runtime
+        persistence.record_order_requeued_after_push_failure = lambda *args, **kwargs: None
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        try:
+            expired = CoreDispatcher.expire_driver_push_confirmations(
+                [self.vehicle],
+                self.city,
+                current_timestamp=1000.0 + 24 * 3600,
+            )
+        finally:
+            persistence.record_order_requeued_after_push_failure = original_requeued
+            persistence.record_vehicle_route = original_route
+            persistence.record_vehicle_runtime = original_runtime
+
+        self.assertEqual(expired, [])
+        self.assertEqual(order.status, "matched")
+        self.assertNotIn(order, CoreDispatcher.order_pool)
+        self.assertEqual([step["order"].request_id for step in self.vehicle.planned_route], [order.request_id, order.request_id])
+
     def test_prepare_and_apply_priority_amap_replan_writes_segments(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
@@ -1189,6 +1397,40 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(submitted[0][1]["request_id"], order.request_id)
         self.assertIsNone(getattr(self.vehicle, "fleet_push_pending_event", None))
 
+    def test_fleet_push_queue_keeps_multiple_driver_confirmation_events(self):
+        order_a = make_order(self.city, request_id="push-a")
+        order_b = make_order(self.city, request_id="push-b")
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order_a},
+            {"type": "O", "order": order_b},
+        ]
+        self.vehicle.planned_route_grasp_route_version = "route-v1"
+        self.vehicle.planned_route_grasp_status = "ready"
+
+        CoreDispatcher._mark_fleet_push_pending(
+            self.vehicle,
+            {"event_reason": "order_assigned", "request_id": order_a.request_id},
+        )
+        CoreDispatcher._set_driver_push_pending(order_a, self.vehicle, event_reason="order_assigned")
+        CoreDispatcher._mark_fleet_push_pending(
+            self.vehicle,
+            {"event_reason": "order_inserted", "request_id": order_b.request_id},
+        )
+        CoreDispatcher._set_driver_push_pending(order_b, self.vehicle, event_reason="order_inserted")
+
+        submitted = []
+        original_submit = fleet_push.submit_vehicle_navigation
+        fleet_push.submit_vehicle_navigation = lambda vehicle, event: submitted.append((vehicle, event)) or True
+        try:
+            submitted_any = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
+        finally:
+            fleet_push.submit_vehicle_navigation = original_submit
+
+        self.assertTrue(submitted_any)
+        self.assertEqual([event["request_id"] for _, event in submitted], [order_a.request_id, order_b.request_id])
+        self.assertTrue(all(event.get("driver_push_confirmation_required") for _, event in submitted))
+        self.assertEqual(getattr(self.vehicle, "fleet_push_pending_events", []), [])
+
     def test_fleet_push_waits_when_route_grasp_fails(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
@@ -1245,6 +1487,7 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(payload["route_version"], "route-v1")
         self.assertIn("vehicle", payload)
         self.assertNotIn("fleet", payload)
+        self.assertNotIn("driver_push_deadline", payload)
         self.assertEqual(payload["vehicle"]["vehicle_id"], "vehicle-001")
 
     def test_gps_position_update_does_not_mark_fleet_push_pending(self):

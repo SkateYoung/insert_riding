@@ -4245,8 +4245,6 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
     record_driver(vehicle)
     record_vehicle(vehicle)
     route_version = _route_version(vehicle)
-    if getattr(order, "answer_time", None) is None:
-        order.answer_time = _now_dt()
     record_order_snapshot(order, city_map=city_map, status=_order_status(order, "matched"), vehicle=vehicle)
     enqueue("dispatch_task", {
         "task_no": f"dispatch:{getattr(order, 'request_id', '')}:{route_version}:{int(time.time() * 1000)}",
@@ -4267,6 +4265,39 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
     })
     record_vehicle_route(vehicle, path_result=path_result)
     record_vehicle_runtime(vehicle)
+
+
+def record_order_matched_pending(order, vehicle, city_map=None, path_result=None, details=None):
+    """订单已匹配车辆但仍等待司机端接收确认。"""
+    return record_dispatch_assignment(
+        order,
+        vehicle,
+        city_map=city_map,
+        path_result=path_result,
+        details=details,
+    )
+
+
+def record_order_driver_push_confirmed(order, vehicle):
+    """平台确认司机端收到派单后写入 waiting_pickup 和 answer_time。"""
+    if getattr(order, "answer_time", None) is None:
+        order.answer_time = _now_dt()
+    return record_order_snapshot(order, status="waiting_pickup", vehicle=vehicle)
+
+
+def record_order_requeued_after_push_failure(order, reason="driver_push_failed"):
+    """司机端未收到派单或确认超时后，把订单重新写回待匹配状态。"""
+    route_override = {
+        "route_status": "stale",
+        "route_error": reason,
+        "route_updated_at": _now_dt(),
+    }
+    return record_order_snapshot(
+        order,
+        status="pooled",
+        vehicle=None,
+        route_override=route_override,
+    )
 
 
 def record_vehicle_route(vehicle, path_result=None):

@@ -86,7 +86,9 @@ Accept: application/json
 | 订单 | GET | `/orders/pool` | 查询待匹配订单池 |
 | 订单 | GET | `/orders/<request_id>/eta` | 乘客端查询订单 ETA |
 | 订单 | POST | `/orders/<request_id>/cancel` | 乘客端取消未上车订单 |
+| 订单 | POST | `/orders/<request_id>/driver-push-confirmation` | 平台确认司机端是否收到派单 |
 | 订单 | POST | `/admin/orders/query` | 服务端按条件查询订单数据库 |
+| 调度 | GET/POST/PUT | `/admin/dispatch/matching-window-config` | 查看或更新远期订单匹配窗口配置 |
 | 车辆 | GET | `/fleet` | 查询车队列表信息 |
 | 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
 | 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并更新车辆吸附位置，不触发上下客或路线重规划 |
@@ -547,6 +549,7 @@ Accept: application/json
 | `status` | 含义 |
 | --- | --- |
 | `matching` | 订单仍在待匹配池，暂未派车 |
+| `matched` | 算法端已匹配车辆，等待平台确认司机端收到派单 |
 | `waiting` | 已派车，等待上车 |
 | `riding` | 乘客已上车，前往目的地 |
 | `completed` | 已完成 |
@@ -844,6 +847,67 @@ ETA 状态：
 | 400 | 请求体格式错误、时间格式错误、分页参数非法 |
 | 503 | 数据库未启用或 PyMySQL 不可用 |
 
+### 4.4.2 GET/POST/PUT `/admin/dispatch/matching-window-config`
+
+查看或运行时更新订单池远期订单匹配窗口配置。该配置用于控制预约时间较远的订单何时进入车辆匹配流程。
+
+默认规则：
+
+- 如果 `expected_pickup_earliest - request_time` 不超过 `far_pickup_threshold_seconds`，订单可以立即参与匹配。
+- 如果超过 `far_pickup_threshold_seconds`，订单会先保留在订单池中，直到 `expected_pickup_earliest - far_pickup_match_lead_seconds` 后才参与匹配。
+- 默认 `far_pickup_threshold_seconds=3600`，即 1 小时外的订单视为远期订单。
+- 默认 `far_pickup_match_lead_seconds=1800`，即远期订单在期望上车时间前 30 分钟释放匹配。
+- 配置为内存运行时配置，服务重启后恢复代码默认值。
+
+GET 响应：
+
+```json
+{
+  "far_pickup_threshold_seconds": 3600.0,
+  "far_pickup_match_lead_seconds": 1800.0
+}
+```
+
+POST/PUT 请求体：
+
+```json
+{
+  "far_pickup_threshold_seconds": 3600,
+  "far_pickup_match_lead_seconds": 1800
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `far_pickup_threshold_seconds` | number | 否 | 远期订单判断阈值，单位秒，必须大于等于 0 |
+| `far_pickup_match_lead_seconds` | number | 否 | 远期订单提前释放匹配时间，单位秒，必须大于等于 0 |
+
+说明：
+
+- POST/PUT 可只传其中一个字段，未传字段保持当前值。
+- 多运营区匹配也会使用同一套配置；订单仍只会在所属运营区内匹配车辆。
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "config": {
+    "far_pickup_threshold_seconds": 3600.0,
+    "far_pickup_match_lead_seconds": 1800.0
+  }
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询或更新成功 |
+| 400 | 参数不是数字或小于 0 |
+
 ### 4.5 GET `/orders/pool`
 
 查询待匹配订单池。
@@ -895,6 +959,7 @@ ETA 状态：
 字段解释：
 
 - 如果 `status=matching` 或 `eta.status=not_assigned`，展示“正在匹配车辆”。
+- 如果 `status=matched`，展示“已匹配车辆，等待司机端接收”。
 - 如果 `eta.status=loading/pending`，展示“ETA 计算中”。
 - 如果 `eta.status=ready/partial`，展示预计到达和预计送达时间。
 - 如果 `status=completed/cancelled`，停止轮询。
@@ -959,8 +1024,68 @@ ETA 状态：
 
 前端建议：
 
-- 仅在 `status=matching/waiting` 时展示取消按钮。
+- 仅在 `status=matching/matched/waiting` 时展示取消按钮。
 - 收到 409 时刷新订单状态并禁用取消按钮。
+
+### 4.7.1 POST `/orders/<request_id>/driver-push-confirmation`
+
+平台回调司机端是否真正收到派单信息。算法端匹配成功后，订单先保持 `matched`；只有该接口确认 `received=true` 后，订单才进入 `waiting_pickup`。`matched` 待确认期间车辆仍可继续接新单；算法端不做 60 秒计时，平台推送超时或司机端未收到时由平台调用本接口并传 `received=false`。
+
+请求体：
+
+```json
+{
+  "vehicle_id": "72057594546144444",
+  "route_version": "grasp-xxxx",
+  "received": true,
+  "reason": "driver_app_ack",
+  "platform_message_id": "optional",
+  "occurred_at": "2026-07-14 12:00:00"
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `received` | boolean | 是 | `true` 表示司机端已收到；`false` 表示平台确认司机端未收到或平台侧超时 |
+| `vehicle_id` | string | 否 | 本次派单车辆业务 ID；传入时会校验是否与当前待确认车辆一致 |
+| `route_version` | string | 否 | 兼容旧平台的展示字段；确认逻辑只按订单 ID 和车辆 ID 判断，不再校验路线版本 |
+| `reason` | string | 否 | 平台返回原因，如 `driver_app_ack/driver_app_unreachable/driver_push_timeout` |
+| `occurred_at` | string | 否 | 平台确认发生时间，格式 `YYYY-MM-DD HH:MM:SS` |
+
+`received=true` 成功响应：
+
+```json
+{
+  "status": "waiting_pickup",
+  "request_id": "order_10001",
+  "vehicle_id": "72057594546144444",
+  "answer_time": "2026-07-14 12:00:00"
+}
+```
+
+`received=false` 成功响应：
+
+```json
+{
+  "status": "requeued",
+  "request_id": "order_10001",
+  "vehicle_id": "72057594546144444",
+  "reason": "driver_app_unreachable",
+  "pool_size": 1
+}
+```
+
+说明：`received=false` 只会移除当前 `request_id` 对应订单的 O/D 步骤，并将该订单退回订单池；同一辆车上的其他订单和后续插单路线会保留并刷新。
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 确认成功，或已退回订单池 |
+| 400 | 请求体缺少 `received`、类型非法或时间格式非法 |
+| 409 | 订单已退回、已改派或车辆不匹配 |
 
 ### 4.8 GET `/fleet`
 

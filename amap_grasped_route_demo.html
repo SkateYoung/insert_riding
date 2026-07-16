@@ -324,6 +324,11 @@
         </div>
 
         <div class="field">
+            <label for="platformBaseInput">平台测试服务地址</label>
+            <input id="platformBaseInput" value="http://127.0.0.1:18080">
+        </div>
+
+        <div class="field">
             <label for="routeAreaSelect">运营区域</label>
             <select id="routeAreaSelect"></select>
         </div>
@@ -355,6 +360,21 @@
             <div class="compact-actions">
                 <button id="confirmPickupBtn" type="button" disabled>已上车</button>
                 <button id="confirmDropoffBtn" type="button" class="secondary" disabled>已下车</button>
+            </div>
+        </div>
+
+        <div class="tool-block">
+            <div class="section-title">平台派单接收测试</div>
+            <div id="platformPendingInfo" class="hint">请选择车辆后从平台测试服务读取待确认订单。</div>
+            <div class="field">
+                <label for="platformPendingOrderSelect">当前车辆待确认订单</label>
+                <select id="platformPendingOrderSelect"></select>
+            </div>
+            <div class="compact-actions">
+                <button id="refreshPlatformPendingBtn" type="button" class="secondary">刷新平台待确认</button>
+                <button id="platformAckBtn" type="button" disabled>司机已收到</button>
+                <button id="platformUnreachableBtn" type="button" class="secondary" disabled>网络未收到</button>
+                <button id="platformDeclineBtn" type="button" class="danger" disabled>司机主动拒单</button>
             </div>
         </div>
 
@@ -929,6 +949,7 @@
 
     <script>
         const apiBaseInput = document.getElementById("apiBaseInput");
+        const platformBaseInput = document.getElementById("platformBaseInput");
         const routeAreaSelect = document.getElementById("routeAreaSelect");
         const vehicleSelect = document.getElementById("vehicleSelect");
         const routeSegmentSelect = document.getElementById("routeSegmentSelect");
@@ -941,6 +962,12 @@
         const boardingInfo = document.getElementById("boardingInfo");
         const confirmPickupBtn = document.getElementById("confirmPickupBtn");
         const confirmDropoffBtn = document.getElementById("confirmDropoffBtn");
+        const platformPendingInfo = document.getElementById("platformPendingInfo");
+        const platformPendingOrderSelect = document.getElementById("platformPendingOrderSelect");
+        const refreshPlatformPendingBtn = document.getElementById("refreshPlatformPendingBtn");
+        const platformAckBtn = document.getElementById("platformAckBtn");
+        const platformUnreachableBtn = document.getElementById("platformUnreachableBtn");
+        const platformDeclineBtn = document.getElementById("platformDeclineBtn");
         const randomOrder1Btn = document.getElementById("randomOrder1Btn");
         const randomOrder10Btn = document.getElementById("randomOrder10Btn");
         const randomOrder50Btn = document.getElementById("randomOrder50Btn");
@@ -1105,6 +1132,7 @@
         let routeGpsPickMode = false;
         let stationPickMode = false;
         let cachedPois = null;
+        let platformPendingOrders = [];
 
         function setStatus(message) {
             statusEl.textContent = message;
@@ -1128,6 +1156,11 @@
             resetManualPickupTimeBtn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
             routeSegmentSelect.disabled = isBusy || routeSegmentSelect.options.length <= 1;
+            platformPendingOrderSelect.disabled = isBusy || platformPendingOrderSelect.options.length === 0;
+            refreshPlatformPendingBtn.disabled = isBusy;
+            platformAckBtn.disabled = isBusy || !platformPendingOrderSelect.value;
+            platformUnreachableBtn.disabled = isBusy || !platformPendingOrderSelect.value;
+            platformDeclineBtn.disabled = isBusy || !platformPendingOrderSelect.value;
         }
 
         function setRouteGpsPickMode(enabled) {
@@ -1199,6 +1232,10 @@
 
         function apiBase() {
             return apiBaseInput.value.replace(/\/+$/, "");
+        }
+
+        function platformBase() {
+            return platformBaseInput.value.replace(/\/+$/, "");
         }
 
         function currentOperationAreaId() {
@@ -2077,6 +2114,12 @@
                 vehicleSelect.value = selected.vehicle_id;
                 routeSegmentSelect.value = "all";
                 drawVehicle(selected, { message: "车队已加载。" });
+                try {
+                    await loadPlatformPendingOrders();
+                } catch (error) {
+                    platformPendingInfo.textContent = `平台测试服务未连接或无数据：${error.message}`;
+                    renderPlatformPendingOrders({ vehicle_id: selected.vehicle_id, pending: [] });
+                }
             } catch (error) {
                 setStatus(`加载车队失败：${error.message}`);
             } finally {
@@ -2093,6 +2136,95 @@
             fleetById.set(vehicle.vehicle_id, vehicle);
             drawVehicle(vehicle, { message });
             return vehicle;
+        }
+
+        function updatePlatformPendingControls() {
+            const hasPending = platformPendingOrders.length > 0 && Boolean(platformPendingOrderSelect.value);
+            platformPendingOrderSelect.disabled = platformPendingOrders.length === 0;
+            platformAckBtn.disabled = !hasPending;
+            platformUnreachableBtn.disabled = !hasPending;
+            platformDeclineBtn.disabled = !hasPending;
+        }
+
+        function selectedPlatformPendingOrder() {
+            const index = Number(platformPendingOrderSelect.value);
+            if (!Number.isInteger(index) || index < 0 || index >= platformPendingOrders.length) {
+                return null;
+            }
+            return platformPendingOrders[index];
+        }
+
+        function renderPlatformPendingOrders(data) {
+            platformPendingOrders = data.pending || [];
+            platformPendingOrderSelect.innerHTML = "";
+            platformPendingOrders.forEach((item, index) => {
+                const option = document.createElement("option");
+                option.value = String(index);
+                option.textContent = [
+                    item.request_id || "-",
+                    item.event_reason || "matched",
+                    item.route_version ? `版本 ${item.route_version}` : null
+                ].filter(Boolean).join(" / ");
+                platformPendingOrderSelect.appendChild(option);
+            });
+            if (platformPendingOrders.length) {
+                platformPendingOrderSelect.value = "0";
+            }
+            const vehicleId = data.vehicle_id || selectedVehicleId() || "-";
+            platformPendingInfo.textContent = platformPendingOrders.length
+                ? `平台缓存车辆 ${vehicleId} 的待确认订单：${platformPendingOrders.length} 个。`
+                : `平台缓存车辆 ${vehicleId} 暂无待确认订单。`;
+            updatePlatformPendingControls();
+        }
+
+        async function loadPlatformPendingOrders(message) {
+            const vehicleId = selectedVehicleId();
+            if (!vehicleId) {
+                renderPlatformPendingOrders({ vehicle_id: "-", pending: [] });
+                throw new Error("未选择车辆");
+            }
+            const data = await fetchJson(
+                `${platformBase()}/platform/fleet/${encodeURIComponent(vehicleId)}/pending-navigation`
+            );
+            renderPlatformPendingOrders(data);
+            if (message) {
+                setStatus(message);
+            }
+            return data;
+        }
+
+        async function submitPlatformDriverConfirmation(received, reason) {
+            const vehicleId = selectedVehicleId();
+            if (!vehicleId) {
+                throw new Error("未选择车辆");
+            }
+            const pending = selectedPlatformPendingOrder();
+            if (!pending) {
+                throw new Error("当前车辆没有平台待确认订单");
+            }
+            const data = await fetchJson(
+                `${platformBase()}/platform/fleet/${encodeURIComponent(vehicleId)}/orders/${encodeURIComponent(pending.request_id)}/driver-push-confirmation`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        dispatch_base_url: apiBase(),
+                        received,
+                        reason: reason || (received ? "driver_app_ack" : "driver_push_unreachable"),
+                        platform_message_id: pending.platform_message_id || ""
+                    })
+                }
+            );
+            const vehicle = data.dispatch_response?.vehicle
+                || await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+            fleetById.set(vehicle.vehicle_id, vehicle);
+            drawVehicle(vehicle, {
+                message: received
+                    ? `平台确认司机已收到：${pending.request_id}`
+                    : `平台回传司机未接：${pending.request_id}，原因 ${reason || "driver_push_unreachable"}，订单已退回池中`
+            });
+            await loadPlatformPendingOrders();
+            return data;
         }
 
         async function submitVehiclePosition(point, messagePrefix = "车辆位置已上报并吸附到道路") {
@@ -3145,6 +3277,49 @@
                 setBusy(false);
             }
         });
+        refreshPlatformPendingBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await loadPlatformPendingOrders("平台待确认订单已刷新。");
+            } catch (error) {
+                platformPendingInfo.textContent = `读取平台待确认订单失败：${error.message}`;
+                renderPlatformPendingOrders({ vehicle_id: selectedVehicleId() || "-", pending: [] });
+                setStatus(`读取平台待确认订单失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        platformAckBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await submitPlatformDriverConfirmation(true);
+            } catch (error) {
+                setStatus(`平台确认司机收到失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        platformUnreachableBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await submitPlatformDriverConfirmation(false, "driver_push_unreachable");
+            } catch (error) {
+                setStatus(`平台拒绝司机接收失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        platformDeclineBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await submitPlatformDriverConfirmation(false, "driver_declined");
+            } catch (error) {
+                setStatus(`平台回传司机主动拒单失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        platformPendingOrderSelect.addEventListener("change", updatePlatformPendingControls);
         clearBtn.addEventListener("click", () => {
             clearMap();
             setStatus("路线已清空，禁区图形保留。");
@@ -3158,6 +3333,12 @@
             try {
                 routeSegmentSelect.value = "all";
                 await loadSelectedVehicle("车辆已切换。");
+                try {
+                    await loadPlatformPendingOrders();
+                } catch (error) {
+                    platformPendingInfo.textContent = `平台测试服务未连接或无数据：${error.message}`;
+                    renderPlatformPendingOrders({ vehicle_id: selectedVehicleId() || "-", pending: [] });
+                }
             } catch (error) {
                 setStatus(`切换车辆失败：${error.message}`);
             } finally {

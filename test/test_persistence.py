@@ -234,7 +234,7 @@ class PersistenceSerializationTest(unittest.TestCase):
         self.assertIsNone(order.answer_time)
         self.assertIsNone(order_payload["answer_time"])
 
-    def test_dispatch_assignment_sets_answer_time_once(self):
+    def test_driver_push_confirmation_sets_answer_time_once(self):
         order = make_order(self.city)
         vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
         vehicle.vehicle_id = "vehicle-code-1"
@@ -244,6 +244,11 @@ class PersistenceSerializationTest(unittest.TestCase):
         ]
 
         persistence.record_dispatch_assignment(order, vehicle, city_map=self.city, path_result={})
+        matched_payload = [payload for op, payload in self.fake_manager.tasks if op == "order"][-1]
+        self.assertIsNone(order.answer_time)
+        self.assertIsNone(matched_payload["answer_time"])
+
+        persistence.record_order_driver_push_confirmed(order, vehicle)
         first_answer_time = order.answer_time
         persistence.record_eta_result(vehicle)
 
@@ -251,7 +256,9 @@ class PersistenceSerializationTest(unittest.TestCase):
         self.assertIsNotNone(first_answer_time)
         self.assertEqual(order.answer_time, first_answer_time)
         self.assertTrue(order_payloads)
-        self.assertTrue(all(payload["answer_time"] == first_answer_time for payload in order_payloads))
+        confirmed_payloads = [payload for payload in order_payloads if payload["answer_time"] is not None]
+        self.assertTrue(confirmed_payloads)
+        self.assertTrue(all(payload["answer_time"] == first_answer_time for payload in confirmed_payloads))
 
     def test_query_orders_builds_filters_and_normalizes_rows(self):
         previous_pymysql = persistence.pymysql

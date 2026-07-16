@@ -26,9 +26,11 @@ class CoreDispatcher:
     # 核心订单池：用于缓存由于运力爆满、或严重绕路(不顺路)而未能及时指派的订单。
     order_pool = []
 
-    # 订单时间窗匹配参数：预约单提前 15 分钟释放，车辆最多早到等待 5 分钟。
-    ORDER_MATCH_DISPATCH_LEAD_SECONDS = 15 * 60
-    MAX_EARLY_PICKUP_WAIT_SECONDS = 5 * 60
+    # 订单时间窗匹配参数：远期预约单默认 1 小时外暂缓，预计上车前 30 分钟释放匹配。
+    ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS = 60 * 60
+    ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS = 30 * 60
+    ORDER_MATCH_DISPATCH_LEAD_SECONDS = ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS
+    MAX_EARLY_PICKUP_WAIT_SECONDS = 3 * 60
     EARLY_PICKUP_WAIT_COST_PER_MIN = 2.0
     LATE_PICKUP_COST_PER_MIN = 8.0
     
@@ -39,6 +41,7 @@ class CoreDispatcher:
     IDLE_FORECAST_CACHE_SECONDS = 15 * 60
     IDLE_FORECAST_REFRESH_RETRY_SECONDS = 60
     IDLE_MIN_HOTSPOT_DISTANCE_METERS = 800.0
+
     idle_hotspot_cache = {}
     idle_hotspot_cache_lock = threading.RLock()
     idle_hotspot_refresh_executor = None
@@ -46,6 +49,13 @@ class CoreDispatcher:
     idle_hotspot_refresh_inflight = set()
     idle_hotspot_refresh_lock = threading.Lock()
     idle_hotspot_refresh_failures = {}
+
+    # 司机端推送相关状态码
+    DRIVER_PUSH_UNREACHABLE_REASON = "driver_push_unreachable"
+    DRIVER_DECLINED_REASON = "driver_declined"
+
+    #司机端因为网络信号原因未及时接到订单的对该订单匹配的冷却时间(即该订单冷却时间内无法再匹配该车辆)
+    DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS = 3 * 60
 
     # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
@@ -181,9 +191,42 @@ class CoreDispatcher:
 
     @staticmethod
     def _order_can_enter_matching_window(order, current_timestamp):
-        """判断订单是否已进入可参与车辆匹配的提前窗口。"""
+        """判断订单是否已进入可参与车辆匹配的时间窗口。
+
+        只有期望上车时间距离当前时间超过远期阈值时才暂缓匹配；
+        远期订单到达“期望上车时间 - 提前释放时间”后重新参与匹配。
+        """
         earliest_ts = CoreDispatcher._order_pickup_earliest_timestamp(order)
-        return float(current_timestamp) >= earliest_ts - CoreDispatcher.ORDER_MATCH_DISPATCH_LEAD_SECONDS
+        current_ts = float(current_timestamp)
+        request_ts = float(getattr(order, "req_time", current_ts) or current_ts)
+        request_to_earliest = earliest_ts - request_ts
+        if request_to_earliest <= CoreDispatcher.ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS:
+            return True
+        return current_ts >= earliest_ts - CoreDispatcher.ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS
+
+    @classmethod
+    def matching_window_config(cls):
+        """返回订单池远期订单匹配窗口配置。"""
+        return {
+            "far_pickup_threshold_seconds": float(cls.ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS),
+            "far_pickup_match_lead_seconds": float(cls.ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS),
+        }
+
+    @classmethod
+    def configure_matching_window(cls, far_pickup_threshold_seconds=None, far_pickup_match_lead_seconds=None):
+        """运行时更新远期订单匹配窗口配置。"""
+        if far_pickup_threshold_seconds is not None:
+            threshold = float(far_pickup_threshold_seconds)
+            if threshold < 0:
+                raise ValueError("far_pickup_threshold_seconds 必须大于或等于 0")
+            cls.ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS = threshold
+        if far_pickup_match_lead_seconds is not None:
+            lead = float(far_pickup_match_lead_seconds)
+            if lead < 0:
+                raise ValueError("far_pickup_match_lead_seconds 必须大于或等于 0")
+            cls.ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS = lead
+            cls.ORDER_MATCH_DISPATCH_LEAD_SECONDS = lead
+        return cls.matching_window_config()
 
     @staticmethod
     def _mark_fleet_push_pending(vehicle, event=None):
@@ -201,24 +244,129 @@ class CoreDispatcher:
             "route_version": route_version,
             "created_at": datetime.now().replace(microsecond=0),
         }
+        events = CoreDispatcher._vehicle_fleet_push_pending_events(vehicle, create=True)
+        events.append(pending_event)
         vehicle.fleet_push_pending_event = pending_event
+        CoreDispatcher._refresh_pending_driver_push_route_versions(vehicle, route_version)
         return pending_event
 
     @staticmethod
     def _submit_pending_fleet_push_if_ready(vehicle):
-        """高德路线 ready 后提交一次待推送单车导航快照。"""
-        pending_event = getattr(vehicle, "fleet_push_pending_event", None)
-        if not isinstance(pending_event, dict):
+        """高德路线 ready 后提交当前版本的待推送单车导航快照。"""
+        events = CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+        if not events:
             return False
         route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
-        if pending_event.get("route_version") != route_version:
-            return False
         if getattr(vehicle, "planned_route_grasp_status", None) != "ready":
             return False
-        submitted = fleet_push.submit_vehicle_navigation(vehicle, pending_event)
-        if submitted:
-            vehicle.fleet_push_pending_event = None
-        return submitted
+        submitted_any = False
+        remaining = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("route_version") != route_version:
+                continue
+            submitted = fleet_push.submit_vehicle_navigation(vehicle, event)
+            submitted_any = submitted_any or submitted
+            if not submitted:
+                remaining.append(event)
+        CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, remaining)
+        return submitted_any
+
+    @staticmethod
+    def _vehicle_fleet_push_pending_events(vehicle, create=False):
+        """读取车辆待推送事件队列，并兼容旧的单事件字段。"""
+        if vehicle is None:
+            return []
+        events = getattr(vehicle, "fleet_push_pending_events", None)
+        if isinstance(events, list):
+            return events
+        legacy_event = getattr(vehicle, "fleet_push_pending_event", None)
+        if isinstance(legacy_event, dict):
+            events = [legacy_event]
+        else:
+            events = []
+        if create or events:
+            vehicle.fleet_push_pending_events = events
+        return events
+
+    @staticmethod
+    def _set_vehicle_fleet_push_pending_events(vehicle, events):
+        """写回车辆待推送事件队列，并维护旧字段兼容。"""
+        if vehicle is None:
+            return
+        clean_events = [event for event in (events or []) if isinstance(event, dict)]
+        vehicle.fleet_push_pending_events = clean_events
+        vehicle.fleet_push_pending_event = clean_events[-1] if clean_events else None
+
+    @staticmethod
+    def _remove_vehicle_fleet_push_events(vehicle, request_id):
+        """移除指定订单对应的待推送事件。"""
+        if vehicle is None:
+            return
+        request_id = str(request_id or "")
+        events = [
+            event for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+            if str(event.get("request_id") or "") != request_id
+        ]
+        CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, events)
+
+    @staticmethod
+    def _vehicle_driver_push_pending_map(vehicle, create=False):
+        """读取车辆上的订单级司机端待确认索引。"""
+        if vehicle is None:
+            return {}
+        pending = getattr(vehicle, "driver_push_pending_orders", None)
+        if isinstance(pending, dict):
+            return pending
+        pending = {}
+        request_id = getattr(vehicle, "driver_push_pending_request_id", None)
+        if request_id:
+            pending[str(request_id)] = {
+                "request_id": str(request_id),
+                "route_version": getattr(vehicle, "driver_push_route_version", None),
+                "created_at": None,
+            }
+        if create or pending:
+            vehicle.driver_push_pending_orders = pending
+        return pending
+
+    @staticmethod
+    def _sync_vehicle_driver_push_pending_flag(vehicle):
+        """根据订单级待确认索引刷新车辆汇总标记。"""
+        if vehicle is None:
+            return
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(vehicle)
+        vehicle.driver_push_pending = bool(pending)
+        vehicle.driver_push_pending_request_id = next(iter(pending), None)
+        vehicle.driver_push_route_version = None
+        if pending:
+            first = pending.get(vehicle.driver_push_pending_request_id) or {}
+            vehicle.driver_push_route_version = first.get("route_version")
+
+    @staticmethod
+    def _refresh_pending_driver_push_route_versions(vehicle, route_version):
+        """车辆路线版本变化时，把未确认订单和待推送事件绑定到最新版本。"""
+        if vehicle is None or not route_version:
+            return
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(vehicle, create=True)
+        for step in getattr(vehicle, "planned_route", []) or []:
+            order = step.get("order") if isinstance(step, dict) else None
+            if order is None:
+                continue
+            if not (getattr(order, "driver_push_pending", False) or getattr(order, "status", None) == "matched"):
+                continue
+            request_id = str(getattr(order, "request_id", ""))
+            if not request_id:
+                continue
+            order.driver_push_route_version = route_version
+            pending.setdefault(request_id, {"request_id": request_id})["route_version"] = route_version
+        for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle):
+            request_id = str(event.get("request_id") or "")
+            if request_id in pending:
+                event["route_version"] = route_version
+                event["driver_push_route_version"] = route_version
+        CoreDispatcher._sync_vehicle_driver_push_pending_flag(vehicle)
 
     # ============================================================
     # 功能一：订单路线成本评估与单车插单寻优
@@ -657,6 +805,82 @@ class CoreDispatcher:
         )
 
     @staticmethod
+    def _driver_push_failure_mode(reason):
+        """根据平台回传原因判断订单对原车辆的排除方式。
+
+        这里只识别两个平台约定值：
+        - driver_push_unreachable：网络或超时导致司机端未及时收到，临时冷却。
+        - driver_declined：司机主动拒单，对该订单永久排除该车辆。
+        未知值按网络未达处理，避免因为平台字符串异常而误永久排除。
+        """
+        normalized = str(reason or "").strip()
+        if normalized == CoreDispatcher.DRIVER_DECLINED_REASON:
+            return "permanent"
+        return "cooldown"
+
+    @staticmethod
+    def _record_driver_push_vehicle_exclusion(order, vehicle, reason, current_timestamp=None):
+        """记录某订单在重新匹配时需要排除的原车辆。
+
+        排除维度是“订单 + 车辆”，不会影响该车辆继续接其他订单。
+        网络未达写入 3 分钟冷却；司机主动拒单写入永久排除。
+        """
+        if order is None or vehicle is None:
+            return None
+        vehicle_id = str(CoreDispatcher._vehicle_identity(vehicle) or getattr(vehicle, "id", "") or "")
+        if not vehicle_id:
+            return None
+        now_ts = CoreDispatcher._event_timestamp(current_timestamp)
+        mode = CoreDispatcher._driver_push_failure_mode(reason)
+        until_ts = None
+        if mode == "cooldown":
+            until_ts = now_ts + CoreDispatcher.DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS
+            normalized_reason = CoreDispatcher.DRIVER_PUSH_UNREACHABLE_REASON
+        else:
+            normalized_reason = CoreDispatcher.DRIVER_DECLINED_REASON
+
+        exclusions = getattr(order, "driver_push_vehicle_exclusions", None)
+        if not isinstance(exclusions, dict):
+            exclusions = {}
+            order.driver_push_vehicle_exclusions = exclusions
+        exclusions[vehicle_id] = {
+            "mode": mode,
+            "reason": normalized_reason,
+            "until_ts": until_ts,
+            "created_at": now_ts,
+        }
+        return exclusions[vehicle_id]
+
+    @staticmethod
+    def _vehicle_excluded_for_order(order, vehicle, current_timestamp=None):
+        """判断某订单当前是否应跳过指定车辆。
+
+        冷却排除到期后会自动清理；永久排除会一直保留在订单内存对象上。
+        """
+        exclusions = getattr(order, "driver_push_vehicle_exclusions", None)
+        if not isinstance(exclusions, dict) or vehicle is None:
+            return False
+        vehicle_id = str(CoreDispatcher._vehicle_identity(vehicle) or getattr(vehicle, "id", "") or "")
+        if not vehicle_id:
+            return False
+        rule = exclusions.get(vehicle_id)
+        if not isinstance(rule, dict):
+            return False
+        if rule.get("mode") == "permanent":
+            return True
+
+        until_ts = rule.get("until_ts")
+        try:
+            until_ts = float(until_ts)
+        except (TypeError, ValueError):
+            exclusions.pop(vehicle_id, None)
+            return False
+        if CoreDispatcher._event_timestamp(current_timestamp) < until_ts:
+            return True
+        exclusions.pop(vehicle_id, None)
+        return False
+
+    @staticmethod
     def _calculate_cancel_risk_score(order, current_timestamp):
         """根据乘客已等待时长计算订单池调度用取消风险分，范围为 0~100。"""
         req_time = getattr(order, "req_time", current_timestamp)
@@ -730,13 +954,15 @@ class CoreDispatcher:
 
             for i in area_order_indices:
                 order = CoreDispatcher.order_pool[i]
-                # if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
-                #     continue
+                if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
+                    continue
 
                 c1, c2 = float("inf"), float("inf")
                 v1, r1 = None, None
 
                 for v in area_fleet:
+                    if CoreDispatcher._vehicle_excluded_for_order(order, v, current_timestamp):
+                        continue
                     if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
                         continue
                     if not CoreDispatcher._vehicle_can_accept_order(v):
@@ -810,26 +1036,11 @@ class CoreDispatcher:
                 break
 
             target_o = CoreDispatcher.order_pool.pop(best_o_idx)
-            was_idle_before_assignment = (
-                len(getattr(global_best_v, "on_board_orders", []) or []) == 0
-                and len(getattr(global_best_v, "planned_route", []) or []) == 0
-            )
-            CoreDispatcher._clear_idle_parking(global_best_v)
-            global_best_v.planned_route = global_best_route
-            route_result = CoreDispatcher.refresh_vehicle_route_metadata(
-                global_best_v,
-                city_map,
-                fleet_push_event={
-                    "event_reason": "order_assigned" if was_idle_before_assignment else "order_inserted",
-                    "request_id": target_o.request_id,
-                },
-            )
-            target_o.status = "waiting_pickup"
-            persistence.record_dispatch_assignment(
+            CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                 target_o,
                 global_best_v,
-                city_map=city_map,
-                path_result=route_result,
+                global_best_route,
+                city_map,
                 details={
                     "cancel_risk_score": best_cancel_risk_score,
                     "priority_score": best_priority_score,
@@ -842,6 +1053,42 @@ class CoreDispatcher:
             )
 
         return assign_count
+
+    @staticmethod
+    def _assign_order_to_vehicle_pending_confirmation(order, vehicle, route, city_map, details=None):
+        """把订单临时派给车辆，并等待平台确认司机端收到后再转 waiting_pickup。"""
+        was_idle_before_assignment = (
+            len(getattr(vehicle, "on_board_orders", []) or []) == 0
+            and len(getattr(vehicle, "planned_route", []) or []) == 0
+        )
+        event_reason = "order_assigned" if was_idle_before_assignment else "order_inserted"
+        CoreDispatcher._clear_idle_parking(vehicle)
+        vehicle.planned_route = route
+        order.status = "matched"
+        route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+            vehicle,
+            city_map,
+            fleet_push_event={
+                "event_reason": event_reason,
+                "request_id": order.request_id,
+            },
+        )
+        CoreDispatcher._set_driver_push_pending(
+            order,
+            vehicle,
+            event_reason=event_reason,
+        )
+        persistence.record_order_matched_pending(
+            order,
+            vehicle,
+            city_map=city_map,
+            path_result=route_result,
+            details={
+                **(details or {}),
+                "driver_push_pending": True,
+            },
+        )
+        return route_result
 
     @staticmethod
     def process_pool_matching(fleet, city_map, state_lock=None):
@@ -923,6 +1170,8 @@ class CoreDispatcher:
                         v1, r1 = None, None
 
                         for v in fleet:
+                            if CoreDispatcher._vehicle_excluded_for_order(order, v, current_timestamp):
+                                continue
                             # ===== 查看车辆已承诺容量是否还能接收该订单 =====
                             if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
                                 continue
@@ -1003,27 +1252,11 @@ class CoreDispatcher:
 
                     if best_o_idx != -1:
                         target_o = CoreDispatcher.order_pool.pop(best_o_idx)
-                        was_idle_before_assignment = (
-                            len(getattr(global_best_v, "on_board_orders", []) or []) == 0
-                            and len(getattr(global_best_v, "planned_route", []) or []) == 0
-                        )
-                        # 空车热点只是可中断引导；一旦接到真实订单，必须立即清理。
-                        CoreDispatcher._clear_idle_parking(global_best_v)
-                        global_best_v.planned_route = global_best_route
-                        route_result = CoreDispatcher.refresh_vehicle_route_metadata(
-                            global_best_v,
-                            city_map,
-                            fleet_push_event={
-                                "event_reason": "order_assigned" if was_idle_before_assignment else "order_inserted",
-                                "request_id": target_o.request_id,
-                            },
-                        )
-                        target_o.status = "waiting_pickup"
-                        persistence.record_dispatch_assignment(
+                        CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                             target_o,
                             global_best_v,
+                            global_best_route,
                             city_map=city_map,
-                            path_result=route_result,
                             details={
                                 "cancel_risk_score": best_cancel_risk_score,
                                 "priority_score": best_priority_score,
@@ -1059,6 +1292,235 @@ class CoreDispatcher:
             and not getattr(vehicle, "is_resting", False)
             and getattr(vehicle, "rest_status", "operating") == "operating"
         )
+
+    @staticmethod
+    def _event_timestamp(value=None):
+        """把接口或内部传入时间统一转为时间戳。"""
+        if value is None:
+            return time.time()
+        if isinstance(value, datetime):
+            return value.timestamp()
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return time.time()
+
+    @staticmethod
+    def _event_datetime(value=None):
+        """把接口或内部传入时间统一转为 datetime。"""
+        if isinstance(value, datetime):
+            return value.replace(microsecond=0)
+        return datetime.fromtimestamp(CoreDispatcher._event_timestamp(value)).replace(microsecond=0)
+
+    @staticmethod
+    def _route_version_matches(expected, actual):
+        """校验平台回调的路线版本；为空时允许兼容旧平台。"""
+        if expected in (None, "") or actual in (None, ""):
+            return True
+        return str(expected) == str(actual)
+
+    @staticmethod
+    def _set_driver_push_pending(order, vehicle, event_reason=None, current_timestamp=None):
+        """订单匹配成功后设置司机端接收待确认标记。"""
+        now_ts = CoreDispatcher._event_timestamp(current_timestamp)
+        route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
+        vehicle_id = CoreDispatcher._vehicle_identity(vehicle)
+        request_id = str(getattr(order, "request_id", ""))
+
+        order.status = "matched"
+        order.driver_push_pending = True
+        order.driver_push_vehicle_id = vehicle_id
+        order.driver_push_route_version = route_version
+        order.driver_push_attempt = int(getattr(order, "driver_push_attempt", 0) or 0) + 1
+        order.driver_push_reason = event_reason or "order_assigned"
+        order.driver_push_created_at = now_ts
+        order.driver_push_confirmed_at = None
+        order.driver_push_failed_reason = None
+
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(vehicle, create=True)
+        pending[request_id] = {
+            "request_id": request_id,
+            "route_version": route_version,
+            "event_reason": event_reason or "order_assigned",
+            "created_at": now_ts,
+        }
+
+        for pending_event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle):
+            if not isinstance(pending_event, dict) or str(pending_event.get("request_id") or "") != request_id:
+                continue
+            pending_event.update({
+                "driver_push_confirmation_required": True,
+                "confirmation_request_id": request_id,
+                "driver_push_route_version": route_version,
+            })
+        CoreDispatcher._sync_vehicle_driver_push_pending_flag(vehicle)
+        return route_version
+
+    @staticmethod
+    def _clear_driver_push_pending(order=None, vehicle=None):
+        """清理订单和车辆上的司机端待确认标记。"""
+        request_id = str(getattr(order, "request_id", "") or "") if order is not None else None
+        if order is not None:
+            order.driver_push_pending = False
+            order.driver_push_vehicle_id = None
+            order.driver_push_route_version = None
+            order.driver_push_reason = None
+            order.driver_push_created_at = None
+        if vehicle is not None:
+            pending = CoreDispatcher._vehicle_driver_push_pending_map(vehicle)
+            if request_id:
+                pending.pop(request_id, None)
+                CoreDispatcher._remove_vehicle_fleet_push_events(vehicle, request_id)
+            CoreDispatcher._sync_vehicle_driver_push_pending_flag(vehicle)
+
+    @staticmethod
+    def _find_vehicle_pending_order(vehicle, request_id):
+        """从车辆计划路线中查找指定待确认订单。"""
+        request_id = str(request_id)
+        for step in getattr(vehicle, "planned_route", []) or []:
+            order = step.get("order")
+            if order is not None and str(getattr(order, "request_id", "")) == request_id:
+                return order
+        return None
+
+    @staticmethod
+    def _find_pending_driver_push(request_id, fleet):
+        """根据订单号在车队中查找司机端待确认订单和车辆。"""
+        request_id = str(request_id)
+        for vehicle in fleet or []:
+            order = CoreDispatcher._find_vehicle_pending_order(vehicle, request_id)
+            if order is None:
+                continue
+            if getattr(order, "driver_push_pending", False) or getattr(order, "status", None) == "matched":
+                return order, vehicle
+        return None, None
+
+    @staticmethod
+    def _remove_order_from_vehicle_route(vehicle, request_id):
+        """从车辆后续路线中移除某订单的 O/D 步骤。"""
+        request_id = str(request_id)
+        before = len(getattr(vehicle, "planned_route", []) or [])
+        vehicle.planned_route = [
+            step for step in getattr(vehicle, "planned_route", []) or []
+            if str(getattr(step.get("order"), "request_id", "")) != request_id
+        ]
+        return before - len(vehicle.planned_route)
+
+    @staticmethod
+    def _requeue_driver_push_order(order, vehicle, city_map, reason="driver_push_failed"):
+        """司机端未收到或超时时撤销派车，并把订单退回池中。"""
+        request_id = str(getattr(order, "request_id", ""))
+        exclusion = CoreDispatcher._record_driver_push_vehicle_exclusion(order, vehicle, reason)
+        removed_steps = CoreDispatcher._remove_order_from_vehicle_route(vehicle, request_id)
+        order.status = "pooled"
+        order.driver_push_failed_reason = (exclusion or {}).get("reason") or reason
+        CoreDispatcher._clear_driver_push_pending(order, vehicle)
+        if all(str(getattr(existing, "request_id", "")) != request_id for existing in CoreDispatcher.order_pool):
+            CoreDispatcher.order_pool.append(order)
+
+        path_result = CoreDispatcher.refresh_vehicle_route_metadata(
+            vehicle,
+            city_map,
+            fleet_push_event=None,
+        )
+        CoreDispatcher._refresh_pending_driver_push_route_versions(
+            vehicle,
+            getattr(vehicle, "planned_route_grasp_route_version", None),
+        )
+        persistence.record_order_requeued_after_push_failure(order, reason=order.driver_push_failed_reason)
+        persistence.record_vehicle_route(vehicle, path_result=path_result)
+        persistence.record_vehicle_runtime(vehicle)
+        return {
+            "status": "requeued",
+            "request_id": request_id,
+            "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+            "removed_steps": removed_steps,
+            "reason": order.driver_push_failed_reason,
+            "vehicle_exclusion": exclusion,
+            "pool_size": len(CoreDispatcher.order_pool),
+        }
+
+    @staticmethod
+    def _confirm_driver_push_received(order, vehicle, occurred_at=None):
+        """平台确认司机端收到派单后，订单正式进入 waiting_pickup。"""
+        if getattr(order, "status", None) == "waiting_pickup" and not getattr(order, "driver_push_pending", False):
+            return {
+                "status": "waiting_pickup",
+                "request_id": str(getattr(order, "request_id", "")),
+                "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+                "idempotent": True,
+            }
+        confirm_time = CoreDispatcher._event_datetime(occurred_at)
+        order.status = "waiting_pickup"
+        order.driver_push_confirmed_at = confirm_time
+        if getattr(order, "answer_time", None) is None:
+            order.answer_time = confirm_time
+        CoreDispatcher._clear_driver_push_pending(order, vehicle)
+        persistence.record_order_driver_push_confirmed(order, vehicle)
+        persistence.record_vehicle_runtime(vehicle)
+        return {
+            "status": "waiting_pickup",
+            "request_id": str(getattr(order, "request_id", "")),
+            "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+            "answer_time": order.answer_time.isoformat(sep=" ") if isinstance(order.answer_time, datetime) else order.answer_time,
+        }
+
+    @staticmethod
+    def expire_driver_push_confirmations(fleet, city_map, current_timestamp=None):
+        """平台负责超时判断，算法侧不再自动退回 matched 订单。"""
+        return []
+
+    @staticmethod
+    def confirm_driver_push_delivery(request_id, fleet, city_map, received=True, vehicle_id=None, route_version=None, reason=None, occurred_at=None):
+        """平台回调司机端是否收到派单信息。"""
+        request_id = str(request_id)
+        matched_vehicle = None
+        matched_order = None
+        for vehicle in fleet or []:
+            order = CoreDispatcher._find_vehicle_pending_order(vehicle, request_id)
+            if order is None:
+                continue
+            matched_vehicle = vehicle
+            matched_order = order
+            break
+
+        if matched_order is None:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": "stale_confirmation",
+                "request_id": request_id,
+                "message": "订单不在当前待确认车辆路线中，可能已超时退回、取消或改派。",
+            }
+
+        current_vehicle_id = str(CoreDispatcher._vehicle_identity(matched_vehicle) or "")
+        if vehicle_id not in (None, "") and str(vehicle_id) != current_vehicle_id:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": "stale_confirmation",
+                "request_id": request_id,
+                "vehicle_id": vehicle_id,
+                "current_vehicle_id": current_vehicle_id,
+            }
+        if getattr(matched_order, "status", None) == "waiting_pickup" and not getattr(matched_order, "driver_push_pending", False):
+            result = CoreDispatcher._confirm_driver_push_received(matched_order, matched_vehicle, occurred_at=occurred_at)
+            result["ok"] = True
+            return result
+
+        if not received:
+            result = CoreDispatcher._requeue_driver_push_order(
+                matched_order,
+                matched_vehicle,
+                city_map,
+                reason=reason or CoreDispatcher.DRIVER_PUSH_UNREACHABLE_REASON,
+            )
+            result["ok"] = True
+            return result
+
+        result = CoreDispatcher._confirm_driver_push_received(matched_order, matched_vehicle, occurred_at=occurred_at)
+        result["ok"] = True
+        return result
 
     @staticmethod
     def _archive_cancelled_order(order, cancel_type="passenger", cancel_time=None):
@@ -1137,6 +1599,8 @@ class CoreDispatcher:
                 step for step in vehicle.planned_route
                 if str(step["order"].request_id) != request_id
             ]
+            if getattr(cancelled_order, "driver_push_pending", False):
+                CoreDispatcher._clear_driver_push_pending(cancelled_order, vehicle)
             CoreDispatcher._archive_cancelled_order(cancelled_order, cancel_time=cancel_time)
             path_result = CoreDispatcher.refresh_vehicle_route_metadata(
                 vehicle,
@@ -3084,6 +3548,8 @@ class CoreDispatcher:
             target_node = order.o_node if step["type"] == "O" else order.d_node
             if target_node.id != current_node.id:
                 break
+            if step["type"] == "O" and getattr(order, "status", None) == "matched":
+                break
 
             if step["type"] == "O":
                 if all(o.request_id != order.request_id for o in vehicle.on_board_orders):
@@ -3533,6 +3999,28 @@ class CoreDispatcher:
             }
         if request_id is not None and str(request_id) != str(order.request_id):
             return {"ok": False, "status_code": 409, "error": "request_id 不是当前下一步订单"}
+        order_status = getattr(order, "status", None)
+        if expected_action == "pickup" and order_status == "matched":
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": "订单仍在等待司机端接收确认，不能执行上车确认",
+                "code": "driver_push_not_confirmed",
+            }
+        if expected_action == "pickup" and order_status not in (None, "", "waiting_pickup"):
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": f"订单当前状态为 {order_status}，不能执行上车确认",
+                "code": "invalid_order_status",
+            }
+        if expected_action == "dropoff" and order_status not in (None, "", "riding"):
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": f"订单当前状态为 {order_status}，不能执行下车确认",
+                "code": "invalid_order_status",
+            }
 
         target_node = order.o_node if step.get("type") == "O" else order.d_node
         gps = getattr(vehicle, "gps", {}) or {}

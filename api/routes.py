@@ -105,6 +105,20 @@ def _normalize_order_query_filters(data):
     return filters
 
 
+def _optional_non_negative_number(data, field_name):
+    """解析可选非负数配置项。"""
+    value = data.get(field_name)
+    if value in (None, ""):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} 必须是数字") from exc
+    if value < 0:
+        raise ValueError(f"{field_name} 必须大于或等于 0")
+    return value
+
+
 def _vehicle_to_dict(v):
     """将 Vehicle 对象转为接口可返回的 JSON 字典。
 
@@ -1155,6 +1169,8 @@ def _find_order_eta_context(request_id):
         ]
         if matched_steps:
             order = matched_steps[0]["order"]
+            if getattr(order, "status", None) == "matched" or getattr(order, "driver_push_pending", False):
+                return order, "matched", vehicle
             has_pickup_step = any(step["type"] == "O" for step in matched_steps)
             return order, "waiting" if has_pickup_step else "riding", vehicle
 
@@ -1477,6 +1493,61 @@ def cancel_order(request_id):
     return jsonify(result)
 
 
+@bp.route("/orders/<request_id>/driver-push-confirmation", methods=["POST"])
+def confirm_order_driver_push(request_id):
+    """平台回调司机端是否真正收到派单信息。"""
+    if not state.system_initialized:
+        return jsonify({"error": "系统未初始化"}), 400
+
+    data = request.get_json(silent=True) or {}
+    if "received" not in data:
+        return jsonify({"error": "received 必须填写 true 或 false"}), 400
+    raw_received = data.get("received")
+    if isinstance(raw_received, bool):
+        received = raw_received
+    elif isinstance(raw_received, str) and raw_received.strip().lower() in {"true", "1", "yes", "y"}:
+        received = True
+    elif isinstance(raw_received, str) and raw_received.strip().lower() in {"false", "0", "no", "n"}:
+        received = False
+    else:
+        return jsonify({"error": "received 必须是布尔值"}), 400
+    try:
+        occurred_at = _parse_optional_event_timestamp(data.get("occurred_at"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    vehicle_id = data.get("vehicle_id")
+    route_version = data.get("route_version")
+    reason = data.get("reason")
+    with state.state_lock:
+        target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id) if vehicle_id not in (None, "") else None
+        if target_vehicle is None:
+            for vehicle in state.fleet or []:
+                if any(str(step["order"].request_id) == str(request_id) for step in getattr(vehicle, "planned_route", []) or []):
+                    target_vehicle = vehicle
+                    break
+        city_map = _city_for_vehicle(target_vehicle) if target_vehicle is not None else None
+        result = CoreDispatcher.confirm_driver_push_delivery(
+            request_id,
+            state.fleet,
+            city_map,
+            received=received,
+            vehicle_id=vehicle_id,
+            route_version=route_version,
+            reason=reason,
+            occurred_at=occurred_at,
+        )
+        if not result.get("ok"):
+            status_code = int(result.get("status_code") or 400)
+            payload = {key: value for key, value in result.items() if key not in {"ok", "status_code"}}
+            return jsonify(payload), status_code
+
+        payload = {key: value for key, value in result.items() if key != "ok"}
+        if target_vehicle is not None:
+            payload["vehicle"] = _vehicle_to_dict(target_vehicle)
+        return jsonify(payload)
+
+
 @bp.route("/admin/orders/query", methods=["POST"])
 def admin_query_orders():
     """服务端按组合条件查询订单数据库。"""
@@ -1489,6 +1560,28 @@ def admin_query_orders():
         })
     except Exception as exc:
         return _admin_error_response(exc)
+
+
+@bp.route("/admin/dispatch/matching-window-config", methods=["GET", "POST", "PUT"])
+def admin_dispatch_matching_window_config():
+    """读取或更新订单池远期订单匹配窗口配置。"""
+    if request.method == "GET":
+        return jsonify(CoreDispatcher.matching_window_config())
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求体必须是 JSON 对象"}), 400
+    try:
+        config = CoreDispatcher.configure_matching_window(
+            far_pickup_threshold_seconds=_optional_non_negative_number(data, "far_pickup_threshold_seconds"),
+            far_pickup_match_lead_seconds=_optional_non_negative_number(data, "far_pickup_match_lead_seconds"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "status": "ok",
+        "config": config,
+    })
 
 
 @bp.route("/admin/stations", methods=["POST"])

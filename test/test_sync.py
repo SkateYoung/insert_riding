@@ -140,26 +140,39 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
 
     def setUp(self):
         CoreDispatcher.order_pool.clear()
+        self._matching_window_config = CoreDispatcher.matching_window_config()
 
     def tearDown(self):
         CoreDispatcher.order_pool.clear()
+        CoreDispatcher.configure_matching_window(**self._matching_window_config)
 
     def _run_one_pool_loop(self, fleet, city):
         with mock.patch("api.core.time.sleep", side_effect=_StopPoolLoop), \
                 mock.patch.object(CoreDispatcher, "refresh_scheduled_rest_requests", return_value=None), \
                 mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={}), \
-                mock.patch("api.core.persistence.record_dispatch_assignment"):
+                mock.patch("api.core.persistence.record_dispatch_assignment"), \
+                mock.patch("api.core.persistence.record_order_matched_pending"):
             with self.assertRaises(_StopPoolLoop):
                 CoreDispatcher.process_pool_matching(fleet, city)
+
+    def _run_area_cycle(self, fleet, city, operation_area_id=None):
+        with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
+                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={}), \
+                mock.patch("api.core.persistence.record_order_matched_pending"):
+            return CoreDispatcher._process_pool_matching_area_cycle(
+                fleet,
+                city,
+                operation_area_id=operation_area_id,
+            )
 
     def test_future_order_stays_in_pool_before_dispatch_window(self):
         base_ts = 1_000_000.0
         city = _TinyCity({
-            ("V", "O"): _seconds_distance(600),
+            ("V", "O"): _seconds_distance(1500),
             ("O", "D"): _seconds_distance(300),
         })
         vehicle = _fake_vehicle("V1", "V", base_ts)
-        order = _fake_order(city, "FUTURE", "O", "D", base_ts, 3600, 4200)
+        order = _fake_order(city, "FUTURE", "O", "D", base_ts, 7200, 7800)
         CoreDispatcher.order_pool.append(order)
 
         self._run_one_pool_loop([vehicle], city)
@@ -167,6 +180,66 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(CoreDispatcher.order_pool, [order])
         self.assertEqual(vehicle.planned_route, [])
         self.assertEqual(order.status, "pooled")
+
+    def test_future_order_enters_pool_at_configured_lead_time(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("V", "O"): _seconds_distance(1500),
+            ("O", "D"): _seconds_distance(300),
+        })
+        vehicle = _fake_vehicle("V1", "V", base_ts + 5401)
+        order = _fake_order(city, "FUTURE_READY", "O", "D", base_ts, 7200, 7800)
+        CoreDispatcher.order_pool.append(order)
+
+        self._run_one_pool_loop([vehicle], city)
+
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual([step["order"].request_id for step in vehicle.planned_route], ["FUTURE_READY", "FUTURE_READY"])
+
+    def test_near_future_order_matches_immediately_when_not_far_reservation(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("V", "O"): _seconds_distance(2500),
+            ("O", "D"): _seconds_distance(300),
+        })
+        vehicle = _fake_vehicle("V1", "V", base_ts)
+        order = _fake_order(city, "NEAR_FUTURE", "O", "D", base_ts, 2700, 3300)
+        CoreDispatcher.order_pool.append(order)
+
+        self._run_one_pool_loop([vehicle], city)
+
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual([step["order"].request_id for step in vehicle.planned_route], ["NEAR_FUTURE", "NEAR_FUTURE"])
+
+    def test_multi_area_future_order_respects_matching_window(self):
+        base_ts = 1_000_000.0
+        area_id = 10001
+        city = _TinyCity({
+            ("V", "O"): _seconds_distance(600),
+            ("O", "D"): _seconds_distance(300),
+        })
+        vehicle = _fake_vehicle("V1", "V", base_ts)
+        vehicle.operation_area_id = area_id
+        order = _fake_order(city, "AREA_FUTURE", "O", "D", base_ts, 7200, 7800)
+        order.operation_area_id = area_id
+        CoreDispatcher.order_pool.append(order)
+
+        assigned = self._run_area_cycle([vehicle], city, operation_area_id=area_id)
+
+        self.assertEqual(assigned, 0)
+        self.assertEqual(CoreDispatcher.order_pool, [order])
+        self.assertEqual(vehicle.planned_route, [])
+
+    def test_matching_window_config_can_change_threshold_and_lead(self):
+        CoreDispatcher.configure_matching_window(
+            far_pickup_threshold_seconds=1800,
+            far_pickup_match_lead_seconds=600,
+        )
+        base_ts = 1_000_000.0
+        order = _fake_order(_TinyCity({("O", "D"): 1.0}), "CONFIG", "O", "D", base_ts, 2400, 3000)
+
+        self.assertFalse(CoreDispatcher._order_can_enter_matching_window(order, base_ts + 1700))
+        self.assertTrue(CoreDispatcher._order_can_enter_matching_window(order, base_ts + 1801))
 
     def test_vehicle_that_arrives_inside_window_beats_too_early_vehicle(self):
         base_ts = 1_000_000.0
@@ -185,7 +258,82 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(CoreDispatcher.order_pool, [])
         self.assertEqual(near_vehicle.planned_route, [])
         self.assertEqual([step["order"].request_id for step in far_vehicle.planned_route], ["WINDOW", "WINDOW"])
-        self.assertEqual(order.status, "waiting_pickup")
+        self.assertEqual(order.status, "matched")
+        self.assertTrue(getattr(order, "driver_push_pending", False))
+        self.assertTrue(getattr(far_vehicle, "driver_push_pending", False))
+        self.assertTrue(CoreDispatcher._vehicle_can_accept_order(far_vehicle))
+
+    def test_driver_push_unreachable_cooldown_skips_original_vehicle(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("NEAR", "O"): _seconds_distance(60),
+            ("FAR", "O"): _seconds_distance(300),
+            ("O", "D"): _seconds_distance(120),
+        })
+        near_vehicle = _fake_vehicle("NEAR_V", "NEAR", base_ts)
+        far_vehicle = _fake_vehicle("FAR_V", "FAR", base_ts)
+        order = _fake_order(city, "COOLDOWN", "O", "D", base_ts, 0, 1200)
+        CoreDispatcher._record_driver_push_vehicle_exclusion(
+            order,
+            near_vehicle,
+            "driver_push_unreachable",
+            current_timestamp=base_ts,
+        )
+        CoreDispatcher.order_pool.append(order)
+
+        self._run_one_pool_loop([near_vehicle, far_vehicle], city)
+
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual(near_vehicle.planned_route, [])
+        self.assertEqual([step["order"].request_id for step in far_vehicle.planned_route], ["COOLDOWN", "COOLDOWN"])
+
+    def test_driver_push_unreachable_expired_cooldown_allows_original_vehicle(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("NEAR", "O"): _seconds_distance(60),
+            ("FAR", "O"): _seconds_distance(300),
+            ("O", "D"): _seconds_distance(120),
+        })
+        near_vehicle = _fake_vehicle("NEAR_V", "NEAR", base_ts)
+        far_vehicle = _fake_vehicle("FAR_V", "FAR", base_ts)
+        order = _fake_order(city, "COOLDOWN_EXPIRED", "O", "D", base_ts, 0, 1200)
+        CoreDispatcher._record_driver_push_vehicle_exclusion(
+            order,
+            near_vehicle,
+            "driver_push_unreachable",
+            current_timestamp=base_ts - 181.0,
+        )
+        CoreDispatcher.order_pool.append(order)
+
+        self._run_one_pool_loop([near_vehicle, far_vehicle], city)
+
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual([step["order"].request_id for step in near_vehicle.planned_route], ["COOLDOWN_EXPIRED", "COOLDOWN_EXPIRED"])
+        self.assertEqual(far_vehicle.planned_route, [])
+
+    def test_driver_declined_permanently_skips_original_vehicle(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("NEAR", "O"): _seconds_distance(60),
+            ("FAR", "O"): _seconds_distance(300),
+            ("O", "D"): _seconds_distance(120),
+        })
+        near_vehicle = _fake_vehicle("NEAR_V", "NEAR", base_ts)
+        far_vehicle = _fake_vehicle("FAR_V", "FAR", base_ts)
+        order = _fake_order(city, "DECLINED", "O", "D", base_ts, 0, 1200)
+        CoreDispatcher._record_driver_push_vehicle_exclusion(
+            order,
+            near_vehicle,
+            "driver_declined",
+            current_timestamp=base_ts - 3600.0,
+        )
+        CoreDispatcher.order_pool.append(order)
+
+        self._run_one_pool_loop([near_vehicle, far_vehicle], city)
+
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual(near_vehicle.planned_route, [])
+        self.assertEqual([step["order"].request_id for step in far_vehicle.planned_route], ["DECLINED", "DECLINED"])
 
 
 def main():

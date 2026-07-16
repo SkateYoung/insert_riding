@@ -100,6 +100,10 @@ def _order_snapshot(order):
         "eta_error": getattr(order, "eta_error", None),
         "estimated_arrival_time": getattr(order, "estimated_arrival_time", None),
         "estimated_dropoff_time": getattr(order, "estimated_dropoff_time", None),
+        "driver_push_pending": getattr(order, "driver_push_pending", None),
+        "driver_push_vehicle_id": getattr(order, "driver_push_vehicle_id", None),
+        "driver_push_route_version": getattr(order, "driver_push_route_version", None),
+        "driver_push_reason": getattr(order, "driver_push_reason", None),
     }
 
 
@@ -171,7 +175,7 @@ def build_payload(vehicle, event):
     """Build the single vehicle navigation push payload."""
     clean_event = _json_safe(event or {})
     vehicle_id = clean_event.get("vehicle_id") or _vehicle_identity(vehicle)
-    return {
+    payload = {
         "event_type": clean_event.get("event_type") or "fleet_route_changed",
         "event_reason": clean_event.get("event_reason"),
         "vehicle_id": vehicle_id,
@@ -180,6 +184,13 @@ def build_payload(vehicle, event):
         "pushed_at": datetime.now().replace(microsecond=0).isoformat(sep=" "),
         "vehicle": vehicle_snapshot(vehicle),
     }
+    if clean_event.get("driver_push_confirmation_required"):
+        payload.update({
+            "driver_push_confirmation_required": True,
+            "confirmation_request_id": clean_event.get("confirmation_request_id") or clean_event.get("request_id"),
+            "driver_push_route_version": clean_event.get("driver_push_route_version") or clean_event.get("route_version"),
+        })
+    return payload
 
 
 def _post_payload(url, payload, timeout):
