@@ -143,7 +143,7 @@
 
         .tabs {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 6px;
             margin: 8px 0 12px;
         }
@@ -295,6 +295,18 @@
         .map-marker.stop-other {
             background: #64748b;
         }
+
+        .map-marker.commute-station {
+            background: #0891b2;
+        }
+
+        .map-marker.commute-line-stop {
+            background: #f97316;
+        }
+
+        .map-marker.route-station {
+            background: #0ea5e9;
+        }
     </style>
     <script>
         window._AMapSecurityConfig = {
@@ -314,6 +326,7 @@
             <button class="tab-button active" type="button" data-tab="routeTab">路线展示</button>
             <button class="tab-button" type="button" data-tab="operationAreaTab">运营区域</button>
             <button class="tab-button" type="button" data-tab="restrictionTab">运营禁区</button>
+            <button class="tab-button" type="button" data-tab="commuteTab">通勤快线</button>
             <button class="tab-button" type="button" data-tab="adminTab">司机车辆</button>
         </div>
 
@@ -379,7 +392,40 @@
         </div>
 
         <div class="tool-block">
-            <div class="section-title">模拟随机订单</div>
+            <div class="section-title">动态公交点选下单</div>
+            <div class="field">
+                <label for="dynamicOrderRequestInput">订单请求ID</label>
+                <input id="dynamicOrderRequestInput" placeholder="可为空，自动生成">
+            </div>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="dynamicOriginLonInput">起点经度</label>
+                    <input id="dynamicOriginLonInput" type="number" step="0.00000001">
+                </div>
+                <div class="field">
+                    <label for="dynamicOriginLatInput">起点纬度</label>
+                    <input id="dynamicOriginLatInput" type="number" step="0.00000001">
+                </div>
+                <div class="field">
+                    <label for="dynamicDestinationLonInput">终点经度</label>
+                    <input id="dynamicDestinationLonInput" type="number" step="0.00000001">
+                </div>
+                <div class="field">
+                    <label for="dynamicDestinationLatInput">终点纬度</label>
+                    <input id="dynamicDestinationLatInput" type="number" step="0.00000001">
+                </div>
+            </div>
+            <div class="compact-actions">
+                <button id="reloadDynamicPoisBtn" type="button" class="secondary">显示运营区站点</button>
+                <button id="createDynamicOrderBtn" type="button">发起动态订单</button>
+                <button id="pickDynamicOriginBtn" type="button" class="secondary">点选起点站</button>
+                <button id="pickDynamicDestinationBtn" type="button" class="secondary">点选终点站</button>
+            </div>
+            <div id="dynamicOrderInfo" class="hint">选择运营区域后显示站点，点击“点选起点站/终点站”再点击地图站点图标即可填入精确坐标；下方乘客与时间窗也会用于动态订单。</div>
+        </div>
+
+        <div class="tool-block">
+            <div class="section-title">乘客与时间窗 / 模拟随机订单</div>
             <div class="form-grid">
                 <div class="field">
                     <label for="manualPickupEarliestInput">最早上车时间</label>
@@ -649,6 +695,155 @@
         </div>
 
         <div class="hint">选择已有策略后可继续绘制并闭合新禁区，保存后会追加到该策略；新增策略会先清空当前表单。画禁区时请按边界顺时针或逆时针依次点击，避免对角线交叉。</div>
+        </div>
+
+        <div id="commuteTab" class="tab-panel">
+            <div class="divider"></div>
+            <div class="section-title">通勤快线测试</div>
+
+            <div class="tool-block">
+                <div class="section-title">线路与固定站点</div>
+                <div class="field">
+                    <label for="commuteLineSelect">快线线路</label>
+                    <select id="commuteLineSelect"></select>
+                </div>
+                <div class="compact-actions">
+                    <button id="reloadCommuteLinesBtn" type="button" class="secondary">查询线路</button>
+                    <button id="newCommuteLineBtn" type="button">新增线路</button>
+                </div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="commuteLineCodeInput">线路编码</label>
+                        <input id="commuteLineCodeInput" placeholder="line_001">
+                    </div>
+                    <div class="field">
+                        <label for="commuteLineNameInput">线路名称</label>
+                        <input id="commuteLineNameInput" placeholder="大学城通勤快线">
+                    </div>
+                    <div class="field">
+                        <label for="commuteAreaSelect">所属运营区</label>
+                        <select id="commuteAreaSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteLineStatusSelect">线路状态</label>
+                        <select id="commuteLineStatusSelect">
+                            <option value="enabled">enabled</option>
+                            <option value="disabled">disabled</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="commuteLineDescriptionInput">线路说明</label>
+                    <textarea id="commuteLineDescriptionInput"></textarea>
+                </div>
+                <div class="field">
+                    <label for="commuteStopsInput">站点经纬度 JSON</label>
+                    <textarea id="commuteStopsInput" class="json-input" placeholder='[{"lon":113.1,"lat":23.1},{"lon":113.2,"lat":23.2}]'></textarea>
+                </div>
+                <div class="field">
+                    <label for="commutePoiSelect">运营区站点</label>
+                    <select id="commutePoiSelect" multiple size="7"></select>
+                </div>
+                <div class="compact-actions">
+                    <button id="reloadCommutePoisBtn" type="button" class="secondary">加载运营区站点</button>
+                    <button id="addCommuteSelectedPoisBtn" type="button" class="secondary">追加选中站点</button>
+                    <button id="clearCommuteStopsBtn" type="button" class="secondary">清空线路站点</button>
+                </div>
+                <div id="commutePoiInfo" class="hint">选择运营区后可加载该区站点，按住 Ctrl 或 Shift 可多选并追加到线路站序。</div>
+                <div class="compact-actions">
+                    <button id="pickCommuteStopBtn" type="button" class="secondary">点选追加站点</button>
+                    <button id="saveCommuteLineBtn" type="button">保存线路</button>
+                    <button id="replaceCommuteStopsBtn" type="button" class="secondary">替换站点顺序</button>
+                    <button id="deleteCommuteLineBtn" type="button" class="danger">删除线路</button>
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">车辆绑定快线</div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="commuteVehicleSelect">车辆</label>
+                        <select id="commuteVehicleSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteAssignLineSelect">线路</label>
+                        <select id="commuteAssignLineSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteTaskModeSelect">任务模式</label>
+                        <select id="commuteTaskModeSelect">
+                            <option value="commute_fixed_waiting">定点候客</option>
+                            <option value="commute_cruising">巡游</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteAssignStatusSelect">绑定状态</label>
+                        <select id="commuteAssignStatusSelect">
+                            <option value="active">active</option>
+                            <option value="disabled">disabled</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="compact-actions">
+                    <button id="assignCommuteVehicleBtn" type="button">绑定车辆</button>
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">快线下单与上下车</div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="commuteOrderLineSelect">下单线路</label>
+                        <select id="commuteOrderLineSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteOrderRequestInput">订单请求ID</label>
+                        <input id="commuteOrderRequestInput">
+                    </div>
+                    <div class="field">
+                        <label for="commuteOriginLonInput">上车经度</label>
+                        <input id="commuteOriginLonInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="commuteOriginLatInput">上车纬度</label>
+                        <input id="commuteOriginLatInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="commuteDestinationLonInput">下车经度</label>
+                        <input id="commuteDestinationLonInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="commuteDestinationLatInput">下车纬度</label>
+                        <input id="commuteDestinationLatInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="commutePassengerPhoneInput">乘客手机号</label>
+                        <input id="commutePassengerPhoneInput" type="tel">
+                    </div>
+                    <div class="field">
+                        <label for="commutePassengerCountInput">乘客人数</label>
+                        <input id="commutePassengerCountInput" type="number" min="1" value="1">
+                    </div>
+                    <div class="field">
+                        <label for="commutePassengerIdInput">乘客ID</label>
+                        <input id="commutePassengerIdInput">
+                    </div>
+                    <div class="field">
+                        <label for="commuteBoardingVehicleSelect">上下车车辆</label>
+                        <select id="commuteBoardingVehicleSelect"></select>
+                    </div>
+                </div>
+                <div class="compact-actions">
+                    <button id="pickCommuteOriginBtn" type="button" class="secondary">点选上车站</button>
+                    <button id="pickCommuteDestinationBtn" type="button" class="secondary">点选下车站</button>
+                    <button id="createCommuteOrderBtn" type="button">创建快线订单</button>
+                    <button id="queryCommuteOrderBtn" type="button" class="secondary">查询订单</button>
+                    <button id="cancelCommuteOrderBtn" type="button" class="danger">取消订单</button>
+                    <button id="commutePickupBtn" type="button" class="secondary">确认上车</button>
+                    <button id="commuteDropoffBtn" type="button" class="secondary">确认下车</button>
+                </div>
+                <div id="commuteResultBox" class="result-box">暂无快线测试结果。</div>
+            </div>
         </div>
 
         <div id="adminTab" class="tab-panel">
@@ -968,6 +1163,16 @@
         const platformAckBtn = document.getElementById("platformAckBtn");
         const platformUnreachableBtn = document.getElementById("platformUnreachableBtn");
         const platformDeclineBtn = document.getElementById("platformDeclineBtn");
+        const dynamicOrderRequestInput = document.getElementById("dynamicOrderRequestInput");
+        const dynamicOriginLonInput = document.getElementById("dynamicOriginLonInput");
+        const dynamicOriginLatInput = document.getElementById("dynamicOriginLatInput");
+        const dynamicDestinationLonInput = document.getElementById("dynamicDestinationLonInput");
+        const dynamicDestinationLatInput = document.getElementById("dynamicDestinationLatInput");
+        const reloadDynamicPoisBtn = document.getElementById("reloadDynamicPoisBtn");
+        const createDynamicOrderBtn = document.getElementById("createDynamicOrderBtn");
+        const pickDynamicOriginBtn = document.getElementById("pickDynamicOriginBtn");
+        const pickDynamicDestinationBtn = document.getElementById("pickDynamicDestinationBtn");
+        const dynamicOrderInfo = document.getElementById("dynamicOrderInfo");
         const randomOrder1Btn = document.getElementById("randomOrder1Btn");
         const randomOrder10Btn = document.getElementById("randomOrder10Btn");
         const randomOrder50Btn = document.getElementById("randomOrder50Btn");
@@ -1018,6 +1223,48 @@
         const createStationBatchBtn = document.getElementById("createStationBatchBtn");
         const deleteStationBatchBtn = document.getElementById("deleteStationBatchBtn");
         const stationResultBox = document.getElementById("stationResultBox");
+
+        const commuteLineSelect = document.getElementById("commuteLineSelect");
+        const reloadCommuteLinesBtn = document.getElementById("reloadCommuteLinesBtn");
+        const newCommuteLineBtn = document.getElementById("newCommuteLineBtn");
+        const commuteLineCodeInput = document.getElementById("commuteLineCodeInput");
+        const commuteLineNameInput = document.getElementById("commuteLineNameInput");
+        const commuteAreaSelect = document.getElementById("commuteAreaSelect");
+        const commuteLineStatusSelect = document.getElementById("commuteLineStatusSelect");
+        const commuteLineDescriptionInput = document.getElementById("commuteLineDescriptionInput");
+        const commuteStopsInput = document.getElementById("commuteStopsInput");
+        const commutePoiSelect = document.getElementById("commutePoiSelect");
+        const reloadCommutePoisBtn = document.getElementById("reloadCommutePoisBtn");
+        const addCommuteSelectedPoisBtn = document.getElementById("addCommuteSelectedPoisBtn");
+        const clearCommuteStopsBtn = document.getElementById("clearCommuteStopsBtn");
+        const commutePoiInfo = document.getElementById("commutePoiInfo");
+        const pickCommuteStopBtn = document.getElementById("pickCommuteStopBtn");
+        const saveCommuteLineBtn = document.getElementById("saveCommuteLineBtn");
+        const replaceCommuteStopsBtn = document.getElementById("replaceCommuteStopsBtn");
+        const deleteCommuteLineBtn = document.getElementById("deleteCommuteLineBtn");
+        const commuteVehicleSelect = document.getElementById("commuteVehicleSelect");
+        const commuteAssignLineSelect = document.getElementById("commuteAssignLineSelect");
+        const commuteTaskModeSelect = document.getElementById("commuteTaskModeSelect");
+        const commuteAssignStatusSelect = document.getElementById("commuteAssignStatusSelect");
+        const assignCommuteVehicleBtn = document.getElementById("assignCommuteVehicleBtn");
+        const commuteOrderLineSelect = document.getElementById("commuteOrderLineSelect");
+        const commuteOrderRequestInput = document.getElementById("commuteOrderRequestInput");
+        const commuteOriginLonInput = document.getElementById("commuteOriginLonInput");
+        const commuteOriginLatInput = document.getElementById("commuteOriginLatInput");
+        const commuteDestinationLonInput = document.getElementById("commuteDestinationLonInput");
+        const commuteDestinationLatInput = document.getElementById("commuteDestinationLatInput");
+        const commutePassengerPhoneInput = document.getElementById("commutePassengerPhoneInput");
+        const commutePassengerCountInput = document.getElementById("commutePassengerCountInput");
+        const commutePassengerIdInput = document.getElementById("commutePassengerIdInput");
+        const commuteBoardingVehicleSelect = document.getElementById("commuteBoardingVehicleSelect");
+        const pickCommuteOriginBtn = document.getElementById("pickCommuteOriginBtn");
+        const pickCommuteDestinationBtn = document.getElementById("pickCommuteDestinationBtn");
+        const createCommuteOrderBtn = document.getElementById("createCommuteOrderBtn");
+        const queryCommuteOrderBtn = document.getElementById("queryCommuteOrderBtn");
+        const cancelCommuteOrderBtn = document.getElementById("cancelCommuteOrderBtn");
+        const commutePickupBtn = document.getElementById("commutePickupBtn");
+        const commuteDropoffBtn = document.getElementById("commuteDropoffBtn");
+        const commuteResultBox = document.getElementById("commuteResultBox");
 
         const restrictionPolicySelect = document.getElementById("restrictionPolicySelect");
         const restrictionAreaSelect = document.getElementById("restrictionAreaSelect");
@@ -1115,6 +1362,14 @@
         const fleetById = new Map();
         let layers = [];
         let markerPositionCounts = new Map();
+        let routePoiLayers = [];
+        let routePoiMarkerPositionCounts = new Map();
+        let commutePoiLayers = [];
+        let commutePoiMarkerPositionCounts = new Map();
+        let commuteLineStopLayers = [];
+        let commuteLineStopMarkerPositionCounts = new Map();
+        let operationAreaMaskLayers = [];
+        let suppressCommuteMapClickUntil = 0;
         let operationAreas = [];
         let selectedOperationAreaId = "";
         let selectedOperationAreaEditId = "";
@@ -1131,6 +1386,12 @@
         let vehiclePositionTarget = null;
         let routeGpsPickMode = false;
         let stationPickMode = false;
+        let dynamicOrderPickTarget = null;
+        let routePoisLoadedAreaId = "";
+        let suppressDynamicOrderMapClickUntil = 0;
+        let commutePointTarget = null;
+        let commuteLines = [];
+        let commutePois = [];
         let cachedPois = null;
         let platformPendingOrders = [];
 
@@ -1161,6 +1422,57 @@
             platformAckBtn.disabled = isBusy || !platformPendingOrderSelect.value;
             platformUnreachableBtn.disabled = isBusy || !platformPendingOrderSelect.value;
             platformDeclineBtn.disabled = isBusy || !platformPendingOrderSelect.value;
+            dynamicOrderRequestInput.disabled = isBusy;
+            dynamicOriginLonInput.disabled = isBusy;
+            dynamicOriginLatInput.disabled = isBusy;
+            dynamicDestinationLonInput.disabled = isBusy;
+            dynamicDestinationLatInput.disabled = isBusy;
+            reloadDynamicPoisBtn.disabled = isBusy;
+            createDynamicOrderBtn.disabled = isBusy;
+            pickDynamicOriginBtn.disabled = isBusy;
+            pickDynamicDestinationBtn.disabled = isBusy;
+        }
+
+        function setCommuteBusy(isBusy) {
+            commuteLineSelect.disabled = isBusy;
+            reloadCommuteLinesBtn.disabled = isBusy;
+            newCommuteLineBtn.disabled = isBusy;
+            commuteLineCodeInput.disabled = isBusy;
+            commuteLineNameInput.disabled = isBusy;
+            commuteAreaSelect.disabled = isBusy;
+            commuteLineStatusSelect.disabled = isBusy;
+            commuteLineDescriptionInput.disabled = isBusy;
+            commuteStopsInput.disabled = isBusy;
+            commutePoiSelect.disabled = isBusy;
+            reloadCommutePoisBtn.disabled = isBusy;
+            addCommuteSelectedPoisBtn.disabled = isBusy || !commutePoiSelect.selectedOptions.length;
+            clearCommuteStopsBtn.disabled = isBusy;
+            pickCommuteStopBtn.disabled = isBusy;
+            saveCommuteLineBtn.disabled = isBusy;
+            replaceCommuteStopsBtn.disabled = isBusy;
+            deleteCommuteLineBtn.disabled = isBusy;
+            commuteVehicleSelect.disabled = isBusy;
+            commuteAssignLineSelect.disabled = isBusy;
+            commuteTaskModeSelect.disabled = isBusy;
+            commuteAssignStatusSelect.disabled = isBusy;
+            assignCommuteVehicleBtn.disabled = isBusy;
+            commuteOrderLineSelect.disabled = isBusy;
+            commuteOrderRequestInput.disabled = isBusy;
+            commuteOriginLonInput.disabled = isBusy;
+            commuteOriginLatInput.disabled = isBusy;
+            commuteDestinationLonInput.disabled = isBusy;
+            commuteDestinationLatInput.disabled = isBusy;
+            commutePassengerPhoneInput.disabled = isBusy;
+            commutePassengerCountInput.disabled = isBusy;
+            commutePassengerIdInput.disabled = isBusy;
+            commuteBoardingVehicleSelect.disabled = isBusy;
+            pickCommuteOriginBtn.disabled = isBusy;
+            pickCommuteDestinationBtn.disabled = isBusy;
+            createCommuteOrderBtn.disabled = isBusy;
+            queryCommuteOrderBtn.disabled = isBusy;
+            cancelCommuteOrderBtn.disabled = isBusy;
+            commutePickupBtn.disabled = isBusy;
+            commuteDropoffBtn.disabled = isBusy;
         }
 
         function setRouteGpsPickMode(enabled) {
@@ -1170,11 +1482,43 @@
             pickRouteVehiclePositionBtn.textContent = routeGpsPickMode ? "停止鼠标 GPS 上报" : "鼠标 GPS 上报模式";
         }
 
+        function setDynamicOrderPickTarget(target) {
+            dynamicOrderPickTarget = target || null;
+            const buttonByTarget = {
+                origin: pickDynamicOriginBtn,
+                destination: pickDynamicDestinationBtn
+            };
+            for (const [key, button] of Object.entries(buttonByTarget)) {
+                const active = dynamicOrderPickTarget === key;
+                button.classList.toggle("mode-on", active);
+                button.classList.toggle("secondary", !active);
+            }
+            pickDynamicOriginBtn.textContent = dynamicOrderPickTarget === "origin" ? "停止点选起点" : "点选起点站";
+            pickDynamicDestinationBtn.textContent = dynamicOrderPickTarget === "destination" ? "停止点选终点" : "点选终点站";
+        }
+
         function setStationPickMode(enabled) {
             stationPickMode = Boolean(enabled);
             pickStationPointBtn.classList.toggle("mode-on", stationPickMode);
             pickStationPointBtn.classList.toggle("secondary", !stationPickMode);
             pickStationPointBtn.textContent = stationPickMode ? "停止点选坐标" : "地图点选坐标";
+        }
+
+        function setCommutePointTarget(target) {
+            commutePointTarget = target || null;
+            const activeButtonByTarget = {
+                stop: pickCommuteStopBtn,
+                origin: pickCommuteOriginBtn,
+                destination: pickCommuteDestinationBtn
+            };
+            for (const [key, button] of Object.entries(activeButtonByTarget)) {
+                const active = commutePointTarget === key;
+                button.classList.toggle("mode-on", active);
+                button.classList.toggle("secondary", !active);
+            }
+            pickCommuteStopBtn.textContent = commutePointTarget === "stop" ? "停止点选站点" : "点选追加站点";
+            pickCommuteOriginBtn.textContent = commutePointTarget === "origin" ? "停止点选上车" : "点选上车站";
+            pickCommuteDestinationBtn.textContent = commutePointTarget === "destination" ? "停止点选下车" : "点选下车站";
         }
 
         function setRestrictionBusy(isBusy) {
@@ -1277,6 +1621,9 @@
                 routeAreaSelect.value = normalized;
             }
             cachedPois = null;
+            routePoisLoadedAreaId = "";
+            setDynamicOrderPickTarget(null);
+            clearRoutePoiMarkers();
         }
 
         function areaQuery(prefix = "?") {
@@ -1288,7 +1635,10 @@
             const response = await fetch(url, options);
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
-                throw new Error(data.error || data.message || `${response.status} ${response.statusText}`);
+                const error = new Error(data.message || data.error || `${response.status} ${response.statusText}`);
+                error.status = response.status;
+                error.payload = data;
+                throw error;
             }
             return data;
         }
@@ -1374,6 +1724,37 @@
             markerPositionCounts = new Map();
         }
 
+        function clearRoutePoiMarkers() {
+            if (routePoiLayers.length) {
+                map.remove(routePoiLayers);
+            }
+            routePoiLayers = [];
+            routePoiMarkerPositionCounts = new Map();
+        }
+
+        function clearOperationAreaMasks() {
+            if (operationAreaMaskLayers.length) {
+                map.remove(operationAreaMaskLayers);
+            }
+            operationAreaMaskLayers = [];
+        }
+
+        function clearCommutePoiMarkers() {
+            if (commutePoiLayers.length) {
+                map.remove(commutePoiLayers);
+            }
+            commutePoiLayers = [];
+            commutePoiMarkerPositionCounts = new Map();
+        }
+
+        function clearCommuteLineStopMarkers() {
+            if (commuteLineStopLayers.length) {
+                map.remove(commuteLineStopLayers);
+            }
+            commuteLineStopLayers = [];
+            commuteLineStopMarkerPositionCounts = new Map();
+        }
+
         function addPolyline(points, options) {
             const normalized = normalizePoints(points);
             if (normalized.length < 2) {
@@ -1387,6 +1768,198 @@
             layers.push(polyline);
             map.add(polyline);
             return polyline;
+        }
+
+        function parseOperationAreaTextPolygons(text) {
+            const value = String(text || "").trim();
+            if (!value) {
+                return [];
+            }
+            const parsed = [];
+            for (const polygonText of value.split("|")) {
+                const points = [];
+                for (const pointText of polygonText.split(";")) {
+                    const pieces = pointText.trim().replace(/，/g, ",").split(/[,\s]+/).filter(Boolean);
+                    if (pieces.length < 2) {
+                        continue;
+                    }
+                    const point = normalizePoint([pieces[0], pieces[1]]);
+                    if (point) {
+                        points.push(point);
+                    }
+                }
+                const normalized = normalizePoints(points);
+                if (normalized.length >= 3) {
+                    parsed.push(normalized);
+                }
+            }
+            return parsed;
+        }
+
+        function parseOperationAreaPolygons(value) {
+            if (value == null || value === "") {
+                return [];
+            }
+            if (typeof value === "string") {
+                const trimmed = value.trim();
+                if (!trimmed) {
+                    return [];
+                }
+                if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                    try {
+                        return parseOperationAreaPolygons(JSON.parse(trimmed));
+                    } catch (_) {
+                        return parseOperationAreaTextPolygons(trimmed);
+                    }
+                }
+                return parseOperationAreaTextPolygons(trimmed);
+            }
+            if (Array.isArray(value)) {
+                if (!value.length) {
+                    return [];
+                }
+                if (normalizePoint(value[0])) {
+                    const polygon = normalizePoints(value);
+                    return polygon.length >= 3 ? [polygon] : [];
+                }
+                const polygons = [];
+                for (const item of value) {
+                    polygons.push(...parseOperationAreaPolygons(item));
+                }
+                return polygons;
+            }
+            if (typeof value === "object") {
+                if (value.type === "Feature") {
+                    return parseOperationAreaPolygons((value.geometry || {}).coordinates);
+                }
+                if (value.type === "FeatureCollection" && Array.isArray(value.features)) {
+                    const polygons = [];
+                    for (const feature of value.features) {
+                        polygons.push(...parseOperationAreaPolygons(feature));
+                    }
+                    return polygons;
+                }
+                if (value.type === "Polygon" && Array.isArray(value.coordinates)) {
+                    return parseOperationAreaPolygons(value.coordinates[0] || []);
+                }
+                if (value.type === "MultiPolygon" && Array.isArray(value.coordinates)) {
+                    const polygons = [];
+                    for (const polygon of value.coordinates) {
+                        polygons.push(...parseOperationAreaPolygons(polygon[0] || []));
+                    }
+                    return polygons;
+                }
+                if (Array.isArray(value.polygons)) {
+                    const polygons = [];
+                    for (const item of value.polygons) {
+                        polygons.push(...parseOperationAreaPolygons(item));
+                    }
+                    return polygons;
+                }
+                for (const key of ["points", "path", "polygon", "area_points", "area_polygon", "coordinates"]) {
+                    if (value[key] != null) {
+                        const polygons = parseOperationAreaPolygons(value[key]);
+                        if (polygons.length) {
+                            return polygons;
+                        }
+                    }
+                }
+            }
+            return [];
+        }
+
+        function parseOperationAreaBounds(value) {
+            if (value == null || value === "") {
+                return null;
+            }
+            if (typeof value === "string") {
+                const trimmed = value.trim();
+                if (!trimmed) {
+                    return null;
+                }
+                try {
+                    return parseOperationAreaBounds(JSON.parse(trimmed));
+                } catch (_) {
+                    return null;
+                }
+            }
+            if (Array.isArray(value) && value.length >= 2) {
+                const p1 = normalizePoint(value[0]);
+                const p2 = normalizePoint(value[1]);
+                if (!p1 || !p2) {
+                    return null;
+                }
+                return {
+                    min_lon: Math.min(p1.lon, p2.lon),
+                    max_lon: Math.max(p1.lon, p2.lon),
+                    min_lat: Math.min(p1.lat, p2.lat),
+                    max_lat: Math.max(p1.lat, p2.lat)
+                };
+            }
+            if (typeof value === "object") {
+                const minLon = toNumber(value.min_lon ?? value.minLng ?? value.min_lng ?? value.west);
+                const maxLon = toNumber(value.max_lon ?? value.maxLng ?? value.max_lng ?? value.east);
+                const minLat = toNumber(value.min_lat ?? value.minLat ?? value.south);
+                const maxLat = toNumber(value.max_lat ?? value.maxLat ?? value.north);
+                if ([minLon, maxLon, minLat, maxLat].every(item => item !== null)) {
+                    return { min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat };
+                }
+            }
+            return null;
+        }
+
+        function operationAreaBoundsPolygon(area) {
+            const bounds = parseOperationAreaBounds(area.bounds_json || area.bounds);
+            if (!bounds) {
+                return [];
+            }
+            return [[
+                { lon: bounds.min_lon, lat: bounds.min_lat },
+                { lon: bounds.max_lon, lat: bounds.min_lat },
+                { lon: bounds.max_lon, lat: bounds.max_lat },
+                { lon: bounds.min_lon, lat: bounds.max_lat }
+            ]];
+        }
+
+        function operationAreaMaskPolygons(area) {
+            const polygons = parseOperationAreaPolygons(area.area_polygon);
+            if (polygons.length) {
+                return polygons;
+            }
+            const pointPolygons = parseOperationAreaPolygons(area.area_points);
+            return pointPolygons.length ? pointPolygons : operationAreaBoundsPolygon(area);
+        }
+
+        function renderOperationAreaMasks() {
+            clearOperationAreaMasks();
+            for (const area of operationAreas) {
+                if (String(area.status || "").toLowerCase() !== "enabled") {
+                    continue;
+                }
+                for (const points of operationAreaMaskPolygons(area)) {
+                    const normalized = normalizePoints(points);
+                    if (normalized.length < 3) {
+                        continue;
+                    }
+                    const polygon = new AMap.Polygon({
+                        path: asLngLat(normalized),
+                        strokeColor: "#38bdf8",
+                        strokeOpacity: 0.82,
+                        strokeWeight: 2,
+                        fillColor: "#7dd3fc",
+                        fillOpacity: 0.18,
+                        zIndex: 8,
+                        bubble: true,
+                        extData: {
+                            operation_area_id: area.area_id,
+                            code: area.code,
+                            name: area.name
+                        }
+                    });
+                    operationAreaMaskLayers.push(polygon);
+                    map.add(polygon);
+                }
+            }
         }
 
         function escapeHtml(value) {
@@ -1416,10 +1989,10 @@
             };
         }
 
-        function nextMarkerPlacement(point) {
+        function nextMarkerPlacement(point, counts = markerPositionCounts) {
             const key = markerPositionKey(point);
-            const index = markerPositionCounts.get(key) || 0;
-            markerPositionCounts.set(key, index + 1);
+            const index = counts.get(key) || 0;
+            counts.set(key, index + 1);
             return {
                 index,
                 ...markerOffsetForIndex(index)
@@ -1437,20 +2010,24 @@
             return ` style="${styles.join(";")}"`;
         }
 
-        function addMarker(point, label, color, className = "") {
+        function addMarker(point, label, color, className = "", targetLayers = layers, counts = markerPositionCounts, onClick = null, title = "") {
             const normalized = normalizePoint(point);
             if (!normalized) {
                 return null;
             }
-            const placement = nextMarkerPlacement(normalized);
+            const placement = nextMarkerPlacement(normalized, counts);
             const style = markerStyle(color, placement);
             const marker = new AMap.Marker({
                 position: [normalized.lon, normalized.lat],
                 offset: new AMap.Pixel(0, 0),
                 content: `<div class="map-marker ${className}"${style}>${escapeHtml(label)}</div>`,
-                zIndex: 120 + placement.index
+                zIndex: 120 + placement.index,
+                title: title || String(label ?? "")
             });
-            layers.push(marker);
+            if (typeof onClick === "function") {
+                marker.on("click", onClick);
+            }
+            targetLayers.push(marker);
             map.add(marker);
             return marker;
         }
@@ -1802,6 +2379,9 @@
             fillOperationAreaSelect(stationAreaSelect, stationAreaSelect.value || currentOperationAreaId(), {
                 fallbackToCurrent: true
             });
+            fillOperationAreaSelect(commuteAreaSelect, commuteAreaSelect.value || currentOperationAreaId(), {
+                fallbackToCurrent: true
+            });
             fillOperationAreaSelect(newVehicleAreaSelect, newVehicleAreaSelect.value || currentOperationAreaId(), {
                 fallbackToCurrent: true
             });
@@ -1811,6 +2391,7 @@
                 selectedVehicle ? (selectedVehicle.operation_area_id || selectedVehicle.operation_area_code || "") : "",
                 { fallbackToCurrent: false }
             );
+            renderOperationAreaMasks();
         }
 
         function fillOperationAreaSelect(selectEl, selectedCode, options = {}) {
@@ -1865,6 +2446,7 @@
                 }
                 renderOperationAreaOptions();
                 renderOperationAreaTable();
+                renderCommuteLineOptions();
                 const selected = operationAreas.find(area => String(area.area_id ?? "") === String(selectedOperationAreaEditId));
                 if (selected) {
                     loadOperationAreaIntoForm(selected);
@@ -1939,7 +2521,20 @@
             if (!areaId) {
                 throw new Error("请先选择运营区");
             }
-            await apiJson(`/admin/operation-areas/${encodeURIComponent(areaId)}`, { method: "DELETE" });
+            try {
+                await apiJson(`/admin/operation-areas/${encodeURIComponent(areaId)}`, { method: "DELETE" });
+            } catch (error) {
+                const blockers = error.payload?.blockers || {};
+                if (error.payload?.error === "operation_area_has_unfinished_orders") {
+                    const pooledCount = (blockers.pooled_orders || []).length;
+                    const vehicleCount = (blockers.vehicles || []).length;
+                    const databaseCount = (blockers.database_orders || []).length;
+                    throw new Error(
+                        `${error.message}。阻塞项：订单池 ${pooledCount} 单，运行车辆 ${vehicleCount} 台，数据库未完成订单 ${databaseCount} 单。`
+                    );
+                }
+                throw error;
+            }
             resetOperationAreaForm();
             cachedPois = null;
             await loadOperationAreas("运营区已删除。");
@@ -2083,6 +2678,687 @@
             await submitStationRequest("DELETE", parseStationBatchPayload(false), "批量删除站点完成");
         }
 
+        function setCommuteResult(data) {
+            commuteResultBox.textContent = typeof data === "string"
+                ? data
+                : JSON.stringify(data, null, 2);
+        }
+
+        function parseCommuteStopsInput() {
+            const text = commuteStopsInput.value.trim();
+            if (!text) {
+                return [];
+            }
+            const parsed = JSON.parse(text);
+            const stops = normalizeCommuteStopsSource(parsed);
+            if (!Array.isArray(stops)) {
+                throw new Error("站点 JSON 必须是数组，或包含 stops 数组");
+            }
+            return stops.map(item => {
+                const point = normalizePoint(item);
+                if (!point) {
+                    throw new Error("每个站点都必须包含合法 lon/lat");
+                }
+                return {
+                    lon: Number(point.lon.toFixed(8)),
+                    lat: Number(point.lat.toFixed(8))
+                };
+            });
+        }
+
+        function writeCommuteStops(stops) {
+            commuteStopsInput.value = JSON.stringify(stops || [], null, 2);
+            drawCommuteLineStopMarkers();
+        }
+
+        function normalizeCommuteStopsSource(source) {
+            if (source == null || source === "") {
+                return [];
+            }
+            if (typeof source === "string") {
+                const text = source.trim();
+                if (!text) {
+                    return [];
+                }
+                return normalizeCommuteStopsSource(JSON.parse(text));
+            }
+            if (Array.isArray(source)) {
+                return source;
+            }
+            if (Array.isArray(source.stops)) {
+                return source.stops;
+            }
+            if (Array.isArray(source.stops_json)) {
+                return source.stops_json;
+            }
+            if (typeof source.stops_json === "string") {
+                return normalizeCommuteStopsSource(source.stops_json);
+            }
+            return null;
+        }
+
+        function commuteStopPoint(stop) {
+            const point = normalizePoint(stop);
+            if (!point) {
+                return null;
+            }
+            return {
+                lon: Number(point.lon.toFixed(8)),
+                lat: Number(point.lat.toFixed(8))
+            };
+        }
+
+        function appendCommuteStop(point) {
+            const stops = commuteStopsInput.value.trim() ? parseCommuteStopsInput() : [];
+            stops.push({
+                lon: Number(point.lon.toFixed(8)),
+                lat: Number(point.lat.toFixed(8))
+            });
+            writeCommuteStops(stops);
+        }
+
+        function commutePoiPoint(poi) {
+            const point = normalizePoint(poi);
+            if (!point) {
+                return null;
+            }
+            return {
+                lon: Number(point.lon.toFixed(8)),
+                lat: Number(point.lat.toFixed(8))
+            };
+        }
+
+        function commutePoiName(poi, index) {
+            return poi.name || poi.poi_name || poi.station_name || poi.poi_code || poi.id || `站点${index + 1}`;
+        }
+
+        function commuteLineStopName(stop, index) {
+            return stop.name || stop.poi_name || stop.station_name || stop.poi_code || `第${index + 1}站`;
+        }
+
+        function normalizeCommuteStopRecord(stop) {
+            const point = commuteStopPoint(stop);
+            if (!point) {
+                return null;
+            }
+            return {
+                ...(typeof stop === "object" && stop ? stop : {}),
+                lon: point.lon,
+                lat: point.lat
+            };
+        }
+
+        function currentCommuteLineStops() {
+            let stops;
+            try {
+                stops = commuteStopsInput.value.trim()
+                    ? normalizeCommuteStopsSource(commuteStopsInput.value)
+                    : [];
+            } catch {
+                return [];
+            }
+            if (!Array.isArray(stops)) {
+                return [];
+            }
+            return stops.map(normalizeCommuteStopRecord).filter(Boolean);
+        }
+
+        function nearestCommuteStation(point, stops, maxDistanceM = 80) {
+            const origin = normalizePoint(point);
+            if (!origin) {
+                return null;
+            }
+            let best = null;
+            for (const [index, stop] of (stops || []).entries()) {
+                const stopPoint = commuteStopPoint(stop);
+                if (!stopPoint) {
+                    continue;
+                }
+                const distance = distanceMeters(origin, stopPoint);
+                if (distance === null) {
+                    continue;
+                }
+                if (!best || distance < best.distance_m) {
+                    best = { stop, point: stopPoint, index, distance_m: distance };
+                }
+            }
+            return best && best.distance_m <= maxDistanceM ? best : null;
+        }
+
+        function fillCommutePointFromStation(target, stop, index) {
+            const point = commuteStopPoint(stop);
+            if (!point) {
+                return false;
+            }
+            fillCommutePoint(target, point);
+            setCommutePointTarget(null);
+            if (target === "origin" || target === "destination") {
+                setStatus(`已选择${target === "origin" ? "上车" : "下车"}站：${commuteLineStopName(stop, index)} / ${point.lon.toFixed(8)}, ${point.lat.toFixed(8)}`);
+            }
+            return true;
+        }
+
+        function findCommuteLineStopByPoint(point) {
+            const normalized = normalizePoint(point);
+            if (!normalized) {
+                return null;
+            }
+            const targetLon = normalized.lon.toFixed(8);
+            const targetLat = normalized.lat.toFixed(8);
+            for (const [index, stop] of currentCommuteLineStops().entries()) {
+                const stopPoint = commuteStopPoint(stop);
+                if (!stopPoint) {
+                    continue;
+                }
+                if (stopPoint.lon.toFixed(8) === targetLon && stopPoint.lat.toFixed(8) === targetLat) {
+                    return { stop, index, point: stopPoint };
+                }
+            }
+            return null;
+        }
+
+        function selectedCommuteOperationAreaId() {
+            const areaId = Number(commuteAreaSelect.value || currentOperationAreaId());
+            return Number.isFinite(areaId) && areaId > 0 ? areaId : null;
+        }
+
+        function isCommuteTabActive() {
+            return document.getElementById("commuteTab")?.classList.contains("active");
+        }
+
+        function toggleCommutePoiSelection(index) {
+            const option = Array.from(commutePoiSelect.options)
+                .find(item => item.value === String(index));
+            if (!option) {
+                return;
+            }
+            option.selected = !option.selected;
+            addCommuteSelectedPoisBtn.disabled = !commutePoiSelect.selectedOptions.length;
+            const poi = commutePois[index] || {};
+            setStatus(`${option.selected ? "已选中" : "已取消"}快线站点：${commutePoiName(poi, index)}`);
+        }
+
+        function handleCommuteStationMarkerClick(stop, index, source = "line") {
+            suppressCommuteMapClickUntil = Date.now() + 250;
+            if (commutePointTarget) {
+                let selectedStop = stop;
+                let selectedIndex = index;
+                if ((commutePointTarget === "origin" || commutePointTarget === "destination") && source === "area") {
+                    const lineMatch = findCommuteLineStopByPoint(commuteStopPoint(stop));
+                    if (!lineMatch) {
+                        setStatus("请选择当前快线线路站点图标作为上下车站。");
+                        return;
+                    }
+                    selectedStop = lineMatch.stop;
+                    selectedIndex = lineMatch.index;
+                }
+                fillCommutePointFromStation(commutePointTarget, selectedStop, selectedIndex);
+                return;
+            }
+            if (source === "area") {
+                toggleCommutePoiSelection(index);
+                return;
+            }
+            const point = commuteStopPoint(stop);
+            if (point) {
+                setStatus(`已定位快线第 ${index + 1} 站：${commuteLineStopName(stop, index)} / ${point.lon.toFixed(8)}, ${point.lat.toFixed(8)}`);
+            }
+        }
+
+        function drawCommuteLineStopMarkers() {
+            clearCommuteLineStopMarkers();
+            if (!isCommuteTabActive()) {
+                return;
+            }
+            const stops = currentCommuteLineStops();
+            for (const [index, stop] of stops.entries()) {
+                const point = commuteStopPoint(stop);
+                if (!point) {
+                    continue;
+                }
+                addMarker(
+                    point,
+                    `L${index + 1}`,
+                    null,
+                    "commute-line-stop",
+                    commuteLineStopLayers,
+                    commuteLineStopMarkerPositionCounts,
+                    () => handleCommuteStationMarkerClick(stop, index, "line"),
+                    `${selectedCommuteLineCode() || "快线"} ${commuteLineStopName(stop, index)}`
+                );
+            }
+            if (commuteLineStopLayers.length) {
+                map.setFitView(commuteLineStopLayers, false, [60, 60, 60, 420], 16);
+            }
+        }
+
+        function drawCommutePoiMarkers() {
+            clearCommutePoiMarkers();
+            for (const [index, poi] of commutePois.entries()) {
+                const point = commutePoiPoint(poi);
+                if (!point) {
+                    continue;
+                }
+                addMarker(
+                    point,
+                    `站${index + 1}`,
+                    null,
+                    "commute-station",
+                    commutePoiLayers,
+                    commutePoiMarkerPositionCounts,
+                    () => handleCommuteStationMarkerClick(poi, index, "area"),
+                    commutePoiName(poi, index)
+                );
+            }
+            if (commutePoiLayers.length && !commuteLineStopLayers.length) {
+                map.setFitView(commutePoiLayers, false, [60, 60, 60, 420], 16);
+            }
+        }
+
+        function renderCommutePois() {
+            const currentValues = new Set(Array.from(commutePoiSelect.selectedOptions).map(option => option.value));
+            commutePoiSelect.innerHTML = "";
+            if (!commutePois.length) {
+                clearCommutePoiMarkers();
+                drawCommuteLineStopMarkers();
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = "暂无站点";
+                commutePoiSelect.appendChild(option);
+                commutePoiInfo.textContent = "当前运营区暂无可选站点，或尚未加载站点。";
+                addCommuteSelectedPoisBtn.disabled = true;
+                return;
+            }
+            commutePois.forEach((poi, index) => {
+                const point = commutePoiPoint(poi);
+                if (!point) {
+                    return;
+                }
+                const option = document.createElement("option");
+                option.value = String(index);
+                option.textContent = `${commutePoiName(poi, index)} / ${point.lon.toFixed(8)}, ${point.lat.toFixed(8)}`;
+                option.selected = currentValues.has(option.value);
+                commutePoiSelect.appendChild(option);
+            });
+            if (isCommuteTabActive()) {
+                drawCommutePoiMarkers();
+                drawCommuteLineStopMarkers();
+            } else {
+                clearCommutePoiMarkers();
+                clearCommuteLineStopMarkers();
+            }
+            commutePoiInfo.textContent = `已加载 ${commutePois.length} 个站点。可点击地图站点图标选择，也可按住 Ctrl 或 Shift 在列表中多选；追加顺序按列表显示顺序。`;
+            addCommuteSelectedPoisBtn.disabled = !commutePoiSelect.selectedOptions.length;
+        }
+
+        async function loadCommutePois(message) {
+            const operationAreaId = selectedCommuteOperationAreaId();
+            if (!operationAreaId) {
+                commutePois = [];
+                renderCommutePois();
+                throw new Error("请先选择快线所属运营区");
+            }
+            let data;
+            try {
+                data = await apiJson(`/pois?operation_area_id=${encodeURIComponent(operationAreaId)}`);
+            } catch (error) {
+                commutePois = [];
+                renderCommutePois();
+                commutePoiInfo.textContent = `站点加载失败：${error.message}`;
+                throw error;
+            }
+            commutePoiSelect.innerHTML = "";
+            commutePois = (data.pois || []).filter(poi => commutePoiPoint(poi));
+            renderCommutePois();
+            if (message) {
+                setStatus(message);
+            }
+            return commutePois;
+        }
+
+        function appendSelectedCommutePois() {
+            const selectedIndexes = Array.from(commutePoiSelect.selectedOptions)
+                .map(option => Number.parseInt(option.value, 10))
+                .filter(index => Number.isInteger(index) && index >= 0 && index < commutePois.length);
+            if (!selectedIndexes.length) {
+                throw new Error("请先在运营区站点列表中选择站点");
+            }
+            selectedIndexes.sort((a, b) => a - b);
+            const stops = commuteStopsInput.value.trim() ? parseCommuteStopsInput() : [];
+            for (const index of selectedIndexes) {
+                const point = commutePoiPoint(commutePois[index]);
+                if (point) {
+                    stops.push(point);
+                }
+            }
+            writeCommuteStops(stops);
+            setStatus(`已追加 ${selectedIndexes.length} 个运营区站点到快线站序。`);
+        }
+
+        function selectedCommuteLineCode() {
+            return commuteLineSelect.value || commuteLineCodeInput.value.trim();
+        }
+
+        function selectedCommuteOrderRequestId() {
+            return commuteOrderRequestInput.value.trim();
+        }
+
+        function buildCommuteRequestId() {
+            return `commute-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+        }
+
+        function commuteLinePayload(includeStops = true) {
+            const operationAreaId = selectedCommuteOperationAreaId();
+            if (!operationAreaId) {
+                throw new Error("请先选择快线所属运营区");
+            }
+            const payload = {
+                line_code: commuteLineCodeInput.value.trim(),
+                line_name: commuteLineNameInput.value.trim(),
+                operation_area_id: operationAreaId,
+                route_mode: "loop",
+                status: commuteLineStatusSelect.value || "enabled",
+                description: commuteLineDescriptionInput.value.trim()
+            };
+            if (!payload.line_code || !payload.line_name) {
+                throw new Error("请填写线路编码和线路名称");
+            }
+            if (includeStops && commuteStopsInput.value.trim()) {
+                payload.stops = parseCommuteStopsInput();
+            }
+            return payload;
+        }
+
+        function renderCommuteLineOptions() {
+            const selects = [commuteLineSelect, commuteAssignLineSelect, commuteOrderLineSelect];
+            for (const select of selects) {
+                const current = select.value;
+                select.innerHTML = "";
+                const emptyOption = document.createElement("option");
+                emptyOption.value = "";
+                emptyOption.textContent = commuteLines.length ? "请选择线路" : "暂无线路";
+                select.appendChild(emptyOption);
+                for (const line of commuteLines) {
+                    const option = document.createElement("option");
+                    option.value = line.line_code || "";
+                    option.textContent = `${line.line_name || line.line_code} (${line.line_code})`;
+                    select.appendChild(option);
+                }
+                select.value = commuteLines.some(line => line.line_code === current) ? current : "";
+            }
+            renderCommuteVehicleOptions();
+        }
+
+        function renderCommuteVehicleOptions() {
+            const assignCurrent = commuteVehicleSelect.value;
+            commuteVehicleSelect.innerHTML = "";
+            const assignEmptyOption = document.createElement("option");
+            assignEmptyOption.value = "";
+            assignEmptyOption.textContent = adminVehicles.length ? "请选择车辆" : "暂无车辆";
+            commuteVehicleSelect.appendChild(assignEmptyOption);
+            for (const vehicle of adminVehicles || []) {
+                const code = vehicle.vehicle_code || vehicle.vehicle_id || "";
+                if (!code) {
+                    continue;
+                }
+                const option = document.createElement("option");
+                const mode = vehicle.operation_mode || "dynamic_bus";
+                option.value = code;
+                option.textContent = `${vehicle.plate_no || code} (${code}) / ${mode}`;
+                commuteVehicleSelect.appendChild(option);
+            }
+            if (Array.from(commuteVehicleSelect.options).some(option => option.value === assignCurrent)) {
+                commuteVehicleSelect.value = assignCurrent;
+            }
+
+            const boardingCurrent = commuteBoardingVehicleSelect.value;
+            commuteBoardingVehicleSelect.innerHTML = "";
+            const boardingEmptyOption = document.createElement("option");
+            boardingEmptyOption.value = "";
+            boardingEmptyOption.textContent = fleetById.size ? "请选择车辆" : "暂无运行车辆";
+            commuteBoardingVehicleSelect.appendChild(boardingEmptyOption);
+            for (const [vehicleId, vehicle] of fleetById.entries()) {
+                const runtimeVehicleId = vehicle.vehicle_id || vehicleId;
+                if (!runtimeVehicleId) {
+                    continue;
+                }
+                const mode = vehicle.operation_mode || "dynamic_bus";
+                const option = document.createElement("option");
+                option.value = runtimeVehicleId;
+                option.textContent = `${vehicle.plate_no || runtimeVehicleId} (${runtimeVehicleId}) / ${mode}`;
+                commuteBoardingVehicleSelect.appendChild(option);
+            }
+            if (Array.from(commuteBoardingVehicleSelect.options).some(option => option.value === boardingCurrent)) {
+                commuteBoardingVehicleSelect.value = boardingCurrent;
+            }
+        }
+
+        function loadCommuteLineIntoForm(line) {
+            commuteLineSelect.value = line?.line_code || "";
+            commuteLineCodeInput.value = line?.line_code || "";
+            commuteLineCodeInput.readOnly = Boolean(line?.line_code);
+            commuteLineNameInput.value = line?.line_name || "";
+            fillOperationAreaSelect(commuteAreaSelect, line?.operation_area_id || currentOperationAreaId(), {
+                fallbackToCurrent: true
+            });
+            commuteLineStatusSelect.value = line?.status || "enabled";
+            commuteLineDescriptionInput.value = line?.description || "";
+            const stopsSource = normalizeCommuteStopsSource(line?.stops || line?.stops_json || []) || [];
+            writeCommuteStops(stopsSource
+                .map(commuteStopPoint)
+                .filter(Boolean));
+        }
+
+        function resetCommuteLineForm() {
+            commuteLineSelect.value = "";
+            commuteLineCodeInput.readOnly = false;
+            commuteLineCodeInput.value = "";
+            commuteLineNameInput.value = "";
+            fillOperationAreaSelect(commuteAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
+            commuteLineStatusSelect.value = "enabled";
+            commuteLineDescriptionInput.value = "";
+            writeCommuteStops([]);
+        }
+
+        async function loadCommuteLines(message) {
+            setCommuteBusy(true);
+            try {
+                const data = await apiJson("/commute/lines");
+                commuteLines = data.lines || [];
+                renderCommuteLineOptions();
+                const selected = commuteLines.find(line => line.line_code === commuteLineSelect.value) || commuteLines[0];
+                if (selected) {
+                    const detail = await apiJson(`/commute/lines/${encodeURIComponent(selected.line_code)}`);
+                    loadCommuteLineIntoForm(detail.line || selected);
+                    await loadCommutePois().catch(error => {
+                        commutePois = [];
+                        renderCommutePois();
+                        setStatus(`加载快线站点失败：${error.message}`);
+                    });
+                } else {
+                    resetCommuteLineForm();
+                    commutePois = [];
+                    renderCommutePois();
+                }
+                setCommuteResult({ lines: commuteLines });
+                if (message) {
+                    setStatus(message);
+                }
+            } catch (error) {
+                commuteLines = [];
+                renderCommuteLineOptions();
+                setCommuteResult({ error: error.message });
+                setStatus(`加载快线线路失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        }
+
+        async function saveCommuteLine() {
+            const payload = commuteLinePayload(true);
+            const existing = commuteLines.some(line => line.line_code === payload.line_code);
+            const path = existing
+                ? `/commute/lines/${encodeURIComponent(payload.line_code)}`
+                : "/commute/lines";
+            const result = await apiJson(path, {
+                method: existing ? "PUT" : "POST",
+                body: payload
+            });
+            setCommuteResult(result);
+            await loadCommuteLines(`快线线路已${existing ? "更新" : "创建"}：${payload.line_code}`);
+        }
+
+        async function replaceCommuteStops() {
+            const lineCode = selectedCommuteLineCode();
+            if (!lineCode) {
+                throw new Error("请先选择或填写线路编码");
+            }
+            const result = await apiJson(`/commute/lines/${encodeURIComponent(lineCode)}/stops`, {
+                method: "PUT",
+                body: { stops: parseCommuteStopsInput() }
+            });
+            setCommuteResult(result);
+            await loadCommuteLines(`线路站点顺序已替换：${lineCode}`);
+        }
+
+        async function deleteCommuteLine() {
+            const lineCode = selectedCommuteLineCode();
+            if (!lineCode) {
+                throw new Error("请先选择线路");
+            }
+            const result = await apiJson(`/commute/lines/${encodeURIComponent(lineCode)}`, { method: "DELETE" });
+            setCommuteResult(result);
+            resetCommuteLineForm();
+            await loadCommuteLines(`快线线路已删除：${lineCode}`);
+        }
+
+        async function assignCommuteVehicle() {
+            const payload = {
+                vehicle_code: commuteVehicleSelect.value,
+                line_code: commuteAssignLineSelect.value || selectedCommuteLineCode(),
+                task_mode: commuteTaskModeSelect.value,
+                status: commuteAssignStatusSelect.value || "active"
+            };
+            if (!payload.vehicle_code || !payload.line_code) {
+                throw new Error("请选择车辆和线路");
+            }
+            const result = await apiJson("/commute/vehicles/assign", {
+                method: "POST",
+                body: payload
+            });
+            setCommuteResult(result);
+            await loadAdminOptions();
+            await loadFleet();
+            setStatus(`车辆已绑定通勤快线：${payload.vehicle_code}`);
+        }
+
+        function commuteOrderPayload() {
+            const requestId = selectedCommuteOrderRequestId() || buildCommuteRequestId();
+            commuteOrderRequestInput.value = requestId;
+            const payload = {
+                request_id: requestId,
+                line_code: commuteOrderLineSelect.value || selectedCommuteLineCode(),
+                origin_lon: toNumber(commuteOriginLonInput.value),
+                origin_lat: toNumber(commuteOriginLatInput.value),
+                destination_lon: toNumber(commuteDestinationLonInput.value),
+                destination_lat: toNumber(commuteDestinationLatInput.value),
+                passenger_phone: commutePassengerPhoneInput.value.trim(),
+                passenger_id: commutePassengerIdInput.value.trim() || null,
+                passenger_count: Number.parseInt(commutePassengerCountInput.value || "1", 10) || 1
+            };
+            if (!payload.line_code) {
+                throw new Error("请选择下单线路");
+            }
+            if (!payload.passenger_phone) {
+                throw new Error("请填写乘客手机号");
+            }
+            for (const field of ["origin_lon", "origin_lat", "destination_lon", "destination_lat"]) {
+                if (!Number.isFinite(payload[field])) {
+                    throw new Error("请填写合法的上下车经纬度");
+                }
+            }
+            return payload;
+        }
+
+        async function createCommuteOrder() {
+            const result = await apiJson("/commute/orders", {
+                method: "POST",
+                body: commuteOrderPayload()
+            });
+            setCommuteResult(result);
+            const runtimeVehicleId = result?.candidate?.vehicle_id || result?.candidate?.vehicle_code || result?.vehicle?.vehicle_id || result?.vehicle?.vehicle_code;
+            if (runtimeVehicleId) {
+                commuteBoardingVehicleSelect.value = runtimeVehicleId;
+                vehicleSelect.value = runtimeVehicleId;
+            }
+            await loadFleet();
+            setStatus(`快线订单已提交：${result?.order?.request_id || commuteOrderRequestInput.value}`);
+        }
+
+        async function queryCommuteOrder() {
+            const requestId = selectedCommuteOrderRequestId();
+            if (!requestId) {
+                throw new Error("请填写订单请求ID");
+            }
+            const result = await apiJson(`/commute/orders/${encodeURIComponent(requestId)}`);
+            setCommuteResult(result);
+            setStatus(`快线订单已查询：${requestId}`);
+        }
+
+        async function cancelCommuteOrder() {
+            const requestId = selectedCommuteOrderRequestId();
+            if (!requestId) {
+                throw new Error("请填写订单请求ID");
+            }
+            const result = await apiJson(`/commute/orders/${encodeURIComponent(requestId)}/cancel`, {
+                method: "POST",
+                body: {}
+            });
+            setCommuteResult(result);
+            await loadFleet();
+            setStatus(`快线订单已取消：${requestId}`);
+        }
+
+        async function confirmCommuteBoarding(action) {
+            const vehicleId = commuteBoardingVehicleSelect.value || selectedVehicleId();
+            if (!vehicleId) {
+                throw new Error("请选择上下车车辆");
+            }
+            const result = await apiJson(`/fleet/${encodeURIComponent(vehicleId)}/boarding-events`, {
+                method: "POST",
+                body: {
+                    action,
+                    request_id: selectedCommuteOrderRequestId() || null,
+                    distance_threshold_m: 30
+                }
+            });
+            setCommuteResult(result);
+            if (Array.from(vehicleSelect.options).some(option => option.value === vehicleId)) {
+                vehicleSelect.value = vehicleId;
+                await loadSelectedVehicle(`快线上下车已确认：${action}`);
+            } else {
+                await loadFleet();
+                setStatus(`快线上下车已确认：${action}`);
+            }
+        }
+
+        function fillCommutePoint(target, point) {
+            const lonText = point.lon.toFixed(8);
+            const latText = point.lat.toFixed(8);
+            if (target === "stop") {
+                appendCommuteStop(point);
+                setStatus(`已追加快线站点：${lonText}, ${latText}`);
+            } else if (target === "origin") {
+                commuteOriginLonInput.value = lonText;
+                commuteOriginLatInput.value = latText;
+                setStatus(`已填入快线上车站：${lonText}, ${latText}`);
+            } else if (target === "destination") {
+                commuteDestinationLonInput.value = lonText;
+                commuteDestinationLatInput.value = latText;
+                setStatus(`已填入快线下车站：${lonText}, ${latText}`);
+            }
+        }
+
         function selectedVehicleId() {
             return vehicleSelect.value;
         }
@@ -2112,6 +3388,7 @@
                 const selected = fleet.find(vehicle => vehicle.vehicle_id && (vehicle.planned_route_grasped_point || []).length >= 2)
                     || fleet.find(vehicle => vehicle.vehicle_id);
                 vehicleSelect.value = selected.vehicle_id;
+                renderCommuteVehicleOptions();
                 routeSegmentSelect.value = "all";
                 drawVehicle(selected, { message: "车队已加载。" });
                 try {
@@ -2290,6 +3567,11 @@
             return vehicle;
         }
 
+        function isCommuteVehicle(vehicle) {
+            const mode = String(vehicle?.operation_mode || "").trim();
+            return mode === "commute_fixed_waiting" || mode === "commute_cruising";
+        }
+
         async function confirmBoardingAction(action) {
             const vehicleId = selectedVehicleId();
             const current = fleetById.get(vehicleId) || await loadSelectedVehicle();
@@ -2310,7 +3592,9 @@
                 body.lon = gps.lon;
                 body.lat = gps.lat;
             }
-            const data = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}/boarding-events`, {
+            const isCommute = isCommuteVehicle(current);
+            const endpoint = `/fleet/${encodeURIComponent(vehicleId)}/boarding-events`;
+            const data = await fetchJson(`${apiBase()}${endpoint}`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(body)
@@ -2318,7 +3602,7 @@
             const vehicle = data.vehicle || await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
             fleetById.set(vehicle.vehicle_id, vehicle);
             drawVehicle(vehicle, {
-                message: `${action === "pickup" ? "已上车" : "已下车"}：${step.request_id || "-"}`
+                message: `${isCommute ? "通勤快线" : "动态巴士"}${action === "pickup" ? "已上车" : "已下车"}：${step.request_id || "-"}`
             });
             return vehicle;
         }
@@ -2386,18 +3670,219 @@
             };
         }
 
-        async function loadPoisForRandomOrders() {
-            requireOperationAreaId();
-            if (cachedPois && cachedPois.length >= 2) {
-                return cachedPois;
+        function isRouteTabActive() {
+            return document.getElementById("routeTab")?.classList.contains("active");
+        }
+
+        function dynamicPoiPoint(poi) {
+            return normalizePoint(poi);
+        }
+
+        function dynamicPoiName(poi, index) {
+            return poi?.name
+                || poi?.poi_name
+                || poi?.station_name
+                || poi?.poi_code
+                || `站点${index + 1}`;
+        }
+
+        function sameStationPoint(a, b) {
+            const p1 = normalizePoint(a);
+            const p2 = normalizePoint(b);
+            return Boolean(
+                p1 && p2
+                && p1.lon.toFixed(8) === p2.lon.toFixed(8)
+                && p1.lat.toFixed(8) === p2.lat.toFixed(8)
+            );
+        }
+
+        function findDynamicPoiByPoint(point) {
+            return (cachedPois || []).find(poi => sameStationPoint(poi, point)) || null;
+        }
+
+        function nearestDynamicStation(point, pois, maxDistanceM = 80) {
+            const origin = normalizePoint(point);
+            if (!origin) {
+                return null;
             }
-            const data = await apiJson(`/pois${areaQuery()}`);
+            let best = null;
+            for (const [index, poi] of (pois || []).entries()) {
+                const stationPoint = dynamicPoiPoint(poi);
+                if (!stationPoint) {
+                    continue;
+                }
+                const distance = distanceMeters(origin, stationPoint);
+                if (distance === null) {
+                    continue;
+                }
+                if (!best || distance < best.distance_m) {
+                    best = { poi, point: stationPoint, index, distance_m: distance };
+                }
+            }
+            return best && best.distance_m <= maxDistanceM ? best : null;
+        }
+
+        function fillDynamicOrderPoint(target, poi, index) {
+            const point = dynamicPoiPoint(poi);
+            if (!point) {
+                return false;
+            }
+            const lonText = point.lon.toFixed(8);
+            const latText = point.lat.toFixed(8);
+            if (target === "origin") {
+                dynamicOriginLonInput.value = lonText;
+                dynamicOriginLatInput.value = latText;
+            } else if (target === "destination") {
+                dynamicDestinationLonInput.value = lonText;
+                dynamicDestinationLatInput.value = latText;
+            } else {
+                return false;
+            }
+            setDynamicOrderPickTarget(null);
+            dynamicOrderInfo.textContent = `已选择${target === "origin" ? "起点" : "终点"}：${dynamicPoiName(poi, index)} / ${lonText}, ${latText}`;
+            setStatus(dynamicOrderInfo.textContent);
+            return true;
+        }
+
+        function handleDynamicOrderStationMarkerClick(poi, index) {
+            suppressDynamicOrderMapClickUntil = Date.now() + 250;
+            if (!dynamicOrderPickTarget) {
+                const point = dynamicPoiPoint(poi);
+                if (point) {
+                    setStatus(`动态公交站点：${dynamicPoiName(poi, index)} / ${point.lon.toFixed(8)}, ${point.lat.toFixed(8)}`);
+                }
+                return;
+            }
+            fillDynamicOrderPoint(dynamicOrderPickTarget, poi, index);
+        }
+
+        function drawRoutePoiMarkers() {
+            clearRoutePoiMarkers();
+            if (!isRouteTabActive() || !cachedPois || !cachedPois.length) {
+                return;
+            }
+            for (const [index, poi] of cachedPois.entries()) {
+                const point = dynamicPoiPoint(poi);
+                if (!point) {
+                    continue;
+                }
+                addMarker(
+                    point,
+                    `P${index + 1}`,
+                    null,
+                    "route-station",
+                    routePoiLayers,
+                    routePoiMarkerPositionCounts,
+                    () => handleDynamicOrderStationMarkerClick(poi, index),
+                    dynamicPoiName(poi, index)
+                );
+            }
+        }
+
+        async function loadDynamicOrderPois(message) {
+            const operationAreaId = requireOperationAreaId();
+            const data = await apiJson(`/pois?operation_area_id=${encodeURIComponent(operationAreaId)}`);
             cachedPois = (data.pois || [])
                 .map(poi => {
                     const point = normalizePoint(poi);
                     return point ? { ...poi, ...point } : null;
                 })
                 .filter(Boolean);
+            routePoisLoadedAreaId = String(operationAreaId);
+            drawRoutePoiMarkers();
+            dynamicOrderInfo.textContent = cachedPois.length
+                ? `已显示 ${cachedPois.length} 个运营区站点。点选起点或终点后，点击地图站点图标即可填入坐标。`
+                : "当前运营区暂无可用站点。";
+            if (message) {
+                setStatus(message);
+            }
+            return cachedPois;
+        }
+
+        function dynamicOrderRequestId() {
+            const existing = dynamicOrderRequestInput.value.trim();
+            if (existing) {
+                return existing;
+            }
+            const requestId = `demo-manual-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+            dynamicOrderRequestInput.value = requestId;
+            return requestId;
+        }
+
+        function readDynamicOrderPoint(lonInput, latInput, label) {
+            if (!lonInput.value.trim() || !latInput.value.trim()) {
+                throw new Error(`${label}坐标不能为空，且必须从当前运营区站点中选择`);
+            }
+            const point = normalizePoint({
+                lon: toNumber(lonInput.value),
+                lat: toNumber(latInput.value)
+            });
+            if (!point) {
+                throw new Error(`${label}坐标不能为空，且必须是有效经纬度`);
+            }
+            return point;
+        }
+
+        async function dynamicOrderPayload() {
+            const operationAreaId = requireOperationAreaId();
+            const pois = cachedPois && routePoisLoadedAreaId === String(operationAreaId)
+                ? cachedPois
+                : await loadDynamicOrderPois();
+            if (pois.length < 2) {
+                throw new Error("当前运营区可用站点不足，无法发起动态订单");
+            }
+            const origin = readDynamicOrderPoint(dynamicOriginLonInput, dynamicOriginLatInput, "起点");
+            const destination = readDynamicOrderPoint(dynamicDestinationLonInput, dynamicDestinationLatInput, "终点");
+            const originPoi = findDynamicPoiByPoint(origin);
+            const destinationPoi = findDynamicPoiByPoint(destination);
+            if (!originPoi) {
+                throw new Error("起点坐标必须来自当前运营区站点");
+            }
+            if (!destinationPoi) {
+                throw new Error("终点坐标必须来自当前运营区站点");
+            }
+            if (sameStationPoint(origin, destination)) {
+                throw new Error("起点站和终点站不能相同");
+            }
+            const options = readManualOrderOptions();
+            return {
+                request_id: dynamicOrderRequestId(),
+                operation_area_id: operationAreaId,
+                passenger_phone: options.passengerPhone,
+                passenger_id: options.passengerId || null,
+                origin: { lon: origin.lon, lat: origin.lat },
+                destination: { lon: destination.lon, lat: destination.lat },
+                expected_pickup_time: {
+                    earliest: formatLocalDateTime(options.pickupWindow.earliest),
+                    latest: formatLocalDateTime(options.pickupWindow.latest)
+                },
+                passenger_count: options.passengerCount
+            };
+        }
+
+        async function createDynamicOrder() {
+            setBusy(true);
+            try {
+                const payload = await dynamicOrderPayload();
+                const result = await apiJson("/order", {
+                    method: "POST",
+                    body: payload
+                });
+                await loadFleet();
+                setStatus(`动态公交订单已提交：${result.request_id || payload.request_id}`);
+            } catch (error) {
+                setStatus(`动态公交订单提交失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function loadPoisForRandomOrders() {
+            requireOperationAreaId();
+            if (cachedPois && routePoisLoadedAreaId === String(currentOperationAreaId()) && cachedPois.length >= 2) {
+                return cachedPois;
+            }
+            await loadDynamicOrderPois();
             if (cachedPois.length < 2) {
                 throw new Error("可用 POI 不足，无法生成随机订单");
             }
@@ -2710,6 +4195,13 @@
         function setTab(tabId) {
             if (tabId !== "routeTab") {
                 setRouteGpsPickMode(false);
+                setDynamicOrderPickTarget(null);
+                clearRoutePoiMarkers();
+            }
+            if (tabId !== "commuteTab") {
+                setCommutePointTarget(null);
+                clearCommutePoiMarkers();
+                clearCommuteLineStopMarkers();
             }
             tabButtons.forEach(button => {
                 button.classList.toggle("active", button.dataset.tab === tabId);
@@ -2717,6 +4209,13 @@
             tabPanels.forEach(panel => {
                 panel.classList.toggle("active", panel.id === tabId);
             });
+            if (tabId === "commuteTab") {
+                renderCommutePois();
+                drawCommuteLineStopMarkers();
+            }
+            if (tabId === "routeTab") {
+                drawRoutePoiMarkers();
+            }
         }
 
         function fillSelect(select, values, currentValue) {
@@ -2947,6 +4446,7 @@
                 fillDriverSelect(vehicleDriverSelect, vehicleDriverSelect.value);
                 renderDriverTable();
                 renderVehicleTable();
+                renderCommuteVehicleOptions();
                 const selectedDriver = adminDrivers.find(driver => driver.driver_code === selectedDriverCode);
                 if (selectedDriver) {
                     loadDriverIntoForm(selectedDriver);
@@ -3190,6 +4690,50 @@
                 setStatus(`站点坐标已填入：${stationLonInput.value}, ${stationLatInput.value}`);
                 return;
             }
+            if (commutePointTarget) {
+                if (Date.now() < suppressCommuteMapClickUntil) {
+                    return;
+                }
+                const target = commutePointTarget;
+                const point = pointFromLngLat(event.lnglat);
+                const lineStops = currentCommuteLineStops();
+                const fallbackStops = (commutePois || []).map(normalizeCommuteStopRecord).filter(Boolean);
+                const stops = target === "stop"
+                    ? fallbackStops
+                    : (lineStops.length ? lineStops : fallbackStops);
+                const station = nearestCommuteStation(point, stops);
+                if (!station) {
+                    setStatus(target === "stop"
+                        ? "请点击运营区站点图标，或点击站点附近位置。"
+                        : "请点击当前快线站点图标，或点击站点附近位置。"
+                    );
+                    return;
+                }
+                fillCommutePointFromStation(target, station.stop, station.index);
+                return;
+            }
+            if (dynamicOrderPickTarget) {
+                if (Date.now() < suppressDynamicOrderMapClickUntil) {
+                    return;
+                }
+                const target = dynamicOrderPickTarget;
+                const point = pointFromLngLat(event.lnglat);
+                try {
+                    const operationAreaId = requireOperationAreaId();
+                    if (!cachedPois || routePoisLoadedAreaId !== String(operationAreaId)) {
+                        await loadDynamicOrderPois();
+                    }
+                    const station = nearestDynamicStation(point, cachedPois);
+                    if (!station) {
+                        setStatus("请点击当前运营区站点图标，或点击站点附近位置。");
+                        return;
+                    }
+                    fillDynamicOrderPoint(target, station.poi, station.index);
+                } catch (error) {
+                    setStatus(`动态公交站点点选失败：${error.message}`);
+                }
+                return;
+            }
             if (vehiclePositionTarget) {
                 const point = pointFromLngLat(event.lnglat);
                 if (vehiclePositionTarget === "route") {
@@ -3241,6 +4785,8 @@
         pickRouteVehiclePositionBtn.addEventListener("click", () => {
             setRouteGpsPickMode(!routeGpsPickMode);
             setStationPickMode(false);
+            setCommutePointTarget(null);
+            setDynamicOrderPickTarget(null);
             vehiclePositionTarget = null;
             setStatus(routeGpsPickMode
                 ? "鼠标 GPS 上报模式已开启：每次点击地图都会同步上报车辆 GPS，并由后端吸附到道路。"
@@ -3328,6 +4874,61 @@
         randomOrder10Btn.addEventListener("click", () => createRandomOrders(10));
         randomOrder50Btn.addEventListener("click", () => createRandomOrders(50));
         resetManualPickupTimeBtn.addEventListener("click", resetManualPickupTimeWindow);
+        reloadDynamicPoisBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await loadDynamicOrderPois("动态公交站点已刷新。");
+            } catch (error) {
+                setStatus(`刷新动态公交站点失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        pickDynamicOriginBtn.addEventListener("click", async () => {
+            if (dynamicOrderPickTarget === "origin") {
+                setDynamicOrderPickTarget(null);
+                setStatus("动态公交起点点选已关闭。");
+                return;
+            }
+            setBusy(true);
+            try {
+                await loadDynamicOrderPois();
+                setRouteGpsPickMode(false);
+                setStationPickMode(false);
+                setCommutePointTarget(null);
+                vehiclePositionTarget = null;
+                isDrawingRestriction = false;
+                setDynamicOrderPickTarget("origin");
+                setStatus("请点击地图上的运营区站点作为动态公交起点。");
+            } catch (error) {
+                setStatus(`开启动态公交起点点选失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        pickDynamicDestinationBtn.addEventListener("click", async () => {
+            if (dynamicOrderPickTarget === "destination") {
+                setDynamicOrderPickTarget(null);
+                setStatus("动态公交终点点选已关闭。");
+                return;
+            }
+            setBusy(true);
+            try {
+                await loadDynamicOrderPois();
+                setRouteGpsPickMode(false);
+                setStationPickMode(false);
+                setCommutePointTarget(null);
+                vehiclePositionTarget = null;
+                isDrawingRestriction = false;
+                setDynamicOrderPickTarget("destination");
+                setStatus("请点击地图上的运营区站点作为动态公交终点。");
+            } catch (error) {
+                setStatus(`开启动态公交终点点选失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        createDynamicOrderBtn.addEventListener("click", createDynamicOrder);
         vehicleSelect.addEventListener("change", async () => {
             setBusy(true);
             try {
@@ -3361,13 +4962,25 @@
             setCurrentOperationAreaId(routeAreaSelect.value || "");
             fillOperationAreaSelect(restrictionAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
             fillOperationAreaSelect(stationAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
+            fillOperationAreaSelect(commuteAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
             fillOperationAreaSelect(newVehicleAreaSelect, currentOperationAreaId(), { fallbackToCurrent: true });
             if (!selectedVehicleCode) {
                 fillOperationAreaSelect(vehicleAreaSelect, "", { fallbackToCurrent: false });
             }
             try {
                 await loadFleet();
+                await loadDynamicOrderPois().catch(error => {
+                    cachedPois = [];
+                    routePoisLoadedAreaId = "";
+                    clearRoutePoiMarkers();
+                    dynamicOrderInfo.textContent = `动态公交站点未加载：${error.message}`;
+                });
                 await loadRestrictionPolicies();
+                await loadCommutePois().catch(error => {
+                    commutePois = [];
+                    renderCommutePois();
+                    commutePoiInfo.textContent = `快线站点未加载：${error.message}`;
+                });
                 const selectedArea = operationAreas.find(area => String(area.area_id ?? "") === String(selectedOperationAreaId));
                 setStatus(selectedOperationAreaId
                     ? `运营区域已切换：${selectedArea ? (selectedArea.name || selectedArea.code || selectedOperationAreaId) : selectedOperationAreaId}`
@@ -3432,6 +5045,7 @@
         pickStationPointBtn.addEventListener("click", () => {
             const nextMode = !stationPickMode;
             setRouteGpsPickMode(false);
+            setCommutePointTarget(null);
             vehiclePositionTarget = null;
             isDrawingRestriction = false;
             setStationPickMode(nextMode);
@@ -3532,6 +5146,197 @@
             }
         });
 
+        reloadCommuteLinesBtn.addEventListener("click", async () => {
+            try {
+                await loadCommuteLines("快线线路已刷新。");
+            } catch (error) {
+                setStatus(`查询快线线路失败：${error.message}`);
+            }
+        });
+        newCommuteLineBtn.addEventListener("click", () => {
+            resetCommuteLineForm();
+            commutePois = [];
+            renderCommutePois();
+            setCommuteResult("已进入新增快线线路模式。");
+            setStatus("已进入新增快线线路模式。");
+        });
+        commuteAreaSelect.addEventListener("change", async () => {
+            setCommuteBusy(true);
+            try {
+                await loadCommutePois("快线运营区站点已刷新。");
+            } catch (error) {
+                setStatus(`加载快线运营区站点失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        commuteLineSelect.addEventListener("change", async () => {
+            const lineCode = commuteLineSelect.value;
+            if (!lineCode) {
+                resetCommuteLineForm();
+                commutePois = [];
+                renderCommutePois();
+                return;
+            }
+            setCommuteBusy(true);
+            try {
+                const data = await apiJson(`/commute/lines/${encodeURIComponent(lineCode)}`);
+                loadCommuteLineIntoForm(data.line);
+                await loadCommutePois().catch(error => {
+                    commutePois = [];
+                    renderCommutePois();
+                    setStatus(`加载快线站点失败：${error.message}`);
+                });
+                setCommuteResult(data);
+                setStatus(`已选择快线线路：${lineCode}`);
+            } catch (error) {
+                setStatus(`读取快线线路失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        saveCommuteLineBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await saveCommuteLine();
+            } catch (error) {
+                setStatus(`保存快线线路失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        replaceCommuteStopsBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await replaceCommuteStops();
+            } catch (error) {
+                setStatus(`替换快线站点失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        deleteCommuteLineBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await deleteCommuteLine();
+            } catch (error) {
+                setStatus(`删除快线线路失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        reloadCommutePoisBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await loadCommutePois("快线运营区站点已刷新。");
+            } catch (error) {
+                setStatus(`加载快线运营区站点失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        commutePoiSelect.addEventListener("change", () => {
+            addCommuteSelectedPoisBtn.disabled = !commutePoiSelect.selectedOptions.length;
+        });
+        addCommuteSelectedPoisBtn.addEventListener("click", () => {
+            try {
+                appendSelectedCommutePois();
+            } catch (error) {
+                setStatus(`追加快线站点失败：${error.message}`);
+            }
+        });
+        clearCommuteStopsBtn.addEventListener("click", () => {
+            writeCommuteStops([]);
+            setStatus("快线线路站点已清空。");
+        });
+        pickCommuteStopBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(false);
+            setStationPickMode(false);
+            setDynamicOrderPickTarget(null);
+            vehiclePositionTarget = null;
+            isDrawingRestriction = false;
+            setCommutePointTarget(commutePointTarget === "stop" ? null : "stop");
+            setStatus(commutePointTarget === "stop" ? "请在地图上依次点击运营区站点图标追加快线固定站点。" : "快线站点点选已关闭。");
+        });
+        pickCommuteOriginBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(false);
+            setStationPickMode(false);
+            setDynamicOrderPickTarget(null);
+            vehiclePositionTarget = null;
+            isDrawingRestriction = false;
+            setCommutePointTarget(commutePointTarget === "origin" ? null : "origin");
+            setStatus(commutePointTarget === "origin" ? "请在地图上点击当前快线站点图标作为上车站。" : "快线上车点选已关闭。");
+        });
+        pickCommuteDestinationBtn.addEventListener("click", () => {
+            setRouteGpsPickMode(false);
+            setStationPickMode(false);
+            setDynamicOrderPickTarget(null);
+            vehiclePositionTarget = null;
+            isDrawingRestriction = false;
+            setCommutePointTarget(commutePointTarget === "destination" ? null : "destination");
+            setStatus(commutePointTarget === "destination" ? "请在地图上点击当前快线站点图标作为下车站。" : "快线下车点选已关闭。");
+        });
+        assignCommuteVehicleBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await assignCommuteVehicle();
+            } catch (error) {
+                setStatus(`绑定快线车辆失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        createCommuteOrderBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await createCommuteOrder();
+            } catch (error) {
+                setStatus(`创建快线订单失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        queryCommuteOrderBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await queryCommuteOrder();
+            } catch (error) {
+                setStatus(`查询快线订单失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        cancelCommuteOrderBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await cancelCommuteOrder();
+            } catch (error) {
+                setStatus(`取消快线订单失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        commutePickupBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await confirmCommuteBoarding("pickup");
+            } catch (error) {
+                setStatus(`确认快线上车失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+        commuteDropoffBtn.addEventListener("click", async () => {
+            setCommuteBusy(true);
+            try {
+                await confirmCommuteBoarding("dropoff");
+            } catch (error) {
+                setStatus(`确认快线下车失败：${error.message}`);
+            } finally {
+                setCommuteBusy(false);
+            }
+        });
+
         reloadAdminBtn.addEventListener("click", () => loadAdminOptions("司机车辆档案已刷新。"));
         resetAdminFormsBtn.addEventListener("click", () => {
             resetAdminForms();
@@ -3616,6 +5421,7 @@
         pickVehiclePositionBtn.addEventListener("click", () => {
             setRouteGpsPickMode(false);
             setStationPickMode(false);
+            setCommutePointTarget(null);
             vehiclePositionTarget = "edit";
             isDrawingRestriction = false;
             renderDraftRestrictionLine();
@@ -3675,7 +5481,14 @@
         resetManualPickupTimeWindow();
         loadOperationAreas().then(async () => {
             await loadFleet();
+            await loadDynamicOrderPois().catch(error => {
+                cachedPois = [];
+                routePoisLoadedAreaId = "";
+                clearRoutePoiMarkers();
+                dynamicOrderInfo.textContent = `动态公交站点未加载：${error.message}`;
+            });
             await loadRestrictionPolicies();
+            await loadCommuteLines();
         });
         loadAdminOptions();
     </script>

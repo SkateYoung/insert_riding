@@ -511,6 +511,9 @@ class MySqlPersistence:
         self._vehicle_memory = {}
         self._vehicle_bind_memory = []
         self._operation_area_memory = {}
+        self._commute_line_memory = {}
+        self._commute_vehicle_assignment_memory = {}
+        self._commute_order_memory = {}
 
     @classmethod
     def from_env(cls):
@@ -2015,6 +2018,233 @@ class MySqlPersistence:
             if connection is not None:
                 connection.close()
 
+    def list_unfinished_orders_by_operation_area(self, area_id, statuses=None, limit=50):
+        """查询指定运营区仍未结束的订单摘要。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return []
+        unfinished_statuses = tuple(statuses or ("pooled", "matched", "waiting_pickup", "riding"))
+        if not unfinished_statuses:
+            return []
+        max_rows = max(1, int(limit or 50))
+        if not self.enabled or pymysql is None:
+            records = []
+            for order in self._commute_order_memory.values():
+                if (
+                    _int_or_none(order.get("operation_area_id")) == operation_area_id
+                    and str(order.get("status") or "") in unfinished_statuses
+                ):
+                    records.append(copy.deepcopy(order))
+            return records[:max_rows]
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                placeholders = ",".join(["%s"] * len(unfinished_statuses))
+                cursor.execute(f"""
+                    SELECT o.request_id, o.status, o.order_source, o.operation_area_id,
+                           o.passenger_phone, o.origin_name, o.destination_name,
+                           o.assigned_plate_no, v.vehicle_code, v.plate_no
+                    FROM bus_order o
+                    LEFT JOIN bus_vehicle v ON v.id=o.assigned_vehicle_id
+                    WHERE o.tenant_id=%s
+                      AND o.operation_area_id=%s
+                      AND o.deleted=0
+                      AND o.status IN ({placeholders})
+                    ORDER BY o.updated_at DESC, o.id DESC
+                    LIMIT %s
+                """, (self.tenant_id, operation_area_id, *unfinished_statuses, max_rows))
+                return [
+                    {key: _api_value(value) for key, value in row.items()}
+                    for row in cursor.fetchall()
+                ]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_runtime_vehicle_task_blockers_by_operation_area(self, area_id, limit=50):
+        """查询指定运营区仍有运行任务的车辆运行态摘要。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return []
+        max_rows = max(1, int(limit or 50))
+        if not self.enabled or pymysql is None:
+            return []
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT v.vehicle_code, v.plate_no,
+                           r.on_board_count, r.on_board_order_ids,
+                           r.planned_step_count, r.route_version, r.route_grasp_status
+                    FROM bus_vehicle v
+                    JOIN bus_vehicle_runtime r
+                      ON r.vehicle_id=v.id
+                     AND r.tenant_id=v.tenant_id
+                     AND r.deleted=0
+                    WHERE v.tenant_id=%s
+                      AND v.operation_area_id=%s
+                      AND v.deleted=0
+                      AND (
+                          COALESCE(r.on_board_count, 0) > 0
+                          OR COALESCE(r.planned_step_count, 0) > 0
+                      )
+                    ORDER BY r.updated_at DESC, r.id DESC
+                    LIMIT %s
+                """, (self.tenant_id, operation_area_id, max_rows))
+                records = []
+                for row in cursor.fetchall():
+                    vehicle_code = row.get("vehicle_code")
+                    records.append({
+                        "vehicle_id": vehicle_code,
+                        "vehicle_code": vehicle_code,
+                        "plate_no": row.get("plate_no"),
+                        "on_board_count": _api_value(row.get("on_board_count")),
+                        "on_board_orders": _api_value(row.get("on_board_order_ids")) or [],
+                        "planned_step_count": _api_value(row.get("planned_step_count")),
+                        "route_version": row.get("route_version"),
+                        "route_grasp_status": row.get("route_grasp_status"),
+                        "source": "database_runtime",
+                    })
+                return records
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def delete_operation_area_and_reset_vehicles_by_area_id(self, area_id):
+        """软删除运营区，并把该运营区车辆重置为离线且清空运营区归属。"""
+        operation_area_id = _int_or_none(area_id)
+        if operation_area_id is None:
+            return {"deleted": False, "reset_vehicle_codes": []}
+        if not self.enabled or pymysql is None:
+            area = self.get_operation_area_by_area_id(operation_area_id)
+            if not area:
+                return {"deleted": False, "reset_vehicle_codes": []}
+            reset_vehicle_codes = []
+            for vehicle in self._vehicle_memory.values():
+                if _int_or_none(vehicle.get("operation_area_id")) != operation_area_id:
+                    continue
+                vehicle["operation_status"] = "offline"
+                vehicle["operation_area_id"] = None
+                vehicle["operation_area_code"] = None
+                vehicle["rest_status"] = "operating"
+                vehicle["can_accept_order"] = False
+                reset_vehicle_codes.append(vehicle.get("vehicle_code"))
+            code = str(area.get("code") or "").strip()
+            if code in self._operation_area_memory:
+                self._operation_area_memory[code]["deleted"] = 1
+                self._operation_area_memory[code]["is_deleted"] = 1
+                self._operation_area_memory[code]["load_status"] = "disabled"
+            return {
+                "deleted": True,
+                "reset_vehicle_codes": [code for code in reset_vehicle_codes if code],
+            }
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id
+                    FROM map_operation_area
+                    WHERE tenant_id=%s AND area_id=%s AND deleted=0 AND is_deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_id))
+                if cursor.fetchone() is None:
+                    connection.rollback()
+                    return {"deleted": False, "reset_vehicle_codes": []}
+
+                cursor.execute("""
+                    SELECT request_id, status
+                    FROM bus_order
+                    WHERE tenant_id=%s
+                      AND operation_area_id=%s
+                      AND deleted=0
+                      AND status IN ('pooled', 'matched', 'waiting_pickup', 'riding')
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_id))
+                blocker = cursor.fetchone()
+                if blocker is not None:
+                    connection.rollback()
+                    raise PersistenceConflict(
+                        "运营区仍有未完成订单，不能删除",
+                        code="operation_area_has_unfinished_orders",
+                    )
+
+                cursor.execute("""
+                    SELECT v.vehicle_code
+                    FROM bus_vehicle v
+                    JOIN bus_vehicle_runtime r
+                      ON r.vehicle_id=v.id
+                     AND r.tenant_id=v.tenant_id
+                     AND r.deleted=0
+                    WHERE v.tenant_id=%s
+                      AND v.operation_area_id=%s
+                      AND v.deleted=0
+                      AND (
+                          COALESCE(r.on_board_count, 0) > 0
+                          OR COALESCE(r.planned_step_count, 0) > 0
+                      )
+                    LIMIT 1
+                """, (self.tenant_id, operation_area_id))
+                runtime_blocker = cursor.fetchone()
+                if runtime_blocker is not None:
+                    connection.rollback()
+                    raise PersistenceConflict(
+                        "运营区车辆仍有未完成任务，不能删除",
+                        code="operation_area_has_unfinished_orders",
+                    )
+
+                cursor.execute("""
+                    SELECT id, vehicle_code
+                    FROM bus_vehicle
+                    WHERE tenant_id=%s AND operation_area_id=%s AND deleted=0
+                """, (self.tenant_id, operation_area_id))
+                vehicles = cursor.fetchall()
+                reset_vehicle_codes = [row.get("vehicle_code") for row in vehicles if row.get("vehicle_code")]
+
+                cursor.execute("""
+                    UPDATE bus_vehicle_runtime r
+                    JOIN bus_vehicle v
+                      ON v.id=r.vehicle_id
+                     AND v.tenant_id=r.tenant_id
+                    SET r.deleted=1,
+                        r.can_accept_order=0,
+                        r.rest_status='operating',
+                        r.updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE r.tenant_id=%s
+                      AND v.operation_area_id=%s
+                      AND v.deleted=0
+                      AND r.deleted=0
+                """, (self.tenant_id, operation_area_id))
+
+                cursor.execute("""
+                    UPDATE bus_vehicle
+                    SET operation_status='offline',
+                        operation_area_id=NULL,
+                        updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND operation_area_id=%s AND deleted=0
+                """, (self.tenant_id, operation_area_id))
+
+                cursor.execute("""
+                    UPDATE map_operation_area
+                    SET deleted=1, is_deleted=1, load_status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND area_id=%s AND deleted=0
+                """, (self.tenant_id, operation_area_id))
+                affected = cursor.rowcount
+            connection.commit()
+            return {
+                "deleted": affected > 0,
+                "reset_vehicle_codes": reset_vehicle_codes,
+            }
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
     def hard_delete_operation_area_by_area_id(self, area_id):
         """按运营区业务 area_id 物理删除运营区，用于新增失败回滚。"""
         operation_area_id = _int_or_none(area_id)
@@ -2176,6 +2406,44 @@ class MySqlPersistence:
             if connection is not None:
                 connection.close()
 
+    def get_station_by_coordinate(self, operation_area_id, lon, lat):
+        """按运营区和精确经纬度读取一个启用站点。"""
+        if not self.enabled or pymysql is None:
+            raise PersistenceUnavailable("database_unavailable")
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id_required")
+        lon_value = self._station_decimal_coordinate(lon)
+        lat_value = self._station_decimal_coordinate(lat)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM map_poi
+                    WHERE tenant_id=%s
+                      AND operation_area_id=%s
+                      AND longitude=%s
+                      AND latitude=%s
+                      AND deleted=0
+                      AND status='enabled'
+                    ORDER BY id ASC
+                """, (self.tenant_id, area_id, lon_value, lat_value))
+                rows = cursor.fetchall()
+                if not rows:
+                    return None
+                if len(rows) > 1:
+                    raise PersistenceConflict(
+                        "同一运营区的该坐标匹配到多个启用站点",
+                        code="station_coordinate_ambiguous",
+                        field="lon,lat",
+                    )
+                return self._station_from_row(rows[0])
+        finally:
+            if connection is not None:
+                connection.close()
+
     def _station_from_row(self, row):
         """将 map_poi 行转换为站点接口返回结构。"""
         if not row:
@@ -2329,6 +2597,637 @@ class MySqlPersistence:
             if connection is not None:
                 connection.rollback()
             raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @staticmethod
+    def _commute_line_from_row(row):
+        """把通勤快线线路记录转换成接口可返回的字典。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        stops = result.get("stops_json") or []
+        if not isinstance(stops, list):
+            stops = []
+        result["stops_json"] = stops
+        result["stops"] = copy.deepcopy(stops)
+        result["stop_count"] = _int_or_none(result.get("stop_count")) or len(stops)
+        return result
+
+    @staticmethod
+    def _commute_stop_from_row(row):
+        """把 map_poi 站点记录转换为通勤快线站点快照。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        result["poi_id"] = _int_or_none(result.get("id") or result.get("poi_id"))
+        result["station_name"] = result.get("station_name") or result.get("poi_name")
+        result["lon"] = result.get("longitude")
+        result["lat"] = result.get("latitude")
+        result.pop("deleted", None)
+        result.pop("tenant_id", None)
+        return result
+
+    @staticmethod
+    def _commute_assignment_from_row(row):
+        """把通勤快线车辆绑定记录转换成接口可返回的字典。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        return result
+
+    @staticmethod
+    def _commute_order_from_row(row):
+        """把通勤快线订单记录转换成接口可返回的字典。"""
+        if not row:
+            return None
+        result = {key: _api_value(value) for key, value in row.items()}
+        route_segments = result.get("route_segments") or {}
+        if isinstance(route_segments, dict):
+            result["line_code"] = route_segments.get("line_code") or result.get("line_code")
+            result["route_poi_sequence"] = route_segments.get("route_poi_sequence") or []
+        else:
+            result["route_poi_sequence"] = []
+        result["origin_poi_code"] = result.get("origin_poi_code")
+        result["destination_poi_code"] = result.get("destination_poi_code")
+        result["origin_station_name"] = result.get("origin_name")
+        result["destination_station_name"] = result.get("destination_name")
+        result["assigned_vehicle_code"] = result.get("assigned_vehicle_code")
+        return result
+
+    def _resolve_commute_stop_by_coordinate_sync(self, cursor, operation_area_id, lon, lat, *, field="stops"):
+        """按运营区和精确经纬度解析通勤快线站点。"""
+        area_id = _int_or_none(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id 不能为空")
+        lon_value = self._station_decimal_coordinate(lon)
+        lat_value = self._station_decimal_coordinate(lat)
+        cursor.execute("""
+            SELECT *
+            FROM map_poi
+            WHERE tenant_id=%s
+              AND operation_area_id=%s
+              AND longitude=%s
+              AND latitude=%s
+              AND deleted=0
+              AND status='enabled'
+            ORDER BY id ASC
+        """, (self.tenant_id, area_id, lon_value, lat_value))
+        rows = cursor.fetchall()
+        if not rows:
+            raise PersistenceConflict("坐标未匹配到启用站点", code="commute_stop_not_found_by_coordinate", field=field)
+        if len(rows) > 1:
+            raise PersistenceConflict("坐标匹配到多个启用站点", code="commute_stop_coordinate_ambiguous", field=field)
+        return self._commute_stop_from_row(rows[0])
+
+    def _resolve_commute_stops_sync(self, cursor, operation_area_id, stops):
+        """将前端经纬度数组解析为 map_poi 站点快照，并保持请求顺序。"""
+        if not isinstance(stops, list) or len(stops) < 2:
+            raise ValueError("通勤快线至少需要 2 个站点")
+        resolved = []
+        seen_poi_ids = set()
+        for index, item in enumerate(stops, start=1):
+            if not isinstance(item, dict):
+                raise ValueError("stops 中每一项都必须是对象")
+            lon = item.get("lon", item.get("lng", item.get("longitude")))
+            lat = item.get("lat", item.get("latitude"))
+            stop = self._resolve_commute_stop_by_coordinate_sync(
+                cursor,
+                operation_area_id,
+                lon,
+                lat,
+                field=f"stops[{index - 1}]",
+            )
+            poi_id = _int_or_none(stop.get("poi_id"))
+            if poi_id in seen_poi_ids:
+                raise PersistenceConflict("线路中不能重复配置同一个站点", code="commute_stop_duplicate", field="stops")
+            seen_poi_ids.add(poi_id)
+            stop["line_order"] = index
+            resolved.append(stop)
+        return resolved
+
+    @staticmethod
+    def _commute_stop_by_coordinate(stops, lon, lat):
+        """在已解析的线路站点中按经纬度查找站点快照。"""
+        key = (round(float(lon), 8), round(float(lat), 8))
+        matches = [
+            stop for stop in stops or []
+            if (round(float(stop.get("lon")), 8), round(float(stop.get("lat")), 8)) == key
+        ]
+        if not matches:
+            raise PersistenceConflict("站点坐标不在线路站点中", code="commute_stop_not_in_line", field="lon,lat")
+        if len(matches) > 1:
+            raise PersistenceConflict("站点坐标在线路中存在重复", code="commute_stop_coordinate_ambiguous", field="lon,lat")
+        return matches[0]
+
+    def list_commute_lines(self, include_deleted=False):
+        """查询通勤快线线路列表。"""
+        if not self.enabled or pymysql is None:
+            lines = [copy.deepcopy(item) for item in self._commute_line_memory.values()]
+            if not include_deleted:
+                lines = [item for item in lines if not int(item.get("deleted") or 0)]
+            return sorted(lines, key=lambda item: item.get("line_code") or "")
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                condition = "" if include_deleted else "AND deleted=0"
+                cursor.execute(f"""
+                    SELECT *
+                    FROM bus_commute_line
+                    WHERE tenant_id=%s {condition}
+                    ORDER BY updated_at DESC, id DESC
+                """, (self.tenant_id,))
+                return [self._commute_line_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_commute_line(self, line_code, with_stops=True):
+        """按线路编码读取通勤快线线路。"""
+        line_code = str(line_code or "").strip()
+        if not line_code:
+            return None
+        if not self.enabled or pymysql is None:
+            line = self._commute_line_memory.get(line_code)
+            if not line or int(line.get("deleted") or 0):
+                return None
+            result = copy.deepcopy(line)
+            if with_stops:
+                result["stops"] = self.list_commute_line_stops(line_code)
+            return result
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_commute_line
+                    WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, line_code))
+                line = self._commute_line_from_row(cursor.fetchone())
+            if line and with_stops:
+                line["stops"] = self.list_commute_line_stops(line_code)
+            return line
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_commute_line(self, line, *, create=False):
+        """创建或更新通勤快线线路主表记录。"""
+        payload = copy.deepcopy(line or {})
+        line_code = str(payload.get("line_code") or "").strip()
+        line_name = str(payload.get("line_name") or "").strip()
+        operation_area_id = _int_or_none(payload.get("operation_area_id"))
+        if not line_code:
+            raise ValueError("line_code 不能为空")
+        if not line_name:
+            raise ValueError("line_name 不能为空")
+        if operation_area_id is None:
+            raise ValueError("operation_area_id 不能为空")
+        normalized = {
+            "line_code": line_code,
+            "line_name": line_name,
+            "operation_area_id": operation_area_id,
+            "route_mode": str(payload.get("route_mode") or "loop").strip() or "loop",
+            "status": str(payload.get("status") or "enabled").strip() or "enabled",
+            "description": str(payload.get("description") or "").strip() or None,
+        }
+        if not self.enabled or pymysql is None:
+            if create and line_code in self._commute_line_memory and not int(self._commute_line_memory[line_code].get("deleted") or 0):
+                raise PersistenceConflict("通勤快线线路编码已存在", code="commute_line_exists", field="line_code")
+            existing = self._commute_line_memory.get(line_code)
+            if existing:
+                normalized["stops_json"] = copy.deepcopy(existing.get("stops_json") or existing.get("stops") or [])
+                normalized["stop_count"] = len(normalized["stops_json"])
+            else:
+                normalized["stops_json"] = []
+                normalized["stop_count"] = 0
+            normalized["id"] = existing.get("id") if existing else len(self._commute_line_memory) + 1
+            normalized["tenant_id"] = self.tenant_id
+            normalized["deleted"] = 0
+            self._commute_line_memory[line_code] = normalized
+            return copy.deepcopy(normalized)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                if not self._db_operation_area_exists(cursor, operation_area_id):
+                    raise ValueError("operation_area_id 对应的运营区不存在")
+                cursor.execute("""
+                    SELECT id
+                    FROM bus_commute_line
+                    WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, line_code))
+                existing = cursor.fetchone()
+                if create and existing:
+                    raise PersistenceConflict("通勤快线线路编码已存在", code="commute_line_exists", field="line_code")
+                if existing:
+                    cursor.execute("""
+                        UPDATE bus_commute_line
+                        SET line_name=%s, operation_area_id=%s, route_mode=%s, status=%s,
+                            description=%s, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                    """, (
+                        normalized["line_name"], normalized["operation_area_id"], normalized["route_mode"],
+                        normalized["status"], normalized["description"], self.tenant_id, line_code,
+                    ))
+                else:
+                    cursor.execute("""
+                        INSERT INTO bus_commute_line
+                            (line_code, line_name, operation_area_id, route_mode, status, description, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        normalized["line_code"], normalized["line_name"], normalized["operation_area_id"],
+                        normalized["route_mode"], normalized["status"], normalized["description"], self.tenant_id,
+                    ))
+            connection.commit()
+            return self.get_commute_line(line_code, with_stops=False)
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def delete_commute_line(self, line_code):
+        """软删除通勤快线线路及其车辆绑定。"""
+        line_code = str(line_code or "").strip()
+        if not line_code:
+            return False
+        if not self.enabled or pymysql is None:
+            line = self._commute_line_memory.get(line_code)
+            if not line or int(line.get("deleted") or 0):
+                return False
+            line["deleted"] = 1
+            for item in self._commute_vehicle_assignment_memory.values():
+                if item.get("line_code") == line_code:
+                    item["status"] = "disabled"
+                    item["deleted"] = 1
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE bus_commute_line
+                    SET deleted=1, status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                """, (self.tenant_id, line_code))
+                affected = cursor.rowcount
+                cursor.execute("""
+                    UPDATE bus_commute_vehicle_assignment
+                    SET deleted=1, status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                """, (self.tenant_id, line_code))
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_commute_line_stops(self, line_code):
+        """读取通勤快线固定站序快照。"""
+        line = self.get_commute_line(line_code, with_stops=False)
+        return copy.deepcopy((line or {}).get("stops_json") or [])
+
+    def replace_commute_line_stops(self, line_code, stops):
+        """按经纬度解析并整体替换通勤快线站序。"""
+        line_code = str(line_code or "").strip()
+        if not line_code:
+            raise ValueError("line_code 不能为空")
+        line = self.get_commute_line(line_code, with_stops=False)
+        if not line:
+            return None
+        if not self.enabled or pymysql is None:
+            if not isinstance(stops, list) or len(stops) < 2:
+                raise ValueError("通勤快线至少需要 2 个站点")
+            resolved = []
+            seen_poi_ids = set()
+            for index, item in enumerate(stops, start=1):
+                lon = item.get("lon", item.get("lng", item.get("longitude")))
+                lat = item.get("lat", item.get("latitude"))
+                poi_id = _int_or_none(item.get("poi_id")) or index
+                if poi_id in seen_poi_ids:
+                    raise PersistenceConflict("线路中不能重复配置同一个站点", code="commute_stop_duplicate", field="stops")
+                seen_poi_ids.add(poi_id)
+                resolved.append({
+                    "poi_id": poi_id,
+                    "poi_code": item.get("poi_code") or str(poi_id),
+                    "station_name": item.get("station_name") or item.get("poi_name") or f"站点{index}",
+                    "lon": _float_or_none(lon),
+                    "lat": _float_or_none(lat),
+                    "longitude": _float_or_none(lon),
+                    "latitude": _float_or_none(lat),
+                    "node_code": item.get("node_code"),
+                    "line_order": index,
+                })
+            self._commute_line_memory[line_code]["stops_json"] = copy.deepcopy(resolved)
+            self._commute_line_memory[line_code]["stops"] = copy.deepcopy(resolved)
+            self._commute_line_memory[line_code]["stop_count"] = len(resolved)
+            return self.list_commute_line_stops(line_code)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                resolved = self._resolve_commute_stops_sync(cursor, line.get("operation_area_id"), stops)
+                cursor.execute("""
+                    UPDATE bus_commute_line
+                    SET stops_json=%s, stop_count=%s, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                """, (_json(resolved), len(resolved), self.tenant_id, line_code))
+            connection.commit()
+            return self.list_commute_line_stops(line_code)
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def assign_commute_vehicle(self, assignment):
+        """绑定车辆到通勤快线线路。"""
+        payload = copy.deepcopy(assignment or {})
+        vehicle_code = str(payload.get("vehicle_code") or "").strip()
+        line_code = str(payload.get("line_code") or "").strip()
+        task_mode = str(payload.get("task_mode") or "").strip()
+        if not vehicle_code:
+            raise ValueError("vehicle_code 不能为空")
+        if not line_code:
+            raise ValueError("line_code 不能为空")
+        if task_mode not in {"commute_fixed_waiting", "commute_cruising"}:
+            raise ValueError("task_mode 必须是 commute_fixed_waiting 或 commute_cruising")
+        line = self.get_commute_line(line_code, with_stops=True)
+        if not line:
+            raise KeyError("commute_line_not_found")
+        vehicle = self.get_vehicle(vehicle_code)
+        if not vehicle:
+            raise KeyError("vehicle_not_found")
+        normalized = {
+            "vehicle_code": vehicle_code,
+            "line_code": line_code,
+            "operation_area_id": line.get("operation_area_id"),
+            "task_mode": task_mode,
+            "status": str(payload.get("status") or "active").strip() or "active",
+        }
+        if not self.enabled or pymysql is None:
+            normalized["id"] = len(self._commute_vehicle_assignment_memory) + 1
+            normalized["tenant_id"] = self.tenant_id
+            normalized["deleted"] = 0
+            self._commute_vehicle_assignment_memory[vehicle_code] = copy.deepcopy(normalized)
+            vehicle["operation_mode"] = task_mode
+            vehicle["operation_area_id"] = normalized["operation_area_id"]
+            self._vehicle_memory[vehicle_code] = vehicle
+            return copy.deepcopy(normalized)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id FROM bus_commute_vehicle_assignment
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, vehicle_code))
+                existing = cursor.fetchone()
+                if existing:
+                    cursor.execute("""
+                        UPDATE bus_commute_vehicle_assignment
+                        SET line_code=%s, operation_area_id=%s, task_mode=%s,
+                            status=%s, updated_at=CURRENT_TIMESTAMP(3)
+                        WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                    """, (
+                        line_code, normalized["operation_area_id"], task_mode,
+                        normalized["status"], self.tenant_id, vehicle_code,
+                    ))
+                else:
+                    cursor.execute("""
+                        INSERT INTO bus_commute_vehicle_assignment
+                            (vehicle_code, line_code, operation_area_id, task_mode, status, tenant_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (
+                        vehicle_code, line_code, normalized["operation_area_id"], task_mode,
+                        normalized["status"], self.tenant_id,
+                    ))
+                cursor.execute("""
+                    UPDATE bus_vehicle
+                    SET operation_mode=%s, operation_area_id=%s, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                """, (task_mode, normalized["operation_area_id"], self.tenant_id, vehicle_code))
+            connection.commit()
+            return self.get_commute_vehicle_assignment(vehicle_code)
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_commute_vehicle_assignment(self, vehicle_code):
+        """读取车辆当前通勤快线绑定。"""
+        vehicle_code = str(vehicle_code or "").strip()
+        if not vehicle_code:
+            return None
+        if not self.enabled or pymysql is None:
+            item = self._commute_vehicle_assignment_memory.get(vehicle_code)
+            return copy.deepcopy(item) if item and not int(item.get("deleted") or 0) else None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT *
+                    FROM bus_commute_vehicle_assignment
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, vehicle_code))
+                return self._commute_assignment_from_row(cursor.fetchone())
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def disable_commute_vehicle_assignment(self, vehicle_code):
+        """停用车辆当前通勤快线绑定。"""
+        vehicle_code = str(vehicle_code or "").strip()
+        if not vehicle_code:
+            return False
+        if not self.enabled or pymysql is None:
+            item = self._commute_vehicle_assignment_memory.get(vehicle_code)
+            if not item or int(item.get("deleted") or 0):
+                return False
+            item["status"] = "disabled"
+            return True
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE bus_commute_vehicle_assignment
+                    SET status='disabled', updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE tenant_id=%s AND vehicle_code=%s AND deleted=0
+                """, (self.tenant_id, vehicle_code))
+                affected = cursor.rowcount
+            connection.commit()
+            return affected > 0
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_commute_vehicle_assignments(self, line_code=None):
+        """查询通勤快线车辆绑定列表。"""
+        line_code = str(line_code or "").strip()
+        if not self.enabled or pymysql is None:
+            items = [
+                copy.deepcopy(item)
+                for item in self._commute_vehicle_assignment_memory.values()
+                if not int(item.get("deleted") or 0)
+            ]
+            if line_code:
+                items = [item for item in items if item.get("line_code") == line_code]
+            return sorted(items, key=lambda item: str(item.get("vehicle_code") or ""))
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                if line_code:
+                    cursor.execute("""
+                        SELECT *
+                        FROM bus_commute_vehicle_assignment
+                        WHERE tenant_id=%s AND line_code=%s AND deleted=0
+                        ORDER BY vehicle_code ASC
+                    """, (self.tenant_id, line_code))
+                else:
+                    cursor.execute("""
+                        SELECT *
+                        FROM bus_commute_vehicle_assignment
+                        WHERE tenant_id=%s AND deleted=0
+                        ORDER BY vehicle_code ASC
+                    """, (self.tenant_id,))
+                return [self._commute_assignment_from_row(row) for row in cursor.fetchall()]
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def save_commute_order(self, order, *, create=False):
+        """创建或更新通勤快线订单。
+
+        通勤快线订单复用 bus_order，通过 order_source='commute_express' 区分，
+        route_segments 仅保存线路编码和站点顺序快照，不写车辆导航路径。
+        """
+        payload = copy.deepcopy(order or {})
+        request_id = str(payload.get("request_id") or "").strip()
+        if not request_id:
+            raise ValueError("request_id 不能为空")
+        if not self.enabled or pymysql is None:
+            if create and request_id in self._commute_order_memory:
+                raise PersistenceConflict("通勤快线订单已存在", code="commute_order_exists", field="request_id")
+            existing = self._commute_order_memory.get(request_id) or {}
+            existing.update(payload)
+            existing.setdefault("tenant_id", self.tenant_id)
+            self._commute_order_memory[request_id] = existing
+            return copy.deepcopy(existing)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT id
+                    FROM bus_order
+                    WHERE tenant_id=%s AND request_id=%s AND deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, request_id))
+                existing = cursor.fetchone()
+                if create and existing:
+                    raise PersistenceConflict("通勤快线订单已存在", code="commute_order_exists", field="request_id")
+                order_payload = {
+                    "request_id": request_id,
+                    "passenger_code": payload.get("passenger_id") or payload.get("passenger_code"),
+                    "passenger_phone": payload.get("passenger_phone"),
+                    "passenger_count": _int_or_none(payload.get("passenger_count")) or 1,
+                    "order_source": "commute_express",
+                    "operation_area_id": _int_or_none(payload.get("operation_area_id")),
+                    "status": payload.get("status") or "pooled",
+                    "origin_lon": _float_or_none(payload.get("origin_lon")),
+                    "origin_lat": _float_or_none(payload.get("origin_lat")),
+                    "destination_lon": _float_or_none(payload.get("destination_lon")),
+                    "destination_lat": _float_or_none(payload.get("destination_lat")),
+                    "origin_poi_code": payload.get("origin_poi_code"),
+                    "destination_poi_code": payload.get("destination_poi_code"),
+                    "origin_node_code": payload.get("origin_node_code"),
+                    "destination_node_code": payload.get("destination_node_code"),
+                    "origin_name": payload.get("origin_station_name") or payload.get("origin_name"),
+                    "destination_name": payload.get("destination_station_name") or payload.get("destination_name"),
+                    "request_time": _to_datetime(payload.get("request_time")) or _now_dt(),
+                    "assigned_vehicle_code": payload.get("assigned_vehicle_code"),
+                    "assigned_plate_no": payload.get("assigned_plate_no"),
+                    "answer_time": payload.get("answer_time"),
+                    "actual_pickup_time": payload.get("actual_pickup_time") or payload.get("pickup_time"),
+                    "completion_time": payload.get("completion_time") or payload.get("dropoff_time"),
+                    "cancel_time": payload.get("cancel_time"),
+                    "cancel_reason": payload.get("cancel_reason"),
+                    "route_status": None,
+                    "route_segments": {
+                        "line_code": payload.get("line_code"),
+                        "route_poi_sequence": payload.get("route_poi_sequence") or [],
+                    },
+                    "route_updated_at": _now_dt(),
+                }
+                if order_payload["status"] == "waiting_pickup" and not order_payload.get("answer_time"):
+                    order_payload["answer_time"] = _now_dt()
+                self._op_order(cursor, self.tenant_id, order_payload)
+            connection.commit()
+            return self.get_commute_order(request_id)
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def get_commute_order(self, request_id):
+        """读取通勤快线订单。"""
+        request_id = str(request_id or "").strip()
+        if not request_id:
+            return None
+        if not self.enabled or pymysql is None:
+            item = self._commute_order_memory.get(request_id)
+            return copy.deepcopy(item) if item and not int(item.get("deleted") or 0) else None
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=True)
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT o.*,
+                           ov.vehicle_code AS assigned_vehicle_code,
+                           od.driver_code AS assigned_driver_code,
+                           op.poi_code AS origin_poi_code,
+                           dp.poi_code AS destination_poi_code
+                    FROM bus_order o
+                    LEFT JOIN bus_vehicle ov ON ov.id=o.assigned_vehicle_id
+                    LEFT JOIN bus_driver od ON od.id=o.assigned_driver_id
+                    LEFT JOIN map_poi op ON op.id=o.origin_poi_id
+                    LEFT JOIN map_poi dp ON dp.id=o.destination_poi_id
+                    WHERE o.tenant_id=%s
+                      AND o.request_id=%s
+                      AND o.order_source='commute_express'
+                      AND o.deleted=0
+                    LIMIT 1
+                """, (self.tenant_id, request_id))
+                return self._commute_order_from_row(cursor.fetchone())
         finally:
             if connection is not None:
                 connection.close()
@@ -2880,6 +3779,11 @@ class MySqlPersistence:
                 normalized["operation_area_id"],
             )
             self._check_memory_driver_binding_available(driver_code, vehicle_code)
+            existing_memory_vehicle = self._vehicle_memory.get(vehicle_code) or {}
+            memory_vehicle_id = _int_or_none(existing_memory_vehicle.get("id"))
+            if memory_vehicle_id is None:
+                memory_vehicle_id = len(self._vehicle_memory) + 1
+            normalized["id"] = memory_vehicle_id
             driver = self.get_driver(driver_code) if driver_code else None
             normalized["current_driver_no"] = driver.get("driver_no") if driver else None
             normalized["current_driver_name"] = driver.get("driver_name") if driver else None
@@ -3807,6 +4711,28 @@ def delete_operation_area_by_area_id(area_id):
     return _manager.delete_operation_area_by_area_id(area_id)
 
 
+def list_unfinished_orders_by_operation_area(area_id, statuses=None, limit=50):
+    """查询指定运营区仍未结束的订单摘要。"""
+    return _manager.list_unfinished_orders_by_operation_area(
+        area_id,
+        statuses=statuses,
+        limit=limit,
+    )
+
+
+def list_runtime_vehicle_task_blockers_by_operation_area(area_id, limit=50):
+    """查询指定运营区仍有运行任务的车辆运行态摘要。"""
+    return _manager.list_runtime_vehicle_task_blockers_by_operation_area(
+        area_id,
+        limit=limit,
+    )
+
+
+def delete_operation_area_and_reset_vehicles_by_area_id(area_id):
+    """软删除运营区，并把该运营区车辆重置为离线且清空运营区归属。"""
+    return _manager.delete_operation_area_and_reset_vehicles_by_area_id(area_id)
+
+
 def hard_delete_operation_area_by_area_id(area_id):
     """按运营区业务 area_id 物理删除运营区，用于新增失败回滚。"""
     return _manager.hard_delete_operation_area_by_area_id(area_id)
@@ -3830,6 +4756,11 @@ def list_pois(operation_area_id=None, operation_area_ids=None):
     )
 
 
+def get_station_by_coordinate(operation_area_id, lon, lat):
+    """按运营区和精确经纬度读取一个启用站点。"""
+    return _manager.get_station_by_coordinate(operation_area_id, lon, lat)
+
+
 def create_station(station):
     """创建单个站点 POI。"""
     return _manager.create_station(station)
@@ -3842,6 +4773,66 @@ def delete_station_by_coordinate(lon, lat, operation_area_id=None):
         lat,
         operation_area_id=operation_area_id,
     )
+
+
+def list_commute_lines(include_deleted=False):
+    """查询通勤快线线路列表。"""
+    return _manager.list_commute_lines(include_deleted=include_deleted)
+
+
+def get_commute_line(line_code, with_stops=True):
+    """按线路编码读取通勤快线线路。"""
+    return _manager.get_commute_line(line_code, with_stops=with_stops)
+
+
+def save_commute_line(line, *, create=False):
+    """创建或更新通勤快线线路。"""
+    return _manager.save_commute_line(line, create=create)
+
+
+def delete_commute_line(line_code):
+    """软删除通勤快线线路。"""
+    return _manager.delete_commute_line(line_code)
+
+
+def list_commute_line_stops(line_code):
+    """读取通勤快线固定站序。"""
+    return _manager.list_commute_line_stops(line_code)
+
+
+def replace_commute_line_stops(line_code, stops):
+    """整体替换通勤快线固定站序。"""
+    return _manager.replace_commute_line_stops(line_code, stops)
+
+
+def assign_commute_vehicle(assignment):
+    """绑定车辆到通勤快线线路。"""
+    return _manager.assign_commute_vehicle(assignment)
+
+
+def get_commute_vehicle_assignment(vehicle_code):
+    """读取车辆当前通勤快线绑定。"""
+    return _manager.get_commute_vehicle_assignment(vehicle_code)
+
+
+def disable_commute_vehicle_assignment(vehicle_code):
+    """停用车辆当前通勤快线绑定。"""
+    return _manager.disable_commute_vehicle_assignment(vehicle_code)
+
+
+def list_commute_vehicle_assignments(line_code=None):
+    """查询通勤快线车辆绑定列表。"""
+    return _manager.list_commute_vehicle_assignments(line_code=line_code)
+
+
+def save_commute_order(order, *, create=False):
+    """创建或更新通勤快线订单。"""
+    return _manager.save_commute_order(order, create=create)
+
+
+def get_commute_order(request_id):
+    """读取通勤快线订单。"""
+    return _manager.get_commute_order(request_id)
 
 
 def list_drivers():
@@ -4143,7 +5134,7 @@ def _order_payload(order, city_map=None, status=None, vehicle=None, route_overri
         "passenger_code": getattr(order, "passenger_id", None) or None,
         "passenger_phone": getattr(order, "passenger_phone", None) or None,
         "passenger_count": getattr(order, "passenger_count", 1),
-        "order_source": "dynamic_bus",
+        "order_source": getattr(order, "order_source", None) or "dynamic_bus",
         "operation_area_id": getattr(order, "operation_area_id", None) or (
             getattr(vehicle, "operation_area_id", None) if vehicle is not None else None
         ),
@@ -4373,6 +5364,10 @@ def record_vehicle_route(vehicle, path_result=None):
             "segment_status": "active",
         })
 
+    if getattr(vehicle, "commute_express_active", False):
+        # 通勤快线订单由 commute_express 服务直接写入 bus_order，这里不生成动态路线镜像。
+        return
+
     # 订单主表中的路线是从整车合并路线中截取 O 到 D 后得到的单订单视角。
     for request_id, order in _orders_in_vehicle(vehicle).items():
         route_override = _order_route_from_vehicle(vehicle, request_id)
@@ -4392,6 +5387,8 @@ def record_path_update(vehicle, path_result=None, report_time=None):
     record_vehicle_runtime(vehicle, report_time=report_time)
     record_location(vehicle, report_time=report_time, raw_payload=path_result)
     record_vehicle_route(vehicle, path_result=path_result)
+    if getattr(vehicle, "commute_express_active", False):
+        return
     for event in (path_result or {}).get("changed_steps", []) if isinstance(path_result, dict) else []:
         request_id = str(event.get("request_id"))
         for order in _orders_in_vehicle(vehicle).values():
@@ -4411,6 +5408,14 @@ def record_rest_request(vehicle, result=None):
     result = result or {}
     gps = getattr(vehicle, "gps", {}) or {}
     started_at = getattr(vehicle, "rest_started_time", None) if getattr(vehicle, "is_resting", False) else None
+    source = str(result.get("source") or "driver").strip() or "driver"
+    reason = str(result.get("reason") or "").strip()
+    decision = str(result.get("decision") or "").strip()
+    remark_parts = [f"source={source}"]
+    if decision:
+        remark_parts.append(f"decision={decision}")
+    if reason:
+        remark_parts.append(f"reason={reason}")
     enqueue("rest_request", {
         "rest_request_no": f"rest:{_vehicle_code(vehicle)}:{int(time.time() * 1000)}",
         "vehicle_code": _vehicle_code(vehicle),
@@ -4422,7 +5427,7 @@ def record_rest_request(vehicle, result=None):
         "request_lat": gps.get("lat"),
         "requested_at": _now_dt(),
         "started_at": started_at,
-        "remark": result.get("decision"),
+        "remark": ";".join(remark_parts),
     })
     record_vehicle_runtime(vehicle)
 
@@ -4434,6 +5439,9 @@ def record_route_grasp(vehicle):
         vehicle (Vehicle): 车辆运行对象。
     """
     record_vehicle(vehicle)
+    if getattr(vehicle, "commute_express_active", False):
+        record_vehicle_runtime(vehicle)
+        return
     record_vehicle_route(vehicle)
     record_vehicle_runtime(vehicle)
 
@@ -4446,6 +5454,8 @@ def record_eta_result(vehicle):
     """
     if vehicle is not None:
         record_vehicle_runtime(vehicle)
+        if getattr(vehicle, "commute_express_active", False):
+            return
         for order in _orders_in_vehicle(vehicle).values():
             record_order_snapshot(order, status=_order_status(order), vehicle=vehicle)
 

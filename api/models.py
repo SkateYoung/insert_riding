@@ -337,7 +337,7 @@ class CityGraph:
 class Order:
     """系统乘客订单信令容器。
     
-    在构建体实例化期间会强行触发野坐标向着主街POI点的并轨吸附。
+    普通接口订单必须先通过数据库站点坐标校验，再把对应路网节点传入本模型。
     
     Args:
         request_id (int|str): 平台派发给该乘客请求的唯一 ID。
@@ -349,7 +349,7 @@ class Order:
         expected_pickup_earliest (datetime): 乘客可接受的最早上车时间。
         expected_pickup_latest (datetime): 乘客可接受的最晚上车时间。
         passenger_count (int): 乘客人数。
-        city_map (CityGraph): 提供 POI 校准纠偏的参考系。
+        city_map (CityGraph): 提供本地 A* 路径计算的运营区路网。
         req_time (float): 算法内部使用的数值请求时间，保留用于现有成本函数。
     """
     def __init__(
@@ -369,10 +369,12 @@ class Order:
         operation_area_id=None,
         operation_area_code=None,
         req_time=None,
+        origin_node=None,
+        destination_node=None,
     ):
         """乘客订单实例化构造器。
         
-        负责将经纬度随机位置吸附并对齐到路网 POI 站点，同时推算 SLA 等各项业务指标。
+        负责保存已校验的站点坐标与路网节点，同时推算 SLA 等各项业务指标。
         
         Args:
             request_id (int|str): 请求唯一标识 ID。
@@ -384,8 +386,10 @@ class Order:
             expected_pickup_earliest (datetime): 乘客可接受的最早上车时间。
             expected_pickup_latest (datetime): 乘客可接受的最晚上车时间。
             passenger_count (int): 乘客人数。
-            city_map (CityGraph): 参与站点吸附校验的地图实例。
+            city_map (CityGraph): 参与本地 A* 路径计算的地图实例。
             req_time (float, optional): 算法内部数值请求时间。
+            origin_node (Node, optional): 接口层已校验的起点站点对应路网节点。
+            destination_node (Node, optional): 接口层已校验的终点站点对应路网节点。
         """
         if isinstance(request_time, str):
             request_time = datetime.fromisoformat(request_time.replace("/", "-"))
@@ -409,19 +413,22 @@ class Order:
         self.operation_area_code = str(operation_area_code or "").strip()
         self.req_time = float(req_time if req_time is not None else business_timestamp(request_time))
         
-        def nearest_poi(lon, lat):
-            """将订单原始经纬度吸附到最近的合法上下客 POI。"""
-            best = None
-            best_dist = float('inf')
-            for p in city_map.pois:
-                d = AuxiliaryFunctions.haversine_distance(lon, lat, p.lon, p.lat)
-                if d < best_dist:
-                    best_dist = d
-                    best = p
-            return best
-            
-        self.o_node = nearest_poi(self.o_lon, self.o_lat)
-        self.d_node = nearest_poi(self.d_lon, self.d_lat)
+        def exact_poi(lon, lat, field_name):
+            """仅接受与当前运行态 POI 坐标精确一致的站点。"""
+            coordinate = (round(float(lon), 8), round(float(lat), 8))
+            matches = [
+                poi for poi in city_map.pois
+                if (round(float(poi.lon), 8), round(float(poi.lat), 8)) == coordinate
+            ]
+            if not matches:
+                raise ValueError(f"{field_name} 坐标未匹配到当前运营区站点")
+            if len(matches) > 1:
+                raise ValueError(f"{field_name} 坐标匹配到多个当前运营区站点")
+            return matches[0]
+
+        # HTTP 下单入口会传入数据库校验后的站点路网节点；直接构造订单时也只允许精确命中 POI。
+        self.o_node = origin_node if origin_node is not None else exact_poi(self.o_lon, self.o_lat, "origin")
+        self.d_node = destination_node if destination_node is not None else exact_poi(self.d_lon, self.d_lat, "destination")
         
         # ------ 同步 JS 算法参数：超时缓冲与爽约验证属性 ------
         self.passenger_max_wait = 1800.0  # 乘客可最高容忍接力等车时隙：30 分钟 (同步 JS 设定)
@@ -599,12 +606,12 @@ class Vehicle:
         self.rest_started_time = None
 
     def tick(self, dt: float, current_time=None):
-        """推进载体物理环境内部时钟与疲劳累加判断机制。
+        """推进载体物理环境内部时钟与休息状态。
         
         供仿真主引擎（物理帧渲染时）统一驱使调用：
         如果本车正停在路边休息，它的 driving_time 被剥离冻结。
-        若连续开车达到 10 分钟 (600s)，触发强制罢工熔断预警锁锁死系统派单源，
-        清空现有债客后进入默认 15-30 分钟休息窗口。
+        车辆连续运营时间只做统计展示，不再由算法自动触发强制收车休息；
+        休息状态仅由平台或司机通过接口显式设置。
         
         Args:
             dt (float): 经过的真实时间步进（秒）。
@@ -614,7 +621,7 @@ class Vehicle:
             None。
 
         Side Effects:
-            更新 driving_time、is_rest_requested、is_resting 和 rest_timer。
+            更新 time、driving_time 和显式休息请求产生的休息状态。
         """
         if current_time is None:
             self.time += dt
@@ -649,13 +656,6 @@ class Vehicle:
         # 仅当车辆处于【接单干活状态】时，才累加存续行驶时间
         if len(self.on_board_orders) > 0 or len(self.planned_route) > 0:
             self.driving_time += dt
-            
-        # 极限工态疲劳触发器，默认 2 小时，可通过环境变量配置。
-        if self.driving_time > self.max_continuous_driving_seconds and not self.is_rest_requested:
-            self.is_rest_requested = True
-            self.rest_status = "closing"
-            limit_hours = self.max_continuous_driving_seconds / 3600.0
-            print(f"[Vehicle.Warning] {self.id} 驾驶超过配置上限 {limit_hours:.2f} 小时，已切换为收车中。")
             
         # 收车预备 -> 正式深睡沉淀 判定：身上再无接驳负债
         if self.is_rest_requested and len(self.on_board_orders) == 0 and len(self.planned_route) == 0:

@@ -12,10 +12,26 @@ class StationAdminApiTest(unittest.TestCase):
         self.previous = {
             "create_station": persistence.create_station,
             "delete_station_by_coordinate": persistence.delete_station_by_coordinate,
+            "get_operation_area_by_area_id": persistence.get_operation_area_by_area_id,
             "list_operation_areas": persistence.list_operation_areas,
             "city_maps": state.city_maps,
             "apply_database_pois": state._apply_database_pois,
         }
+        persistence.get_operation_area_by_area_id = lambda area_id: (
+            {
+                "area_id": 10001,
+                "code": "test-area",
+                "name": "测试运营区",
+                "bounds_json": {
+                    "min_lon": 113.0,
+                    "max_lon": 114.0,
+                    "min_lat": 23.0,
+                    "max_lat": 24.0,
+                },
+            }
+            if int(area_id) == 10001
+            else None
+        )
         persistence.list_operation_areas = lambda include_deleted=False: [
             {"area_id": 10001, "code": "test-area", "name": "测试运营区"}
         ]
@@ -28,6 +44,7 @@ class StationAdminApiTest(unittest.TestCase):
     def tearDown(self):
         persistence.create_station = self.previous["create_station"]
         persistence.delete_station_by_coordinate = self.previous["delete_station_by_coordinate"]
+        persistence.get_operation_area_by_area_id = self.previous["get_operation_area_by_area_id"]
         persistence.list_operation_areas = self.previous["list_operation_areas"]
         state.city_maps = self.previous["city_maps"]
         state._apply_database_pois = self.previous["apply_database_pois"]
@@ -72,6 +89,19 @@ class StationAdminApiTest(unittest.TestCase):
         self.assertEqual(data["failure_count"], 1)
         self.assertEqual(data["results"][1]["code"], "station_coordinate_exists")
         self.assertTrue(data["runtime_refresh"]["refreshed"])
+
+    def test_create_station_rejects_coordinate_outside_operation_area(self):
+        response = self.client.post("/admin/stations", json={
+            "operation_area_id": 10001,
+            "station_name": "outside",
+            "lon": 120.0,
+            "lat": 30.0,
+        })
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(data["failure_count"], 1)
+        self.assertEqual(data["results"][0]["code"], "station_coordinate_outside_operation_area")
 
     def test_create_station_requires_station_name(self):
         response = self.client.post("/admin/stations", json={

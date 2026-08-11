@@ -19,6 +19,9 @@ class FakeCity:
         self.a.name = "起点"
         self.b.name = "中点"
         self.c.name = "终点"
+        self.a.poi_code = "poi-a"
+        self.b.poi_code = "poi-b"
+        self.c.poi_code = "poi-c"
         self.a.zone = self.b.zone = self.c.zone = 1
         self.a.neighbors = {"B": 100.0}
         self.b.neighbors = {"A": 100.0, "C": 100.0}
@@ -54,6 +57,7 @@ def make_order(city, request_id="order-1"):
 class DriverVehicleAdminApiTest(unittest.TestCase):
     def setUp(self):
         self.previous_manager = persistence._manager
+        self.previous_get_station_by_coordinate = persistence.get_station_by_coordinate
         self.previous_state = {
             "city": state.city,
             "fleet": state.fleet,
@@ -83,6 +87,22 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         state.default_operation_area_code = None
         state.fleet_by_area = {10001: []}
         state.system_initialized = True
+        station_records = {
+            (round(node.lon, 8), round(node.lat, 8)): {
+                "id": index,
+                "operation_area_id": 10001,
+                "poi_code": node.poi_code,
+                "poi_name": node.name,
+                "longitude": node.lon,
+                "latitude": node.lat,
+            }
+            for index, node in enumerate(self.city.pois, start=1)
+        }
+        persistence.get_station_by_coordinate = lambda operation_area_id, lon, lat: (
+            station_records.get((round(float(lon), 8), round(float(lat), 8)))
+            if int(operation_area_id) == 10001
+            else None
+        )
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.completed_orders_pool.clear()
         app = Flask(__name__)
@@ -91,6 +111,7 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
 
     def tearDown(self):
         persistence._manager = self.previous_manager
+        persistence.get_station_by_coordinate = self.previous_get_station_by_coordinate
         state.city = self.previous_state["city"]
         state.fleet = self.previous_state["fleet"]
         state.system_initialized = self.previous_state["system_initialized"]
@@ -170,6 +191,77 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(response.get_json()["message"], "load failed")
         self.assertIsNone(persistence.get_operation_area_by_area_id(10002))
 
+    def test_vehicle_tick_does_not_force_rest_by_driving_time(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.max_continuous_driving_seconds = 1
+        vehicle.planned_route = [{"type": "O", "order": make_order(self.city)}]
+
+        vehicle.tick(10)
+
+        self.assertGreater(vehicle.driving_time, vehicle.max_continuous_driving_seconds)
+        self.assertEqual(vehicle.rest_status, "operating")
+        self.assertFalse(vehicle.is_rest_requested)
+        self.assertFalse(vehicle.is_resting)
+
+    def test_rest_endpoint_accepts_platform_source(self):
+        self.create_driver()
+        self.create_vehicle(driver="driver-1")
+        self.activate_vehicle()
+
+        response = self.client.post("/fleet/vehicle-1/rest", json={
+            "source": "platform",
+            "rest_duration_minutes": 20,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["source"], "platform")
+        self.assertIn(data["rest_status"], {"closing", "resting"})
+        self.assertFalse(CoreDispatcher._vehicle_can_accept_order(state.fleet[0]))
+
+    def test_delete_operation_area_blocks_pooled_order(self):
+        order = make_order(self.city, request_id="pooled-order")
+        order.operation_area_id = 10001
+        order.status = "pooled"
+        CoreDispatcher.order_pool.append(order)
+
+        response = self.client.delete("/admin/operation-areas/10001")
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["error"], "operation_area_has_unfinished_orders")
+        self.assertEqual(data["blockers"]["pooled_orders"][0]["request_id"], "pooled-order")
+        self.assertIsNotNone(persistence.get_operation_area_by_area_id(10001))
+
+    def test_delete_operation_area_blocks_runtime_vehicle_task(self):
+        self.create_vehicle()
+        self.activate_vehicle()
+        state.fleet[0].planned_route = [{"type": "O", "order": make_order(self.city, request_id="assigned-order")}]
+
+        response = self.client.delete("/admin/operation-areas/10001")
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["error"], "operation_area_has_unfinished_orders")
+        self.assertEqual(data["blockers"]["vehicles"][0]["vehicle_id"], "vehicle-1")
+        self.assertIsNotNone(persistence.get_operation_area_by_area_id(10001))
+
+    def test_delete_operation_area_resets_area_vehicles_when_idle(self):
+        self.create_vehicle()
+
+        response = self.client.delete("/admin/operation-areas/10001")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["status"], "deleted")
+        self.assertEqual(data["reset_vehicle_codes"], ["vehicle-1"])
+        self.assertIsNone(persistence.get_operation_area_by_area_id(10001))
+        vehicle = persistence.get_vehicle("vehicle-1")
+        self.assertEqual(vehicle["operation_status"], "offline")
+        self.assertIsNone(vehicle["operation_area_id"])
+        self.assertNotIn(10001, state.city_maps)
+        self.assertNotIn(10001, state.fleet_by_area)
+
     def test_options_returns_form_enums_and_current_records(self):
         self.create_driver()
         self.create_vehicle(status="offline")
@@ -223,6 +315,42 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         data = response.get_json()
         self.assertEqual(data["passenger_phone"], "13900000001")
         self.assertEqual(data["passenger_id"], "passenger-business-1")
+
+    def test_create_order_rejects_coordinate_not_in_station_table(self):
+        now = datetime.now().replace(microsecond=0)
+        response = self.client.post("/order", json={
+            "request_id": "order-invalid-origin",
+            "origin": {"lon": 113.0015, "lat": 23.0015},
+            "destination": {"lon": self.city.c.lon, "lat": self.city.c.lat},
+            "expected_pickup_time": {
+                "earliest": now.isoformat(sep=" "),
+                "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+            },
+            "operation_area_id": 10001,
+            "passenger_count": 1,
+            "passenger_phone": "13900000001",
+        })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["code"], "origin_station_not_found_by_coordinate")
+
+    def test_create_order_rejects_same_origin_and_destination(self):
+        now = datetime.now().replace(microsecond=0)
+        response = self.client.post("/order", json={
+            "request_id": "order-same-station",
+            "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+            "destination": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+            "expected_pickup_time": {
+                "earliest": now.isoformat(sep=" "),
+                "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+            },
+            "operation_area_id": 10001,
+            "passenger_count": 1,
+            "passenger_phone": "13900000001",
+        })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["code"], "same_origin_destination")
 
     def test_driver_crud_duplicate_no_and_bound_delete_conflict(self):
         created = self.create_driver()
@@ -312,6 +440,58 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
             "initial_position": {"lon": 181, "lat": 23},
         })
         self.assertEqual(invalid_position.status_code, 400)
+
+    def test_vehicle_update_reuses_commute_assignment_when_mode_is_commute(self):
+        self.create_vehicle()
+        persistence.save_commute_line({
+            "line_code": "line-admin-1",
+            "line_name": "管理接口快线",
+            "operation_area_id": 10001,
+            "status": "enabled",
+        }, create=True)
+
+        missing_line = self.client.put("/admin/vehicles/vehicle-1", json={
+            "plate_no": "粤A00001",
+            "vehicle_type": "bus",
+            "seat_count": 10,
+            "max_load_count": 10,
+            "operation_status": "offline",
+            "operation_mode": "commute_fixed_waiting",
+            "operation_area_id": 10001,
+        })
+        self.assertEqual(missing_line.status_code, 400)
+        self.assertIn("line_code", missing_line.get_json()["error"])
+
+        bound = self.client.put("/admin/vehicles/vehicle-1", json={
+            "plate_no": "粤A00001",
+            "vehicle_type": "bus",
+            "seat_count": 10,
+            "max_load_count": 10,
+            "operation_status": "offline",
+            "operation_mode": "commute_fixed_waiting",
+            "line_code": "line-admin-1",
+            "operation_area_id": 99999,
+        })
+        self.assertEqual(bound.status_code, 200)
+        bound_data = bound.get_json()
+        self.assertEqual(bound_data["vehicle"]["operation_mode"], "commute_fixed_waiting")
+        self.assertEqual(bound_data["vehicle"]["operation_area_id"], 10001)
+        self.assertEqual(bound_data["commute_assignment"]["line_code"], "line-admin-1")
+        self.assertEqual(bound_data["commute_assignment"]["task_mode"], "commute_fixed_waiting")
+        self.assertEqual(persistence.get_commute_vehicle_assignment("vehicle-1")["status"], "active")
+
+        dynamic = self.client.put("/admin/vehicles/vehicle-1", json={
+            "plate_no": "粤A00001",
+            "vehicle_type": "bus",
+            "seat_count": 10,
+            "max_load_count": 10,
+            "operation_status": "offline",
+            "operation_mode": "dynamic_bus",
+            "operation_area_id": 10001,
+        })
+        self.assertEqual(dynamic.status_code, 200)
+        self.assertEqual(dynamic.get_json()["vehicle"]["operation_mode"], "dynamic_bus")
+        self.assertEqual(persistence.get_commute_vehicle_assignment("vehicle-1")["status"], "disabled")
 
     def test_fleet_detail_query_uses_vehicle_id_not_internal_id(self):
         vehicle = Vehicle("internal-display-id", self.city.a.id, "#10b981", zone=1)

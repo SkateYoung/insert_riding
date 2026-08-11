@@ -1,0 +1,102 @@
+========================================================================================
+time: 2026-07-26 14:24:29
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 1989, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4534, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-07-26 14:25:38
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 1989, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4534, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-07-26 14:27:23
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 1989, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4534, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-07-26 14:30:04
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 2004, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4608, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-07-26 14:30:13
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 2004, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4608, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-07-26 17:16:28
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 2006, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4664, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 720, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+

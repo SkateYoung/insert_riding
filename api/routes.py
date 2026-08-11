@@ -4,14 +4,20 @@
 调度、寻路、预测等业务逻辑统一委托给 api.core.CoreDispatcher。
 """
 
+import json
+import math
+from pathlib import Path
+
 from flask import Blueprint, jsonify, request
 
 from . import state
 from . import persistence
 from .auxiliary import AuxiliaryFunctions
+from .commute_express import COMMUTE_OPERATION_MODES, CommuteExpressError, CommuteExpressService
 from .core import CoreDispatcher
+from .error_logger import log_error, log_exception
 from .models import CityGraph, Order, SPEED_MPS, Vehicle
-from .restrictions import OperationRestrictionError, normalize_policy_payload, policy_to_response
+from .restrictions import OperationRestrictionError, normalize_policy_payload, point_in_polygon, policy_to_response
 
 
 bp = Blueprint("api_routes", __name__)
@@ -30,6 +36,9 @@ DRIVER_WORK_STATUSES = ("off_duty", "listening", "serving", "resting")
 VEHICLE_OPERATION_STATUSES = ("operating", "resting", "closing", "offline", "maintenance")
 VEHICLE_RUNTIME_STATUSES = {"operating", "resting", "closing"}
 VEHICLE_TYPES = ("bus", "large_bus", "mid_bus", "small_bus")
+VEHICLE_DEFAULT_OPERATION_MODE = "dynamic_bus"
+REST_REQUEST_SOURCES = {"driver", "platform"}
+UNFINISHED_OPERATION_AREA_ORDER_STATUSES = ("pooled", "matched", "waiting_pickup", "riding")
 
 
 # ============================================================
@@ -137,6 +146,7 @@ def _vehicle_to_dict(v):
         "driver_no": v.driver_no,
         "vehicle_id": v.vehicle_id,
         "plate_no": v.plate_no,
+        "operation_mode": getattr(v, "operation_mode", "dynamic_bus"),
         "operation_area_id": getattr(v, "operation_area_id", None),
         "operation_area_code": getattr(v, "operation_area_code", None),
         "time": v.time,
@@ -446,6 +456,8 @@ def _station_coordinate(item, names, required_code, invalid_code):
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise StationRequestError("经纬度必须是数字", invalid_code, field=field) from exc
+    if not math.isfinite(value):
+        raise StationRequestError("经纬度必须是有限数字", invalid_code, field=field)
     return value
 
 
@@ -455,6 +467,227 @@ def _validate_station_coordinate_range(lon, lat):
         raise StationRequestError("经度超出合法范围", "station_coordinate_out_of_range", field="lon")
     if lat < -90 or lat > 90:
         raise StationRequestError("纬度超出合法范围", "station_coordinate_out_of_range", field="lat")
+
+
+def _station_json_or_text(value):
+    """解析运营区范围字段；JSON 失败时保留原始文本。"""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (dict, list, tuple)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text[0] in "[{":
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError):
+            return text
+    return text
+
+
+def _station_point_from_any(value):
+    """把常见 lon/lat 结构转换为统一点字典。"""
+    if isinstance(value, dict):
+        lon = value.get("lon", value.get("lng", value.get("longitude", value.get("x"))))
+        lat = value.get("lat", value.get("latitude", value.get("y")))
+    elif isinstance(value, (list, tuple)) and len(value) >= 2:
+        lon, lat = value[0], value[1]
+    else:
+        return None
+    try:
+        lon = float(lon)
+        lat = float(lat)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(lon) or not math.isfinite(lat):
+        return None
+    if lon < -180 or lon > 180 or lat < -90 or lat > 90:
+        return None
+    return {"lon": lon, "lat": lat}
+
+
+def _station_polygons_from_text(text):
+    """兼容 lon,lat;lon,lat|... 形式的运营区边界文本。"""
+    polygons = []
+    for polygon_text in str(text or "").strip().split("|"):
+        points = []
+        for token in polygon_text.split(";"):
+            parts = token.replace("，", ",").replace(",", " ").split()
+            if len(parts) < 2:
+                continue
+            point = _station_point_from_any((parts[0], parts[1]))
+            if point is not None:
+                points.append(point)
+        if len(points) >= 3:
+            polygons.append(points)
+    return polygons
+
+
+def _station_polygons_from_value(value):
+    """从 area_polygon/area_points 中提取一个或多个 polygon。"""
+    raw = _station_json_or_text(value)
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return _station_polygons_from_text(raw)
+    if isinstance(raw, dict):
+        if raw.get("type") == "Feature":
+            return _station_polygons_from_value((raw.get("geometry") or {}).get("coordinates"))
+        if raw.get("type") == "FeatureCollection":
+            polygons = []
+            for feature in raw.get("features") or []:
+                polygons.extend(_station_polygons_from_value(feature))
+            return polygons
+        if raw.get("type") in ("Polygon", "MultiPolygon"):
+            return _station_polygons_from_value(raw.get("coordinates"))
+        for key in ("points", "path", "polygon", "area_points", "area_polygon"):
+            if key in raw:
+                return _station_polygons_from_value(raw.get(key))
+        if "polygons" in raw:
+            polygons = []
+            for item in raw.get("polygons") or []:
+                polygons.extend(_station_polygons_from_value(item))
+            return polygons
+        point = _station_point_from_any(raw)
+        return [[point]] if point is not None else []
+    if isinstance(raw, (list, tuple)):
+        if not raw:
+            return []
+        first_point = _station_point_from_any(raw[0])
+        if first_point is not None:
+            points = []
+            for item in raw:
+                point = _station_point_from_any(item)
+                if point is not None:
+                    points.append(point)
+            return [points] if len(points) >= 3 else []
+        polygons = []
+        for item in raw:
+            polygons.extend(_station_polygons_from_value(item))
+        return polygons
+    return []
+
+
+def _station_bounds_from_value(value):
+    """读取 bounds_json 或 SHP bbox 转成统一边界结构。"""
+    raw = _station_json_or_text(value)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        min_lon = float(raw.get("min_lon", raw.get("minx", raw.get("xmin"))))
+        max_lon = float(raw.get("max_lon", raw.get("maxx", raw.get("xmax"))))
+        min_lat = float(raw.get("min_lat", raw.get("miny", raw.get("ymin"))))
+        max_lat = float(raw.get("max_lat", raw.get("maxy", raw.get("ymax"))))
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in (min_lon, max_lon, min_lat, max_lat)):
+        return None
+    return {
+        "min_lon": min(min_lon, max_lon),
+        "max_lon": max(min_lon, max_lon),
+        "min_lat": min(min_lat, max_lat),
+        "max_lat": max(min_lat, max_lat),
+    }
+
+
+def _station_bounds_from_city_map(city_map):
+    """从已加载路网计算当前运营区 SHP 边界。"""
+    nodes = list(getattr(city_map, "nodes_map", {}).values())
+    if not nodes:
+        return None
+    lons = [float(node.lon) for node in nodes]
+    lats = [float(node.lat) for node in nodes]
+    return {
+        "min_lon": min(lons),
+        "max_lon": max(lons),
+        "min_lat": min(lats),
+        "max_lat": max(lats),
+    }
+
+
+def _station_bounds_from_shp(area):
+    """在运营区未加载时，直接读取 SHP 文件 bbox 作为兜底范围。"""
+    shp_path = str((area or {}).get("shp_path") or "").strip()
+    if not shp_path:
+        return None
+    try:
+        import shapefile
+        reader = shapefile.Reader(
+            shp_path,
+            encoding=str((area or {}).get("shp_encoding") or "utf-8").strip() or "utf-8",
+            encodingErrors="ignore",
+        )
+        bbox = list(reader.bbox or [])
+        if hasattr(reader, "close"):
+            reader.close()
+    except Exception:
+        return None
+    if len(bbox) < 4:
+        return None
+    return _station_bounds_from_value({
+        "min_lon": bbox[0],
+        "min_lat": bbox[1],
+        "max_lon": bbox[2],
+        "max_lat": bbox[3],
+    })
+
+
+def _station_area_scope(operation_area_id, cache=None):
+    """读取运营区可用于站点坐标校验的范围。"""
+    area_id = int(operation_area_id)
+    if cache is not None and area_id in cache:
+        return cache[area_id]
+
+    area = persistence.get_operation_area_by_area_id(area_id)
+    if area is None:
+        raise KeyError("operation_area_not_found")
+
+    polygons = (
+        _station_polygons_from_value(area.get("area_polygon"))
+        or _station_polygons_from_value(area.get("area_points"))
+    )
+    if polygons:
+        scope = {"type": "polygon", "polygons": polygons}
+    else:
+        city_map = (state.city_maps or {}).get(area_id)
+        bounds = (
+            _station_bounds_from_city_map(city_map)
+            or _station_bounds_from_value(area.get("bounds_json"))
+            or _station_bounds_from_shp(area)
+        )
+        scope = {"type": "bounds", "bounds": bounds} if bounds else None
+
+    if cache is not None:
+        cache[area_id] = scope
+    return scope
+
+
+def _validate_station_inside_operation_area(payload, cache=None):
+    """校验新增站点坐标是否位于所属运营区 SHP 范围内。"""
+    scope = _station_area_scope(payload.get("operation_area_id"), cache=cache)
+    if not scope:
+        raise StationRequestError(
+            "运营区缺少可校验的 SHP 范围信息",
+            "operation_area_scope_unavailable",
+            field="operation_area_id",
+        )
+
+    point = {"lon": float(payload.get("lon")), "lat": float(payload.get("lat"))}
+    if scope.get("type") == "polygon":
+        inside = any(point_in_polygon(point, {"points": polygon}) for polygon in scope.get("polygons") or [])
+    else:
+        bounds = scope.get("bounds") or {}
+        inside = (
+            bounds.get("min_lon") <= point["lon"] <= bounds.get("max_lon")
+            and bounds.get("min_lat") <= point["lat"] <= bounds.get("max_lat")
+        )
+    if not inside:
+        raise StationRequestError(
+            "站点坐标不在运营区 SHP 范围内",
+            "station_coordinate_outside_operation_area",
+            field="lon,lat",
+        )
 
 
 def _normalize_station_create_payload(item):
@@ -511,6 +744,15 @@ def _station_exception_result(index, exc, fallback_code="station_operation_faile
     else:
         status = 500
         payload = _station_error_payload(fallback_code, str(exc))
+    if status >= 500:
+        log_exception("api.routes.station_batch_item", exc, context={"index": index, "status": status})
+    else:
+        log_error(
+            "api.routes.station_batch_item",
+            message=str(exc),
+            context={"index": index, "status": status, "code": payload.get("code") or payload.get("error")},
+            level="WARNING",
+        )
     payload.update({"index": index, "success": False, "status": status})
     return payload
 
@@ -625,6 +867,70 @@ def _city_for_operation_area_or_error(operation_area_id=None):
 def _city_for_vehicle(vehicle):
     """读取车辆所属运营区对应路网。"""
     return state.city_for_vehicle(vehicle)
+
+
+def _validate_order_coordinate(lon, lat, field_name):
+    """校验普通订单站点坐标的数值范围。"""
+    if not math.isfinite(lon) or not math.isfinite(lat):
+        raise ValueError(f"{field_name} 经纬度必须是有限数字")
+    if lon < -180 or lon > 180:
+        raise ValueError(f"{field_name}.lon 超出合法范围")
+    if lat < -90 or lat > 90:
+        raise ValueError(f"{field_name}.lat 超出合法范围")
+
+
+def _runtime_node_for_order_station(city_map, station, field_name):
+    """把数据库站点映射到初始化时已加载的 A* 路网节点。"""
+    poi_code = str((station or {}).get("poi_code") or "").strip()
+    matches = [
+        node for node in getattr(city_map, "pois", []) or []
+        if str(getattr(node, "poi_code", None) or "").strip() == poi_code
+    ]
+    if not matches:
+        return None, _json_error(
+            f"{field_name} 站点尚未加载到当前运营区路网",
+            409,
+            code=f"{field_name}_station_not_loaded",
+            field=field_name,
+            poi_code=poi_code or None,
+        )
+    if len(matches) > 1:
+        return None, _json_error(
+            f"{field_name} 站点在当前运营区路网中存在重复映射",
+            409,
+            code=f"{field_name}_station_runtime_ambiguous",
+            field=field_name,
+            poi_code=poi_code or None,
+        )
+    return matches[0], None
+
+
+def _order_station_by_coordinate(operation_area_id, lon, lat, field_name):
+    """按运营区和精确坐标读取普通订单的启用站点。"""
+    try:
+        station = persistence.get_station_by_coordinate(operation_area_id, lon, lat)
+    except persistence.PersistenceUnavailable as exc:
+        return None, _json_error(
+            "数据库不可用，无法校验订单站点坐标",
+            503,
+            code="database_unavailable",
+            detail=str(exc),
+        )
+    except persistence.PersistenceConflict as exc:
+        return None, _json_error(
+            str(exc),
+            409,
+            code=f"{field_name}_station_coordinate_ambiguous",
+            field=field_name,
+        )
+    if station is None:
+        return None, _json_error(
+            f"{field_name} 坐标未匹配到当前运营区的启用站点",
+            404,
+            code=f"{field_name}_station_not_found_by_coordinate",
+            field=field_name,
+        )
+    return station, None
 
 
 OPERATION_AREA_CREATE_REQUIRED_FIELDS = (
@@ -987,6 +1293,74 @@ def _fleet_vehicle_by_vehicle_id(vehicle_id):
     return None
 
 
+def _operation_mode_from_vehicle_payload(payload, existing_vehicle=None):
+    """读取车辆接口中的运营模式；未传时按动态巴士处理。
+
+    Args:
+        payload (dict): 前端请求体。
+        existing_vehicle (dict | None): 数据库中已有车辆档案。
+
+    Returns:
+        str: 车辆运营模式。
+    """
+    raw_mode = payload.get("operation_mode")
+    return str(raw_mode or VEHICLE_DEFAULT_OPERATION_MODE).strip() or VEHICLE_DEFAULT_OPERATION_MODE
+
+
+def _prepare_commute_vehicle_update_payload(payload, existing_vehicle, vehicle_code):
+    """按车辆运营模式处理通勤快线绑定字段。
+
+    当 operation_mode 为 commute_fixed_waiting/commute_cruising 时，车辆更新接口
+    复用通勤快线车辆绑定逻辑，要求前端同时传入 line_code，并把车辆运营区归属
+    强制对齐到该线路所属运营区。dynamic_bus 保持原有车辆更新逻辑。
+    """
+    data = dict(payload or {})
+    operation_mode = _operation_mode_from_vehicle_payload(data, existing_vehicle)
+    if operation_mode not in COMMUTE_OPERATION_MODES:
+        return data, None
+
+    line_code = str(data.get("line_code") or "").strip()
+    if not line_code:
+        raise ValueError("operation_mode 为通勤快线模式时 line_code 不能为空")
+    line = persistence.get_commute_line(line_code, with_stops=True)
+    if not line:
+        raise KeyError("commute_line_not_found")
+    data["vehicle_code"] = vehicle_code
+    data["operation_mode"] = operation_mode
+    data["operation_area_id"] = line.get("operation_area_id")
+    return data, {
+        "vehicle_code": vehicle_code,
+        "line_code": line_code,
+        "task_mode": operation_mode,
+        "status": str(data.get("commute_assignment_status") or data.get("assignment_status") or "active").strip() or "active",
+    }
+
+
+def _sync_runtime_commute_assignment(assignment):
+    """把快线车辆绑定关系同步到运行态车辆对象。
+
+    Args:
+        assignment (dict | None): 持久化层返回的快线车辆绑定记录。
+
+    Returns:
+        bool: 是否找到并更新了运行态车辆。
+    """
+    if not assignment:
+        return False
+    vehicle = _runtime_vehicle_by_code(assignment.get("vehicle_code"))
+    if vehicle is None:
+        return False
+    vehicle.operation_mode = assignment.get("task_mode") or getattr(vehicle, "operation_mode", None)
+    vehicle.operation_area_id = _optional_int(assignment, "operation_area_id")
+    vehicle.commute_express_active = True
+    vehicle.commute_line_code = assignment.get("line_code")
+    for area_fleet in (state.fleet_by_area or {}).values():
+        if vehicle in area_fleet:
+            area_fleet.remove(vehicle)
+    state.fleet_by_area.setdefault(vehicle.operation_area_id, []).append(vehicle)
+    return True
+
+
 def _runtime_vehicle_has_tasks(vehicle):
     """判断运行期车辆是否仍有未完成任务。
 
@@ -997,6 +1371,101 @@ def _runtime_vehicle_has_tasks(vehicle):
         bool: 车辆上有乘客或仍有计划路线时返回 True。
     """
     return bool(getattr(vehicle, "on_board_orders", None) or getattr(vehicle, "planned_route", None))
+
+
+def _operation_area_runtime_blockers(operation_area_id):
+    """汇总运营区删除前需要阻止删除的内存运行态对象。"""
+    area_id = int(operation_area_id)
+    pooled_orders = []
+    for order in CoreDispatcher.order_pool:
+        try:
+            order_area_id = int(getattr(order, "operation_area_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if order_area_id != area_id:
+            continue
+        pooled_orders.append({
+            "request_id": getattr(order, "request_id", None),
+            "status": getattr(order, "status", None) or "pooled",
+            "passenger_phone": getattr(order, "passenger_phone", None),
+        })
+
+    vehicles = []
+    area_fleet = list(state.fleet_by_area.get(area_id, []) or [])
+    if not area_fleet:
+        area_fleet = [
+            vehicle for vehicle in (state.fleet or [])
+            if getattr(vehicle, "operation_area_id", None) == area_id
+        ]
+    for vehicle in area_fleet:
+        planned_route = getattr(vehicle, "planned_route", []) or []
+        on_board_orders = getattr(vehicle, "on_board_orders", []) or []
+        if not planned_route and not on_board_orders:
+            continue
+        vehicles.append({
+            "vehicle_id": getattr(vehicle, "vehicle_id", None) or getattr(vehicle, "id", None),
+            "plate_no": getattr(vehicle, "plate_no", None),
+            "planned_route": [
+                {
+                    "type": step.get("type"),
+                    "request_id": getattr(step.get("order"), "request_id", None),
+                }
+                for step in planned_route
+            ],
+            "on_board_orders": [
+                getattr(order, "request_id", None)
+                for order in on_board_orders
+            ],
+        })
+    return {"pooled_orders": pooled_orders, "vehicles": vehicles}
+
+
+def _merge_vehicle_blockers(*groups):
+    """合并车辆阻塞摘要，避免内存和数据库运行态重复展示同一台车。"""
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in group or []:
+            key = str(item.get("vehicle_id") or item.get("vehicle_code") or "").strip()
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def _clear_operation_area_runtime_after_delete(operation_area_id):
+    """运营区删除成功后清理该区域路网、车辆和禁区运行态。"""
+    area_id = int(operation_area_id)
+    area_fleet = list(state.fleet_by_area.pop(area_id, []) or [])
+    if not area_fleet:
+        area_fleet = [
+            vehicle for vehicle in (state.fleet or [])
+            if getattr(vehicle, "operation_area_id", None) == area_id
+        ]
+    for vehicle in area_fleet:
+        vehicle.operation_status = "offline"
+        vehicle.operation_area_id = None
+        vehicle.operation_area_code = ""
+        vehicle.is_resting = False
+        vehicle.is_rest_requested = False
+        vehicle.rest_status = "operating"
+        vehicle.planned_route = []
+        vehicle.planned_route_point = []
+        vehicle.planned_route_grasped_point = []
+        vehicle.planned_route_segment_grasped_point = []
+        vehicle.planned_route_grasp_status = None
+        vehicle.planned_route_grasp_error = None
+        vehicle.idle_target = None
+        vehicle.idle_forecast = None
+    state.fleet[:] = [
+        vehicle for vehicle in (state.fleet or [])
+        if getattr(vehicle, "operation_area_id", None) != area_id and vehicle not in area_fleet
+    ]
+    state.city_maps.pop(area_id, None)
+    state.operation_area_records.pop(area_id, None)
+    CoreDispatcher.set_operation_restriction_policy(None, operation_area_id=area_id)
 
 
 def _set_runtime_vehicle_status(vehicle, operation_status):
@@ -1088,6 +1557,10 @@ def _apply_vehicle_record_to_runtime(vehicle_record):
     existing.plate_no = vehicle_record.get("plate_no") or vehicle_code
     existing.operation_area_id = operation_area_id
     existing.operation_area_code = operation_area_code
+    existing.operation_mode = vehicle_record.get("operation_mode") or getattr(existing, "operation_mode", "dynamic_bus")
+    if existing.operation_mode not in COMMUTE_OPERATION_MODES:
+        existing.commute_express_active = False
+        existing.commute_line_code = None
     existing.capacity = vehicle_record.get("max_load_count") or vehicle_record.get("seat_count") or existing.capacity
     existing.color = vehicle_record.get("vehicle_color") or existing.color
     existing.driver_id = vehicle_record.get("current_driver_code") or ""
@@ -1139,13 +1612,19 @@ def _admin_error_response(exc):
         tuple: Flask JSON 响应与 HTTP 状态码。
     """
     if isinstance(exc, persistence.PersistenceUnavailable):
+        log_exception("api.routes.admin_error", exc, context={"status": 503})
         return jsonify({"error": "database_unavailable", "message": str(exc)}), 503
     if isinstance(exc, persistence.PersistenceConflict):
         return jsonify({"error": exc.code, "message": str(exc), "field": exc.field}), 409
     if isinstance(exc, KeyError) and str(exc).strip("'") == "driver_not_found":
         return jsonify({"error": "driver_not_found", "message": "司机不存在"}), 404
+    if isinstance(exc, KeyError) and str(exc).strip("'") == "commute_line_not_found":
+        return jsonify({"error": "commute_line_not_found", "message": "通勤快线线路不存在"}), 404
+    if isinstance(exc, KeyError) and str(exc).strip("'") == "vehicle_not_found":
+        return jsonify({"error": "vehicle_not_found", "message": "车辆不存在"}), 404
     if isinstance(exc, ValueError):
         return jsonify({"error": str(exc)}), 400
+    log_exception("api.routes.admin_error", exc, context={"status": 500})
     return jsonify({"error": str(exc)}), 500
 
 
@@ -1318,7 +1797,7 @@ def create_order():
             request_time 由后端统一时间系统自动生成；前端传入时会被忽略。
 
     Returns:
-        JSON: 请求 ID、吸附后的起终点 POI 信息和当前订单池大小。
+        JSON: 请求 ID、经数据库校验的起终点站点信息和当前订单池大小。
     """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化，请先调用 POST /init"}), 400
@@ -1359,6 +1838,49 @@ def create_order():
     if expected_pickup_latest < expected_pickup_earliest:
         return jsonify({"error": "expected_pickup_time.latest 不能早于 earliest"}), 400
 
+    try:
+        _validate_order_coordinate(o_lon, o_lat, "origin")
+        _validate_order_coordinate(d_lon, d_lat, "destination")
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "code": "station_coordinate_invalid"}), 400
+
+    origin_key = (round(o_lon, 8), round(o_lat, 8))
+    destination_key = (round(d_lon, 8), round(d_lat, 8))
+    if origin_key == destination_key:
+        return jsonify({
+            "error": "起点和终点不能是同一个站点",
+            "code": "same_origin_destination",
+        }), 409
+
+    origin_station, station_error = _order_station_by_coordinate(
+        operation_area_id,
+        o_lon,
+        o_lat,
+        "origin",
+    )
+    if station_error is not None:
+        return station_error
+    destination_station, station_error = _order_station_by_coordinate(
+        operation_area_id,
+        d_lon,
+        d_lat,
+        "destination",
+    )
+    if station_error is not None:
+        return station_error
+    if origin_station.get("id") == destination_station.get("id"):
+        return jsonify({
+            "error": "起点和终点不能是同一个站点",
+            "code": "same_origin_destination",
+        }), 409
+
+    origin_node, station_error = _runtime_node_for_order_station(city_map, origin_station, "origin")
+    if station_error is not None:
+        return station_error
+    destination_node, station_error = _runtime_node_for_order_station(city_map, destination_station, "destination")
+    if station_error is not None:
+        return station_error
+
     with state.state_lock:
         time_snapshot = state.current_time()
         request_time = state.parse_business_datetime(time_snapshot["time_text"])
@@ -1378,6 +1900,8 @@ def create_order():
             operation_area_id=operation_area_id,
             operation_area_code=operation_area_code,
             req_time=time_snapshot["timestamp"],
+            origin_node=origin_node,
+            destination_node=destination_node,
         )
         CoreDispatcher.pool_and_route_planning(state.fleet_for_operation_area(operation_area_id), order, city_map)
         pool_size = len(CoreDispatcher.order_pool)
@@ -1386,9 +1910,9 @@ def create_order():
         "status": "pooled",
         "request_id": order.request_id,
         "origin_node": order.o_node.name,
-        "origin_coords": {"lon": order.o_node.lon, "lat": order.o_node.lat},
+        "origin_coords": {"lon": order.o_lon, "lat": order.o_lat},
         "destination_node": order.d_node.name,
-        "destination_coords": {"lon": order.d_node.lon, "lat": order.d_node.lat},
+        "destination_coords": {"lon": order.d_lon, "lat": order.d_lat},
         "request_time": order.request_time.isoformat(sep=" "),
         "expected_pickup_time": {
             "earliest": order.expected_pickup_earliest.isoformat(sep=" "),
@@ -1595,9 +2119,11 @@ def admin_create_stations():
 
     results = []
     affected_area_ids = set()
+    scope_cache = {}
     for index, item in enumerate(items):
         try:
             payload = _normalize_station_create_payload(item)
+            _validate_station_inside_operation_area(payload, cache=scope_cache)
             station = persistence.create_station(payload)
             affected_area_ids.add(station.get("operation_area_id"))
             results.append({
@@ -1667,6 +2193,33 @@ def admin_delete_stations():
         "results": results,
         "runtime_refresh": runtime_refresh,
     }), status_code
+
+
+def _project_root():
+    """返回项目根目录，用于生成前端可使用的相对资源路径。"""
+    return Path(__file__).resolve().parents[1]
+
+
+@bp.route("/admin/shp-files", methods=["GET"])
+def admin_list_shp_files():
+    """查询项目 shp 目录下可用于运营区配置的 SHP 文件路径。"""
+    project_root = _project_root()
+    shp_root = project_root / "shp"
+    paths = []
+    if shp_root.exists() and shp_root.is_dir():
+        for shp_file in shp_root.rglob("*.shp"):
+            if not shp_file.is_file():
+                continue
+            base = shp_file.with_suffix("")
+            if not base.with_suffix(".shx").exists() or not base.with_suffix(".dbf").exists():
+                continue
+            paths.append(shp_file.relative_to(project_root).as_posix())
+    paths.sort(key=lambda item: item.lower())
+    return jsonify({
+        "root": "shp",
+        "count": len(paths),
+        "paths": paths,
+    })
 
 
 @bp.route("/admin/operation-areas", methods=["GET"])
@@ -1774,15 +2327,49 @@ def admin_update_operation_area(area_id):
 
 @bp.route("/admin/operation-areas/<area_id>", methods=["DELETE"])
 def admin_delete_operation_area(area_id):
-    """软删除运营区。"""
+    """软删除运营区，并在无未完成订单时重置该区车辆。"""
     try:
         operation_area_id = _operation_area_path_id(area_id)
         if operation_area_id is None:
             return jsonify({"error": "operation_area_id_invalid", "operation_area_id": str(area_id)}), 400
-        deleted = persistence.delete_operation_area_by_area_id(operation_area_id)
-        if not deleted:
-            return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
-        return jsonify({"status": "deleted", "operation_area_id": operation_area_id})
+        with state.state_lock:
+            area = persistence.get_operation_area_by_area_id(operation_area_id)
+            if area is None:
+                return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+
+            runtime_blockers = _operation_area_runtime_blockers(operation_area_id)
+            database_orders = persistence.list_unfinished_orders_by_operation_area(
+                operation_area_id,
+                statuses=UNFINISHED_OPERATION_AREA_ORDER_STATUSES,
+            )
+            database_vehicle_blockers = persistence.list_runtime_vehicle_task_blockers_by_operation_area(
+                operation_area_id
+            )
+            vehicle_blockers = _merge_vehicle_blockers(
+                runtime_blockers["vehicles"],
+                database_vehicle_blockers,
+            )
+            if runtime_blockers["pooled_orders"] or vehicle_blockers or database_orders:
+                return jsonify({
+                    "error": "operation_area_has_unfinished_orders",
+                    "message": "运营区仍有未完成订单，不能删除",
+                    "operation_area_id": operation_area_id,
+                    "blockers": {
+                        "pooled_orders": runtime_blockers["pooled_orders"],
+                        "vehicles": vehicle_blockers,
+                        "database_orders": database_orders,
+                    },
+                }), 409
+
+            result = persistence.delete_operation_area_and_reset_vehicles_by_area_id(operation_area_id)
+            if not result.get("deleted"):
+                return jsonify({"error": "operation_area_not_found", "operation_area_id": operation_area_id}), 404
+            _clear_operation_area_runtime_after_delete(operation_area_id)
+        return jsonify({
+            "status": "deleted",
+            "operation_area_id": operation_area_id,
+            "reset_vehicle_codes": result.get("reset_vehicle_codes", []),
+        })
     except Exception as exc:
         return _admin_error_response(exc)
 
@@ -2241,12 +2828,18 @@ def admin_update_vehicle(vehicle_code):
         JSON: 更新后的车辆档案、运行态同步结果和可选吸附结果。
     """
     try:
+        data = request.get_json(silent=True) or {}
         with state.state_lock:
             existing = persistence.get_vehicle(vehicle_code)
             if existing is None:
                 return jsonify({"error": "vehicle_not_found", "vehicle_code": str(vehicle_code)}), 404
+            data, commute_assignment_payload = _prepare_commute_vehicle_update_payload(
+                data,
+                existing,
+                vehicle_code,
+            )
             payload, snap_info = _normalize_vehicle_payload(
-                request.get_json(silent=True) or {},
+                data,
                 existing_code=vehicle_code,
                 existing_vehicle=existing,
             )
@@ -2256,8 +2849,21 @@ def admin_update_vehicle(vehicle_code):
             if payload["operation_status"] in VEHICLE_RUNTIME_STATUSES and state.system_initialized and not _vehicle_payload_has_runtime_position(payload):
                 raise ValueError("可运行车辆必须提供 initial_position 或已有运行位置")
             vehicle = persistence.save_vehicle(payload, create=False)
+            commute_assignment = None
+            commute_runtime_applied = None
+            if commute_assignment_payload is not None:
+                commute_assignment = persistence.assign_commute_vehicle(commute_assignment_payload)
+                vehicle = persistence.get_vehicle(vehicle_code) or vehicle
+            elif payload.get("operation_mode") == VEHICLE_DEFAULT_OPERATION_MODE:
+                persistence.disable_commute_vehicle_assignment(vehicle_code)
             runtime = _apply_vehicle_record_to_runtime(vehicle)
-        return jsonify({"vehicle": vehicle, "runtime": runtime, "snap": snap_info})
+            if commute_assignment is not None:
+                commute_runtime_applied = _sync_runtime_commute_assignment(commute_assignment)
+        response = {"vehicle": vehicle, "runtime": runtime, "snap": snap_info}
+        if commute_assignment is not None:
+            response["commute_assignment"] = commute_assignment
+            response["commute_runtime_applied"] = commute_runtime_applied
+        return jsonify(response)
     except Exception as exc:
         return _admin_error_response(exc)
 
@@ -2462,6 +3068,29 @@ def update_vehicle_path(vehicle_id):
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
 
+        if CoreDispatcher._is_commute_vehicle(target_vehicle):
+            report_time = state.now_timestamp()
+            target_vehicle.gps = {"lon": lon, "lat": lat}
+            target_vehicle.time = report_time
+            persistence.record_vehicle_runtime(target_vehicle, report_time=report_time)
+            persistence.record_location(
+                target_vehicle,
+                report_time=report_time,
+                raw_payload={
+                    "mode": "commute_express",
+                    "raw_gps": {"lon": lon, "lat": lat},
+                },
+            )
+            return jsonify({
+                "status": "ok",
+                "mode": "commute_express",
+                "vehicle_id": str(getattr(target_vehicle, "vehicle_id", None) or getattr(target_vehicle, "id", "")),
+                "gps": target_vehicle.gps,
+                "raw_gps": {"lon": lon, "lat": lat},
+                "events": [],
+                "vehicle": _vehicle_to_dict(target_vehicle),
+            })
+
         city_map = _city_for_vehicle(target_vehicle)
         if city_map is None:
             return jsonify({"error": "车辆所属运营区未加载或不存在"}), 409
@@ -2499,6 +3128,37 @@ def confirm_vehicle_boarding_event(vehicle_id):
         target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
         if target_vehicle is None:
             return jsonify({"error": "车辆未找到"}), 404
+
+        if CoreDispatcher._is_commute_vehicle(target_vehicle):
+            try:
+                result = CommuteExpressService.confirm_boarding_event(
+                    target_vehicle,
+                    action,
+                    request_id=request_id,
+                    lon=lon,
+                    lat=lat,
+                    distance_threshold_m=threshold,
+                )
+            except CommuteExpressError as exc:
+                payload = {"error": exc.code, "message": str(exc)}
+                if exc.field:
+                    payload["field"] = exc.field
+                return jsonify(payload), int(exc.status_code or 400)
+            except persistence.PersistenceUnavailable as exc:
+                log_exception("api.routes.commute_boarding_event", exc, context={"vehicle_id": vehicle_id})
+                return jsonify({"error": "database_unavailable", "message": str(exc) or "数据库不可用"}), 503
+            except Exception as exc:
+                log_exception("api.routes.commute_boarding_event", exc, context={"vehicle_id": vehicle_id})
+                return jsonify({"error": "commute_internal_error", "message": str(exc)}), 500
+            return jsonify({
+                "status": "ok",
+                "event": result.get("event"),
+                "orders": {
+                    "on_board": [getattr(order, "request_id", None) for order in getattr(target_vehicle, "on_board_orders", []) or []],
+                    "remaining": result.get("planned_route", []),
+                },
+                "vehicle": _vehicle_to_dict(target_vehicle),
+            })
 
         result = CoreDispatcher.confirm_vehicle_boarding_event(
             target_vehicle,
@@ -2581,7 +3241,7 @@ def replan_vehicle_amap_route(vehicle_id):
 
 @bp.route("/fleet/<vehicle_id>/rest", methods=["POST"])
 def request_vehicle_rest(vehicle_id):
-    """司机端请求休息。
+    """司机端或平台请求车辆休息。
 
     Args:
         vehicle_id (str): URL 路径中的车辆业务 ID。
@@ -2589,6 +3249,7 @@ def request_vehicle_rest(vehicle_id):
     Request:
         POST /fleet/<vehicle_id>/rest
         Body JSON 可选字段:
+            source (str): 请求来源，driver 或 platform；为空按 driver。
             desired_rest_time (str|float): 期望休息时间；为空表示马上收车休息。
             rest_duration_minutes (float): 可选休息时长，后端会限制在 15-30 分钟。
 
@@ -2599,6 +3260,13 @@ def request_vehicle_rest(vehicle_id):
         return jsonify({"error": "系统未初始化"}), 400
 
     data = request.get_json(silent=True) or {}
+    source = str(data.get("source") or "driver").strip().lower()
+    if source not in REST_REQUEST_SOURCES:
+        return jsonify({
+            "error": "invalid_rest_source",
+            "message": "source 必须是 driver 或 platform",
+            "source": source,
+        }), 400
     with state.state_lock:
         target_vehicle = _fleet_vehicle_by_vehicle_id(vehicle_id)
         if target_vehicle is None:
@@ -2618,10 +3286,14 @@ def request_vehicle_rest(vehicle_id):
             desired_rest_time=desired_rest_time,
             rest_duration_seconds=rest_duration_seconds,
         )
+        result["source"] = source
+        if data.get("reason") not in (None, ""):
+            result["reason"] = str(data.get("reason")).strip()
         persistence.record_rest_request(target_vehicle, result)
         estimated_finish_time = result.get("estimated_finish_time")
         return jsonify({
             "vehicle_id": target_vehicle.vehicle_id,
+            "source": source,
             "decision": result.get("decision"),
             "rest_status": result.get("status"),
             "rest_status_text": REST_STATUS_TEXT.get(result.get("status"), "未知"),
@@ -2754,19 +3426,63 @@ def get_pois():
         city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
         if area_error is not None:
             return area_error
+        try:
+            poi_records = persistence.list_pois(operation_area_id=operation_area_id)
+        except persistence.PersistenceUnavailable as exc:
+            return jsonify({
+                "error": "database_unavailable",
+                "message": "数据库不可用，无法读取站点 POI",
+                "detail": str(exc),
+            }), 503
+
+        runtime_by_code = {}
+        for node in getattr(city_map, "pois", []) or []:
+            poi_code = str(getattr(node, "poi_code", "") or "").strip()
+            if poi_code and poi_code not in runtime_by_code:
+                runtime_by_code[poi_code] = node
+
+        pois = []
+        for record in poi_records:
+            lon = record.get("longitude")
+            lat = record.get("latitude")
+            poi_code = str(record.get("poi_code") or "").strip()
+            snapped_node = runtime_by_code.get(poi_code)
+            snapped_payload = (
+                {
+                    "id": snapped_node.id,
+                    "lon": snapped_node.lon,
+                    "lat": snapped_node.lat,
+                    "name": snapped_node.name,
+                    "zone": snapped_node.zone,
+                }
+                if snapped_node is not None
+                else None
+            )
+            pois.append({
+                "id": record.get("id"),
+                "poi_id": record.get("id"),
+                "poi_code": poi_code or None,
+                "station_id": record.get("station_id"),
+                "name": record.get("poi_name") or record.get("station_name") or poi_code,
+                "poi_name": record.get("poi_name"),
+                "station_name": record.get("station_name") or record.get("poi_name"),
+                "poi_type": record.get("poi_type"),
+                "lon": lon,
+                "lat": lat,
+                "longitude": lon,
+                "latitude": lat,
+                "zone": record.get("zone") if record.get("zone") is not None else getattr(snapped_node, "zone", None),
+                "operation_area_id": record.get("operation_area_id"),
+                "operation_area_code": record.get("operation_area_code") or (operation_area or {}).get("code"),
+                "snapped_node_id": getattr(snapped_node, "id", None),
+                "snapped_lon": getattr(snapped_node, "lon", None),
+                "snapped_lat": getattr(snapped_node, "lat", None),
+                "snapped_node": snapped_payload,
+            })
         return jsonify({
             "operation_area_id": operation_area_id,
             "operation_area_code": (operation_area or {}).get("code"),
-            "pois": [
-                {
-                    "id": p.id,
-                    "name": p.name,
-                    "lon": p.lon,
-                    "lat": p.lat,
-                    "zone": p.zone,
-                }
-                for p in city_map.pois
-            ]
+            "pois": pois,
         })
 
 

@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta
 from . import persistence
 from . import fleet_push
+from .error_logger import log_exception
 from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS, business_timestamp
 from .auxiliary import AuxiliaryFunctions
 from .restrictions import restriction_signature
@@ -25,6 +26,7 @@ class CoreDispatcher:
     
     # 核心订单池：用于缓存由于运力爆满、或严重绕路(不顺路)而未能及时指派的订单。
     order_pool = []
+    COMMUTE_OPERATION_MODES = {"commute_fixed_waiting", "commute_cruising"}
 
     # 订单时间窗匹配参数：远期预约单默认 1 小时外暂缓，预计上车前 30 分钟释放匹配。
     ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS = 60 * 60
@@ -914,6 +916,11 @@ class CoreDispatcher:
         return CoreDispatcher._operation_area_id_of(order)
 
     @staticmethod
+    def _is_commute_vehicle(vehicle):
+        """判断车辆是否属于通勤快线独立业务，避免进入动态巴士派单。"""
+        return str(getattr(vehicle, "operation_mode", "") or "").strip() in CoreDispatcher.COMMUTE_OPERATION_MODES
+
+    @staticmethod
     def _process_pool_matching_area_cycle(fleet, city_map, operation_area_id=None):
         """对单个运营区执行一轮订单池匹配。"""
         area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
@@ -1113,25 +1120,37 @@ class CoreDispatcher:
         lock_context = state_lock if state_lock is not None else nullcontext()
         if isinstance(city_map, dict):
             while True:
-                if not CoreDispatcher.order_pool:
-                    print(f"[Core.Pool] 池中暂无订单...")
-                if CoreDispatcher.order_pool:
-                    print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
-                with lock_context:
-                    assign_count = 0
-                    for operation_area_id, area_city in city_map.items():
-                        area_fleet = [
-                            vehicle for vehicle in (fleet or [])
-                            if CoreDispatcher._operation_area_id_of(vehicle) == operation_area_id
-                        ]
-                        CoreDispatcher.refresh_scheduled_rest_requests(area_fleet, area_city)
-                        assign_count += CoreDispatcher._process_pool_matching_area_cycle(
-                            area_fleet,
-                            area_city,
-                            operation_area_id=operation_area_id,
-                        )
-                    if assign_count > 0:
-                        print(f"[Core.Pool] 多运营区本轮调度完毕：成功释放 {assign_count} 个积压订单。")
+                try:
+                    if not CoreDispatcher.order_pool:
+                        print(f"[Core.Pool] 池中暂无订单...")
+                    if CoreDispatcher.order_pool:
+                        print(f"[Core.Pool] 正在对池中 {len(CoreDispatcher.order_pool)} 个订单执行后悔值统筹调度...")
+                    with lock_context:
+                        assign_count = 0
+                        for operation_area_id, area_city in city_map.items():
+                            area_fleet = [
+                                vehicle for vehicle in (fleet or [])
+                                if CoreDispatcher._operation_area_id_of(vehicle) == operation_area_id
+                            ]
+                            CoreDispatcher.refresh_scheduled_rest_requests(area_fleet, area_city)
+                            assign_count += CoreDispatcher._process_pool_matching_area_cycle(
+                                area_fleet,
+                                area_city,
+                                operation_area_id=operation_area_id,
+                            )
+                        if assign_count > 0:
+                            print(f"[Core.Pool] 多运营区本轮调度完毕：成功释放 {assign_count} 个积压订单。")
+                except Exception as exc:
+                    log_exception(
+                        "api.core.process_pool_matching",
+                        exc,
+                        context={
+                            "mode": "multi_operation_area",
+                            "order_pool_size": len(CoreDispatcher.order_pool),
+                            "operation_area_ids": list((city_map or {}).keys()),
+                        },
+                    )
+                    print(f"[Core.Pool] 订单池匹配循环异常，已写入错误日志并等待下一轮：{exc}")
                 time.sleep(5)
 
         while True:
@@ -1288,7 +1307,8 @@ class CoreDispatcher:
     def _vehicle_can_accept_order(vehicle):
         """判断车辆当前是否允许继续接收新订单。"""
         return (
-            not getattr(vehicle, "is_rest_requested", False)
+            not CoreDispatcher._is_commute_vehicle(vehicle)
+            and not getattr(vehicle, "is_rest_requested", False)
             and not getattr(vehicle, "is_resting", False)
             and getattr(vehicle, "rest_status", "operating") == "operating"
         )
@@ -2269,6 +2289,14 @@ class CoreDispatcher:
                 speed_mps=SPEED_MPS,
             )
         except Exception as exc:
+            log_exception(
+                "api.core.idle_hotspot_input_convert",
+                exc,
+                context={
+                    "operation_area_id": operation_area_id,
+                    "order_count": len(orders or []),
+                },
+            )
             print(f"[Core.Planner] 订单预测输入转换失败：{exc}")
             return None
         if not clean_orders:
@@ -2287,6 +2315,15 @@ class CoreDispatcher:
                 top_k=50,
             )
         except Exception as exc:
+            log_exception(
+                "api.core.idle_hotspot_v6_forecast",
+                exc,
+                context={
+                    "operation_area_id": operation_area_id,
+                    "clean_order_count": len(clean_orders or []),
+                    "forecast_time": forecast_time.isoformat(sep=" ", timespec="seconds"),
+                },
+            )
             print(f"[Core.Planner] v6 预测失败，降级使用历史统计预测：{exc}")
 
         if not predictions:
@@ -2379,6 +2416,14 @@ class CoreDispatcher:
             return cache
         except Exception as exc:
             cls.idle_hotspot_refresh_failures[cache_key] = time.time()
+            log_exception(
+                "api.core.idle_hotspot_refresh",
+                exc,
+                context={
+                    "operation_area_id": operation_area_id,
+                    "cache_key": cache_key,
+                },
+            )
             print(f"[Core.Planner] 空车热点预测后台刷新失败：{exc}")
             return None
         finally:
@@ -2397,13 +2442,28 @@ class CoreDispatcher:
                 return False
             cls.idle_hotspot_refresh_inflight.add(cache_key)
 
-        executor = cls._idle_hotspot_executor()
-        executor.submit(
-            cls._refresh_idle_hotspot_cache_job,
-            city_map,
-            cls._coerce_operation_area_id(operation_area_id),
-            cache_key,
-        )
+        try:
+            executor = cls._idle_hotspot_executor()
+            executor.submit(
+                cls._refresh_idle_hotspot_cache_job,
+                city_map,
+                cls._coerce_operation_area_id(operation_area_id),
+                cache_key,
+            )
+        except Exception as exc:
+            cls.idle_hotspot_refresh_failures[cache_key] = time.time()
+            with cls.idle_hotspot_refresh_lock:
+                cls.idle_hotspot_refresh_inflight.discard(cache_key)
+            log_exception(
+                "api.core.idle_hotspot_schedule",
+                exc,
+                context={
+                    "operation_area_id": operation_area_id,
+                    "cache_key": cache_key,
+                },
+            )
+            print(f"[Core.Planner] 空车热点预测刷新任务提交失败，已写入错误日志：{exc}")
+            return False
         return True
 
     @staticmethod
@@ -4431,6 +4491,16 @@ class CoreDispatcher:
                     restriction_policy=restriction_policy,
                 )
             except Exception as exc:
+                log_exception(
+                    "api.core.route_grasp_segment",
+                    exc,
+                    context={
+                        "vehicle_id": job.get("vehicle_id"),
+                        "route_version": job.get("route_version"),
+                        "segment_type": segment.get("type"),
+                        "request_id": segment.get("request_id"),
+                    },
+                )
                 result = {"ok": False, "reason": str(exc), "segment": segment}
             if result.get("ok"):
                 grasped_segments.append(result["segment"])
@@ -4863,6 +4933,14 @@ class CoreDispatcher:
             else:
                 result = build_eta_pipeline_from_astar(job["payload"], amap=eta_client)
         except Exception as exc:
+            log_exception(
+                "api.core.eta_refresh_job",
+                exc,
+                context={
+                    "vehicle_id": job.get("vehicle_id") if isinstance(job, dict) else None,
+                    "current_timestamp": current_timestamp,
+                },
+            )
             result = {
                 "ok": False,
                 "amapEnabled": True,

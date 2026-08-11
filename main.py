@@ -63,6 +63,8 @@ except ImportError:
 from flask import Flask
 
 from api import state
+from api.commute_routes import bp as commute_routes
+from api.error_logger import install_flask_error_logging, log_exception
 from api.routes import bp as api_routes
 
 
@@ -82,6 +84,7 @@ def create_app():
     """
     app = Flask(__name__)
     app.register_blueprint(api_routes)
+    app.register_blueprint(commute_routes)
 
     @app.after_request
     def add_cors_headers(response):
@@ -98,6 +101,7 @@ def create_app():
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         return response
 
+    install_flask_error_logging(app)
     return app
 
 
@@ -125,10 +129,11 @@ if __name__ == "__main__":
         print(f"[系统] 路网加载完成：{loaded_area_count} 个运营区，{nodes_count} 节点，{pois_count} POI")
         print("[系统] 后台统筹派单引擎、真实时间时钟、路线纠偏与订单 ETA 刷新线程已启动。")
     except Exception as e:
+        log_exception("main.auto_init", e)
         print(f"[警告] 自动初始化失败: {e}")
         print("[提示] 可通过 POST /init 手动初始化")
 
     port = int(os.environ.get("PORT", 5000))
     print(f"\n[OK] Flask API 已就绪: http://localhost:{port}")
-    print("   可用端点: /health /time /init /order /orders/<request_id>/eta /orders/<request_id>/cancel /fleet /fleet/<vehicle_id>/path /fleet/<vehicle_id>/rest /orders/pool /status /tick /export /pois /map/road-network\n")
+    print("   可用端点: /health /time /init /order /commute/lines /commute/orders /orders/<request_id>/eta /orders/<request_id>/cancel /fleet /fleet/<vehicle_id>/path /fleet/<vehicle_id>/rest /orders/pool /status /tick /export /pois /map/road-network\n")
     app.run(host="0.0.0.0", port=port, debug=False)

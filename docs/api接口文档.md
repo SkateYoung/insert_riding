@@ -64,7 +64,30 @@ Accept: application/json
 | 409 | 当前业务状态冲突，如订单已上车不可取消、路径不可达 | 展示业务冲突提示 |
 | 500 | 服务端异常 | 展示系统错误并记录日志 |
 
-### 1.5 时间字段约定
+### 1.5 错误日志
+
+后端会把接口错误和算法内部异常写入本地 txt 文件，默认路径为：
+
+```text
+runtime_logs/error_YYYYMMDD.txt
+```
+
+记录范围：
+
+- Flask 接口返回 `4xx/5xx` 时记录请求方法、路径、请求体和响应体摘要。
+- 未捕获异常会记录完整 traceback。
+- 订单池匹配、空车热点预测、ETA 刷新、高德路径规划、运营区初始化、车辆/站点加载和车辆路径推送等算法内部异常会记录业务上下文。
+
+可选环境变量：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `BUS_ERROR_LOG_DIR` / `ERROR_LOG_DIR` | 覆盖默认日志目录 |
+| `BUS_ERROR_LOG_FILE` / `ERROR_LOG_FILE` | 覆盖默认日志文件完整路径 |
+
+日志写入失败不会影响接口响应和算法线程运行。
+
+### 1.6 时间字段约定
 
 后端同时返回数值时间戳和文本时间。
 
@@ -89,15 +112,23 @@ Accept: application/json
 | 订单 | POST | `/orders/<request_id>/driver-push-confirmation` | 平台确认司机端是否收到派单 |
 | 订单 | POST | `/admin/orders/query` | 服务端按条件查询订单数据库 |
 | 调度 | GET/POST/PUT | `/admin/dispatch/matching-window-config` | 查看或更新远期订单匹配窗口配置 |
+| 通勤快线 | GET/POST | `/commute/lines` | 查询或创建通勤快线线路 |
+| 通勤快线 | GET/PUT/DELETE | `/commute/lines/<line_code>` | 查询、更新或删除通勤快线线路 |
+| 通勤快线 | PUT | `/commute/lines/<line_code>/stops` | 整体替换通勤快线固定站序 |
+| 通勤快线 | POST | `/commute/vehicles/assign` | 绑定车辆到通勤快线线路 |
+| 通勤快线 | POST | `/commute/orders` | 创建通勤快线订单 |
+| 通勤快线 | GET | `/commute/orders/<request_id>` | 查询通勤快线订单 |
+| 通勤快线 | POST | `/commute/orders/<request_id>/cancel` | 取消通勤快线订单 |
 | 车辆 | GET | `/fleet` | 查询车队列表信息 |
 | 车辆 | GET | `/fleet/<vehicle_id>` | 查询单车信息 |
 | 车辆 | POST | `/fleet/<vehicle_id>/path` | GPS 上报并更新车辆吸附位置，不触发上下客或路线重规划 |
-| 车辆 | POST | `/fleet/<vehicle_id>/boarding-events` | 司机端显式确认当前上车/下车步骤 |
+| 车辆 | POST | `/fleet/<vehicle_id>/boarding-events` | 司机端显式确认当前上车/下车步骤，动态巴士和通勤快线共用 |
 | 车辆 | POST | `/fleet/<vehicle_id>/amap-route/replan` | 同步优先重规划单车高德驾车路线 |
 | 车辆 | POST | `/fleet/<vehicle_id>/rest` | 司机端请求休息/收车 |
 | 系统 | GET | `/status` | 获取系统全量状态 |
 | 地图 | GET | `/pois` | 获取所有合法上下客 POI |
 | 地图 | GET | `/map/road-network` | 按运营区获取路网节点和边 |
+| 运营区域 | GET | `/admin/shp-files` | 查询 shp 目录下可用 SHP 文件路径 |
 | 运营区域 | GET | `/admin/operation-areas` | 查询运营区列表 |
 | 运营区域 | POST | `/admin/operation-areas` | 新增运营区 |
 | 运营区域 | GET | `/admin/operation-areas/<area_id>` | 查询单个运营区 |
@@ -689,14 +720,14 @@ ETA 状态：
 
 ### 4.4 POST `/order`
 
-创建乘客订单并进入调度池。后端会把原始起终点坐标吸附到最近合法 POI。
+创建普通动态巴士订单并进入调度池。起点和终点坐标必须精确匹配订单所属运营区 `map_poi` 表中的启用站点；接口不再把任意坐标吸附到最近 POI。
 
 请求体：
 
 ```json
 {
   "request_id": "order_10001",
-  "operation_area_code": "area_001",
+  "operation_area_id": 10001,
   "passenger_phone": "13900000001",
   "passenger_id": "passenger_10001",
   "origin": {
@@ -711,8 +742,7 @@ ETA 状态：
     "earliest": "2026-06-07 12:05:00",
     "latest": "2026-06-07 12:20:00"
   },
-  "passenger_count": 2,
-  "operation_area_id": 10001
+  "passenger_count": 2
 }
 ```
 
@@ -724,10 +754,10 @@ ETA 状态：
 | `operation_area_id` | integer | 是 | 订单所属运营区业务 ID，对应 `map_operation_area.area_id`；不传时返回 `400` |
 | `passenger_phone` | string | 是 | 乘客手机号 |
 | `passenger_id` | string/null | 否 | 前端/业务系统乘客 ID；为空时不写入 |
-| `origin.lon` | number | 是 | 起点经度 |
-| `origin.lat` | number | 是 | 起点纬度 |
-| `destination.lon` | number | 是 | 终点经度 |
-| `destination.lat` | number | 是 | 终点纬度 |
+| `origin.lon` | number | 是 | 起点站经度，按 8 位小数精确匹配当前运营区启用站点 |
+| `origin.lat` | number | 是 | 起点站纬度，按 8 位小数精确匹配当前运营区启用站点 |
+| `destination.lon` | number | 是 | 终点站经度，按 8 位小数精确匹配当前运营区启用站点 |
+| `destination.lat` | number | 是 | 终点站纬度，按 8 位小数精确匹配当前运营区启用站点 |
 | `expected_pickup_time.earliest` | string | 是 | 期望最早上车时间 |
 | `expected_pickup_time.latest` | string | 是 | 期望最晚上车时间 |
 | `passenger_count` | integer | 是 | 乘客人数，必须大于 0 |
@@ -766,12 +796,28 @@ ETA 状态：
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 创建成功 |
-| 400 | 未初始化、缺字段、手机号为空、时间格式错误、人数非法 |
+| 400 | 未初始化、缺字段、坐标不是有限数字或超出范围、手机号为空、时间格式错误、人数非法 |
+| 404 | 起点或终点坐标未匹配到当前运营区的启用站点 |
+| 409 | 起终点相同、坐标匹配多个站点，或站点尚未加载到运营区路网 |
+| 503 | 数据库不可用，无法校验站点坐标 |
+
+坐标相关错误码：
+
+| 错误码 | 说明 |
+| --- | --- |
+| `station_coordinate_invalid` | 经纬度不是有限数字或超出合法范围 |
+| `origin_station_not_found_by_coordinate` | 起点坐标未匹配到启用站点 |
+| `destination_station_not_found_by_coordinate` | 终点坐标未匹配到启用站点 |
+| `origin_station_coordinate_ambiguous` | 起点坐标匹配到多个启用站点 |
+| `destination_station_coordinate_ambiguous` | 终点坐标匹配到多个启用站点 |
+| `same_origin_destination` | 起点和终点为同一站点 |
+| `origin_station_not_loaded` / `destination_station_not_loaded` | 数据库站点尚未加载到当前 A* 路网 |
 
 前端建议：
 
 - 创建成功后轮询 `/orders/<request_id>/eta` 获取派车状态和 ETA。
 - 不要使用前端传入的 `request_time`；后端会统一生成。
+- 起终点应直接使用 `GET /pois?operation_area_id=xxx` 返回的站点经纬度，不要传地图任意点击坐标。
 
 ### 4.4.1 POST `/admin/orders/query`
 
@@ -1087,6 +1133,530 @@ POST/PUT 请求体：
 | 400 | 请求体缺少 `received`、类型非法或时间格式非法 |
 | 409 | 订单已退回、已改派或车辆不匹配 |
 
+### 4.7.2 通勤快线 `/commute/*`
+
+通勤快线适用于固定线路、固定站点、单向循环运行的业务，例如园区环线、校园通勤线和企业班车短驳线。快线不进入动态巴士 `/order` 订单池，订单复用 `bus_order`，并通过 `order_source='commute_express'` 区分。
+
+典型业务场景：
+
+- 后台先创建一条快线线路，并按固定站点顺序配置 `stops`。
+- 后台把车辆绑定到线路，并设置车辆快线任务模式。
+- 乘客按线路中的固定站点下单，系统只在该线路、该运营区内寻找可接快线车辆。
+- 快线车辆接单后只维护服务步骤队列，不生成 A* 路线和高德导航路线。
+- 司机端通过统一上下客接口推进快线订单状态。
+
+核心约定：
+
+- 一条线路按 `stops` 数组顺序单向循环，例如 `站点A -> 站点B -> 站点C -> 站点A`。
+- 前端只传站点经纬度，后端用 `operation_area_id + longitude + latitude + deleted=0 + status='enabled'` 精确匹配 `map_poi`。
+- 快线只做车辆匹配和订单状态推进，不生成 A* 路径、不请求高德驾车规划、不返回导航路线点。
+- 快线车辆由 `bus_vehicle.operation_mode` 区分：`commute_fixed_waiting` 为定点候客，`commute_cruising` 为巡游车辆。
+- 快线车辆调用 `/fleet/<vehicle_id>/path` 时只更新 GPS 和运行态，不触发动态巴士的路网吸附、路线裁剪或上下客联动。
+- 两种快线车辆匹配时都使用车辆 GPS 作为当前位置，按车辆 GPS 到乘客上车站点的直线距离就近选择车辆。
+- 车辆接单或插单时会维护 `vehicle.planned_route` 服务步骤队列；队列中 `O` 表示上车，`D` 表示下车。
+- 快线车辆服务步骤变化后，通过单车推送接口 `/bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation` 推送给平台。
+
+#### GET `/commute/lines`
+
+查询通勤快线线路列表。可选查询参数 `include_deleted=true` 用于包含已软删除线路。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `include_deleted` | boolean/string | 否 | `true/1/yes` 表示包含已软删除线路 |
+
+成功响应：
+
+```json
+{
+  "lines": [
+    {
+      "line_code": "line_001",
+      "line_name": "大学城通勤快线",
+      "operation_area_id": 10001,
+      "route_mode": "loop",
+      "status": "enabled",
+      "stop_count": 3,
+      "stops": [
+        {
+          "poi_id": 1,
+          "poi_code": "poi_001",
+          "station_name": "大学城北门",
+          "lon": 113.1,
+          "lat": 23.1,
+          "line_order": 1
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### POST `/commute/lines`
+
+创建线路，可同时携带 `stops` 初始化固定站点顺序。
+
+```json
+{
+  "line_code": "line_001",
+  "line_name": "大学城通勤快线",
+  "operation_area_id": 10001,
+  "route_mode": "loop",
+  "status": "enabled",
+  "description": "单向循环线路",
+  "stops": [
+    {"lon": 113.1, "lat": 23.1},
+    {"lon": 113.2, "lat": 23.2}
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `line_code` | string | 是 | 线路编码；未软删除线路中唯一 |
+| `line_name` | string | 是 | 线路名称 |
+| `operation_area_id` | integer | 是 | 运营区 ID，取 `map_operation_area.area_id` |
+| `route_mode` | string | 否 | 线路运行方式，默认 `loop`，当前按单向循环处理 |
+| `status` | string | 否 | 线路状态，默认 `enabled` |
+| `description` | string | 否 | 线路说明 |
+| `stops` | array | 否 | 固定站序；如传入则每项只需要 `lon/lat` |
+
+`stops[]` 只需要 `lon/lat`，不传 `stop_seq/station_id/poi_id`。后端会按请求数组顺序保存线路循环顺序，并在响应中返回解析出的站点快照，如 `poi_id`、`poi_code`、`station_name`、`lon`、`lat`。
+
+成功响应：
+
+```json
+{
+  "status": "created",
+  "line": {
+    "line_code": "line_001",
+    "line_name": "大学城通勤快线",
+    "operation_area_id": 10001,
+    "route_mode": "loop",
+    "status": "enabled",
+    "stop_count": 2,
+    "stops": []
+  }
+}
+```
+
+#### GET/PUT/DELETE `/commute/lines/<line_code>`
+
+按线路编码查询、更新或软删除线路。`PUT` 请求体与创建线路一致；如果携带 `stops`，会按经纬度重新解析并替换线路站点顺序。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `line_code` | string | 通勤快线线路编码 |
+
+`GET` 成功响应：
+
+```json
+{
+  "line": {
+    "line_code": "line_001",
+    "line_name": "大学城通勤快线",
+    "operation_area_id": 10001,
+    "status": "enabled",
+    "stop_count": 2,
+    "stops": []
+  }
+}
+```
+
+`DELETE` 为软删除，会把线路状态置为不可用，并同步停用该线路的车辆绑定关系。
+
+`DELETE` 成功响应：
+
+```json
+{
+  "status": "deleted",
+  "line_code": "line_001"
+}
+```
+
+#### PUT `/commute/lines/<line_code>/stops`
+
+整体替换线路站点顺序。
+
+```json
+{
+  "stops": [
+    {"lon": 113.1, "lat": 23.1},
+    {"lon": 113.2, "lat": 23.2},
+    {"lon": 113.3, "lat": 23.3}
+  ]
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `stops` | array | 是 | 站点经纬度数组，至少 2 个 |
+| `stops[].lon` | number | 是 | 站点经度，必须精确匹配 `map_poi.longitude` |
+| `stops[].lat` | number | 是 | 站点纬度，必须精确匹配 `map_poi.latitude` |
+
+业务规则：`stops` 至少 2 个；同一线路不能重复使用同一个 `map_poi`；坐标不存在返回 `commute_stop_not_found_by_coordinate`；同一运营区相同坐标匹配多个站点返回 `commute_stop_coordinate_ambiguous`。
+
+成功响应：
+
+```json
+{
+  "status": "updated",
+  "line_code": "line_001",
+  "stops": [
+    {
+      "poi_id": 1,
+      "poi_code": "poi_001",
+      "station_name": "大学城北门",
+      "lon": 113.1,
+      "lat": 23.1,
+      "line_order": 1
+    }
+  ]
+}
+```
+
+#### POST `/commute/vehicles/assign`
+
+把车辆绑定到线路，并设置快线任务模式。
+
+```json
+{
+  "vehicle_code": "72057594546144444",
+  "line_code": "line_001",
+  "task_mode": "commute_fixed_waiting",
+  "status": "active"
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `vehicle_code` | string | 是 | 车辆业务编码 |
+| `line_code` | string | 是 | 快线线路编码 |
+| `task_mode` | string | 是 | `commute_fixed_waiting` 或 `commute_cruising` |
+| `status` | string | 否 | 绑定状态，默认 `active` |
+
+绑定成功后写入 `bus_commute_vehicle_assignment.vehicle_code`；同时同步更新车辆档案的 `operation_mode` 和 `operation_area_id`。定点候客不再保存固定等待站字段，匹配时统一使用车辆最新 GPS。
+
+成功响应：
+
+```json
+{
+  "status": "assigned",
+  "assignment": {
+    "vehicle_code": "72057594546144444",
+    "line_code": "line_001",
+    "operation_area_id": 10001,
+    "task_mode": "commute_fixed_waiting",
+    "status": "active"
+  },
+  "runtime_applied": true
+}
+```
+
+说明：
+
+- `vehicle_code` 当前表示车辆业务编码，对应车辆档案 `bus_vehicle.vehicle_code`。
+- `runtime_applied=true` 表示该车辆已在当前运行态车队中找到并同步更新。
+- `runtime_applied=false` 表示数据库绑定成功，但车辆当前不在运行态内存中，通常需要初始化或重新加载车辆后生效。
+
+#### POST `/commute/orders`
+
+创建通勤快线订单，并尝试匹配同线路、同运营区、容量足够的快线车辆。
+
+```json
+{
+  "request_id": "commute_order_001",
+  "line_code": "line_001",
+  "origin_lon": 113.1,
+  "origin_lat": 23.1,
+  "destination_lon": 113.3,
+  "destination_lat": 23.3,
+  "passenger_phone": "13800000000",
+  "passenger_id": "p001",
+  "passenger_count": 1
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 是 | 订单请求 ID，全局唯一 |
+| `line_code` | string | 是 | 快线线路编码 |
+| `origin_lon` | number | 是 | 上车站经度，必须是该线路站点坐标 |
+| `origin_lat` | number | 是 | 上车站纬度，必须是该线路站点坐标 |
+| `destination_lon` | number | 是 | 下车站经度，必须是该线路站点坐标 |
+| `destination_lat` | number | 是 | 下车站纬度，必须是该线路站点坐标 |
+| `passenger_phone` | string | 是 | 乘客手机号 |
+| `passenger_id` | string | 否 | 业务乘客 ID，落库到 `passenger_code` |
+| `passenger_count` | integer | 否 | 乘客人数，默认 `1` |
+
+匹配规则：
+
+- 线路必须存在且 `status='enabled'`。
+- 上下车坐标必须都属于该线路站点，且起终点不能相同。
+- 定点候客和巡游车辆都使用车辆 GPS 到上车站点的直线距离做就近匹配。
+- 无 GPS 的快线车辆不参与匹配。
+- 候选车辆必须绑定同一线路、同一运营区，绑定状态为 `active`，车辆 `operation_mode` 为 `commute_fixed_waiting` 或 `commute_cruising`，且 `rest_status='operating'`。
+- 车辆接单和插单时会保持已有上下客步骤相对顺序，只局部插入新订单 O/D，并校验全程载客数不超过容量。
+- 匹配成功后订单状态为 `waiting_pickup`；无可用车辆时状态为 `pooled`。
+- 快线订单写入 `bus_order`，`order_source='commute_express'`，线路和站点序列快照写入 `route_segments`。
+
+匹配成功响应示例：
+
+```json
+{
+  "status": "waiting_pickup",
+  "order": {
+    "request_id": "commute_order_001",
+    "order_source": "commute_express",
+    "status": "waiting_pickup",
+    "line_code": "line_001",
+    "operation_area_id": 10001,
+    "origin_station_name": "大学城北门",
+    "destination_station_name": "大学城南门",
+    "assigned_vehicle_code": "72057594546144444",
+    "route_poi_sequence": [1, 2, 3]
+  },
+  "candidate": {
+    "vehicle_id": "72057594546144444",
+    "vehicle_code": "72057594546144444",
+    "plate_no": "粤A00001",
+    "distance_to_origin_m": 0,
+    "extra_distance_m": 0,
+    "origin_insert_index": 0,
+    "destination_insert_index": 1,
+    "task_mode": "commute_fixed_waiting"
+  },
+  "vehicle": {
+    "vehicle_id": "72057594546144444",
+    "vehicle_code": "72057594546144444",
+    "plate_no": "粤A00001",
+    "operation_mode": "commute_fixed_waiting",
+    "operation_area_id": 10001,
+    "planned_route": [
+      {
+        "type": "O",
+        "request_id": "commute_order_001",
+        "target_poi_id": 1,
+        "target_station_name": "大学城北门",
+        "status": "waiting_pickup"
+      },
+      {
+        "type": "D",
+        "request_id": "commute_order_001",
+        "target_poi_id": 3,
+        "target_station_name": "大学城南门",
+        "status": "waiting_pickup"
+      }
+    ]
+  }
+}
+```
+
+无可用车辆响应示例：
+
+```json
+{
+  "status": "pooled",
+  "order": {
+    "request_id": "commute_order_001",
+    "order_source": "commute_express",
+    "status": "pooled"
+  },
+  "candidate": null
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 201 | 订单创建成功，可能已匹配车辆，也可能进入 `pooled` |
+| 400 | 请求体字段缺失、类型非法或 JSON 非对象 |
+| 404 | 线路不存在、车辆不存在或站点坐标未匹配 |
+| 409 | 订单号冲突、站点重复、起终点相同或业务状态冲突 |
+| 503 | 数据库不可用 |
+
+#### GET `/commute/orders/<request_id>`
+
+查询快线订单。返回数据来自 `bus_order`，其中 `route_segments.line_code` 和 `route_segments.route_poi_sequence` 保存快线线路快照。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `request_id` | string | 快线订单请求 ID |
+
+成功响应：
+
+```json
+{
+  "order": {
+    "request_id": "commute_order_001",
+    "order_source": "commute_express",
+    "status": "waiting_pickup",
+    "line_code": "line_001",
+    "operation_area_id": 10001,
+    "route_poi_sequence": [1, 2, 3],
+    "origin_station_name": "大学城北门",
+    "destination_station_name": "大学城南门",
+    "assigned_vehicle_code": "72057594546144444"
+  }
+}
+```
+
+#### POST `/commute/orders/<request_id>/cancel`
+
+取消快线订单；若订单已分配车辆，会从该车辆的剩余服务步骤中移除对应 O/D。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `request_id` | string | 快线订单请求 ID |
+
+成功响应：
+
+```json
+{
+  "status": "cancelled",
+  "order": {
+    "request_id": "commute_order_001",
+    "status": "cancelled",
+    "cancel_reason": "passenger_cancelled"
+  }
+}
+```
+
+#### POST `/fleet/<vehicle_id>/boarding-events`
+
+快线车辆与动态巴士共用该接口确认当前下一步上车或下车。后端会根据车辆 `operation_mode` 自动分流，快线车辆不会调用动态巴士的 A* 或高德路线逻辑。
+
+```json
+{
+  "action": "pickup",
+  "request_id": "commute_order_001",
+  "lon": 113.1,
+  "lat": 23.1,
+  "distance_threshold_m": 30
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `action` | string | 是 | `pickup` 表示确认上车，`dropoff` 表示确认下车 |
+| `request_id` | string | 否 | 订单请求 ID；不传时默认确认车辆当前服务队列第一步 |
+| `lon` | number | 否 | 确认位置经度；不传时使用车辆当前 GPS |
+| `lat` | number | 否 | 确认位置纬度；不传时使用车辆当前 GPS |
+| `distance_threshold_m` | number | 否 | 允许确认的距离阈值，默认 `30` 米 |
+
+确认限制：
+
+- 车辆必须是快线车辆，且当前 `planned_route` 不为空。
+- 只能确认当前下一步，即 `vehicle.planned_route[0]`。
+- 当前步骤为 `O` 时只能执行 `pickup`，当前步骤为 `D` 时只能执行 `dropoff`。
+- 如果传入 `request_id`，必须与当前第一步订单一致。
+- 确认位置到目标站点距离不能超过 `distance_threshold_m`。
+
+状态流转：`pickup` 将订单改为 `riding`；`dropoff` 将订单改为 `completed`。确认成功后会更新车辆运行态并触发 `commute_boarding_updated` 单车推送。
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "event": {
+    "action": "pickup",
+    "request_id": "commute_order_001",
+    "distance_to_target": 8.5,
+    "target_node": {
+      "id": "poi_001",
+      "poi_id": 1,
+      "lon": 113.1,
+      "lat": 23.1,
+      "name": "大学城北门"
+    }
+  },
+  "orders": {
+    "on_board": ["commute_order_001"],
+    "remaining": []
+  },
+  "vehicle": {}
+}
+```
+
+#### 快线车辆 GPS 上报说明
+
+快线车辆仍使用 `POST /fleet/<vehicle_id>/path` 上报 GPS。与动态巴士不同，快线车辆只更新 `gps/time`、车辆运行态和位置日志，不做道路吸附、路线裁剪、A* 重建、高德重规划或自动上下客。
+
+请求示例：
+
+```json
+{
+  "lon": 113.1,
+  "lat": 23.1
+}
+```
+
+#### 快线单车推送说明
+
+快线车辆服务队列变化后，后端复用 `api/fleet_push.py` 的单车推送能力，把当前车辆信息推送到平台：
+
+```text
+POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
+```
+
+常见 `event_reason`：
+
+| 事件原因 | 触发场景 |
+| --- | --- |
+| `commute_order_assigned` | 快线车辆从无任务变为接到订单 |
+| `commute_order_inserted` | 快线车辆已有服务步骤时插入新订单 |
+| `commute_order_cancelled` | 快线订单取消后移除车辆服务步骤 |
+| `commute_boarding_updated` | 快线车辆完成上车或下车确认 |
+
+常见错误码：
+
+| 错误码 | HTTP 状态码 | 说明 |
+| --- | --- | --- |
+| `invalid_json_body` | 400 | 请求体不是 JSON 对象 |
+| `invalid_request` | 400 | 请求字段缺失或格式非法 |
+| `request_id_required` | 400 | 创建快线订单缺少 `request_id` |
+| `line_code_required` | 400 | 创建快线订单缺少 `line_code` |
+| `passenger_phone_required` | 400 | 创建快线订单缺少乘客手机号 |
+| `origin_lon_required` / `origin_lat_required` | 400 | 缺少上车站经纬度 |
+| `destination_lon_required` / `destination_lat_required` | 400 | 缺少下车站经纬度 |
+| `commute_stops_required` | 400 | 替换站序时 `stops` 不是非空数组 |
+| `commute_stop_not_found_by_coordinate` | 404 | 坐标未匹配到启用站点 |
+| `commute_stop_coordinate_ambiguous` | 409 | 坐标匹配多个启用站点或线路内重复 |
+| `commute_stop_duplicate` | 409 | 同一线路重复配置同一个站点 |
+| `commute_stop_not_in_line` | 404 | 上下车坐标不在线路中 |
+| `same_origin_destination` | 409 | 上下车站点相同 |
+| `commute_line_exists` | 409 | 线路编码已存在 |
+| `commute_line_not_found` | 404 | 线路不存在或未启用 |
+| `commute_order_exists` | 409 | 订单请求 ID 已存在 |
+| `commute_order_not_found` | 404 | 快线订单不存在 |
+| `vehicle_not_found` | 404 | 车辆不存在或未进入运行态 |
+| `no_commute_step` | 409 | 车辆当前没有待确认服务步骤 |
+| `invalid_action` | 400 | `action` 不是 `pickup/dropoff` |
+| `invalid_step_action` | 409 | 当前服务步骤与上/下车动作不匹配 |
+| `request_id_not_current` | 409 | `request_id` 不是车辆当前下一步订单 |
+| `vehicle_position_missing` | 400 | 车辆当前位置为空，无法确认上下客 |
+| `too_far_from_stop` | 409 | 车辆距离当前上下客站点超过阈值 |
+| `database_unavailable` | 503 | 数据库不可用 |
+
 ### 4.8 GET `/fleet`
 
 查询全部车辆状态。
@@ -1245,7 +1815,7 @@ POST/PUT 请求体：
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
-司机端请求休息或预约休息。
+司机端或平台请求车辆休息。接口兼容旧请求体，不传 `source` 时按司机主动休息处理；平台可通过 `source=platform` 复用同一接口发起立即休息或预约休息。
 
 请求体为空的话，表示立即收车：
 
@@ -1259,6 +1829,7 @@ POST/PUT 请求体：
 
 ```json
 {
+  "source": "platform",
   "desired_rest_time": "2026-06-07 13:30:00",
   "rest_duration_minutes": 20
 }
@@ -1277,6 +1848,7 @@ POST/PUT 请求体：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `source` | string | 否 | 请求来源：`driver` 司机主动休息，`platform` 平台发起休息；默认 `driver` |
 | `desired_rest_time` | string/number/null | 否 | 为空表示马上收车；数字表示从当前后端时间起多少秒后休息；字符串按业务时间解析 |
 | `rest_duration_minutes` | number | 否 | 休息时长，后端限制在 15-30 分钟 |
 
@@ -1285,6 +1857,7 @@ POST/PUT 请求体：
 ```json
 {
   "vehicle_id": "巴士-绿色01",
+  "source": "platform",
   "decision": "close_now",
   "rest_status": "closing",
   "rest_status_text": "收车中",
@@ -1309,8 +1882,10 @@ POST/PUT 请求体：
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 请求成功 |
-| 400 | 未初始化或参数格式错误 |
+| 400 | 未初始化、`source` 非法或参数格式错误 |
 | 404 | 车辆不存在 |
+
+说明：车辆连续运营时间 `driving_time` 只作为展示/统计字段，不再由算法自动触发强制收车休息；强制休息和预约休息均由司机端或平台调用本接口触发。
 
 ### 4.12 GET `/status`
 
@@ -1352,7 +1927,7 @@ POST/PUT 请求体：
 
 ### 4.13 GET `/pois`
 
-获取所有合法上下客 POI 兴趣点。
+获取指定运营区的合法上下客 POI 兴趣点。接口对外返回数据库 `map_poi` 中的原始站点坐标，供前端展示、手动下单和随机下单使用；吸附到路网后的节点坐标只通过 `snapped_*` 字段返回，作为算法内部地图运算的参考信息。
 
 查询参数：
 
@@ -1368,11 +1943,18 @@ POST/PUT 请求体：
   "operation_area_code": "area_001",
   "pois": [
     {
-      "id": "poi_1",
+      "id": 101,
+      "poi_id": 101,
+      "poi_code": "poi_1",
       "name": "站点A",
       "lon": 113.38,
       "lat": 23.04,
-      "zone": "A"
+      "longitude": 113.38,
+      "latitude": 23.04,
+      "zone": "A",
+      "snapped_node_id": "113.380100_23.040200",
+      "snapped_lon": 113.3801,
+      "snapped_lat": 23.0402
     }
   ]
 }
@@ -1382,11 +1964,15 @@ POST/PUT 请求体：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `pois[].id` | string | POI 节点 ID |
+| `pois[].id` | integer | 数据库 `map_poi.id` |
+| `pois[].poi_id` | integer | 数据库 `map_poi.id`，与 `id` 一致 |
+| `pois[].poi_code` | string | 数据库 POI 业务编码 |
 | `pois[].name` | string | POI 名称 |
-| `pois[].lon` | number | 经度 |
-| `pois[].lat` | number | 纬度 |
+| `pois[].lon` / `pois[].longitude` | number | 数据库 `map_poi.longitude` 原始站点经度 |
+| `pois[].lat` / `pois[].latitude` | number | 数据库 `map_poi.latitude` 原始站点纬度 |
 | `pois[].zone` | string/number/null | 所属分区 |
+| `pois[].snapped_node_id` | string/null | 运行态内部吸附后的路网节点 ID |
+| `pois[].snapped_lon` / `pois[].snapped_lat` | number/null | 运行态内部吸附后的路网节点坐标 |
 
 状态码：
 
@@ -1425,7 +2011,7 @@ POST/PUT 请求体：
 
 ### 4.13.2 POST `/admin/stations`
 
-新增单个或多个站点，并写入 `map_poi`。新增成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
+新增单个或多个站点，并写入 `map_poi`。新增时会校验站点坐标是否落在所属运营区范围内：优先使用 `map_operation_area.area_polygon/area_points` 做多边形包含判断；若没有面数据，则使用已加载路网边界、`bounds_json` 或 SHP 文件 bbox 兜底校验。新增成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
 
 请求体支持单条：
 
@@ -1564,6 +2150,8 @@ POST/PUT 请求体：
 | `station_lon_required` / `station_lat_required` | 缺少经纬度字段 |
 | `station_lon_invalid` / `station_lat_invalid` | 经纬度不是数字 |
 | `station_coordinate_out_of_range` | 经纬度超出合法范围 |
+| `station_coordinate_outside_operation_area` | 新增站点坐标不在运营区 SHP 范围内 |
+| `operation_area_scope_unavailable` | 运营区缺少可校验的范围信息，无法确认站点是否在 SHP 范围内 |
 | `station_coordinate_exists` | 同一运营区已有相同经纬度站点 |
 | `station_code_exists` | 同一运营区站点编号冲突 |
 | `station_not_found_by_coordinate` | 数据库中不存在该经纬度站点 |
@@ -1895,6 +2483,34 @@ POST/PUT 请求体：
 | 404 | 指定策略不存在或已禁用 |
 | 500 | 服务端异常 |
 
+### 4.20.0 GET `/admin/shp-files`
+
+查询项目 `shp` 文件夹下可用于运营区配置的 SHP 地图文件路径。接口只返回相对于项目根目录的路径，可直接作为新增或更新运营区时的 `shp_path` 填充值。
+
+可用规则：
+
+- `.shp` 文件存在。
+- 同目录下存在同名 `.shx` 文件。
+- 同目录下存在同名 `.dbf` 文件。
+
+响应示例：
+
+```json
+{
+  "root": "shp",
+  "count": 1,
+  "paths": [
+    "shp/tianhe_shp_0713/zjgc_0713.shp"
+  ]
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询成功 |
+
 ### 4.20.1 GET `/admin/operation-areas`
 
 查询数据库中未软删除的运营区列表。该接口不要求系统已初始化。
@@ -2025,11 +2641,29 @@ POST/PUT 请求体：
 
 ### 4.20.5 DELETE `/admin/operation-areas/<area_id>`
 
-软删除运营区。软删除后不会被 `/init` 加载。
+软删除运营区。软删除前会检查该运营区是否仍有未完成订单；只要存在 `pooled/matched/waiting_pickup/riding` 订单，或运行态车辆仍有 `planned_route/on_board_orders`，接口会拒绝删除。
+
+删除成功后，该运营区不会被 `/init` 加载；该运营区下车辆会被重置为 `operation_status='offline'` 且 `operation_area_id=NULL`，对应运行态记录也会被清理。
+
+删除失败示例：
+
+```json
+{
+  "error": "operation_area_has_unfinished_orders",
+  "message": "运营区仍有未完成订单，不能删除",
+  "operation_area_id": 10001,
+  "blockers": {
+    "pooled_orders": [],
+    "vehicles": [],
+    "database_orders": []
+  }
+}
+```
 
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 删除成功 |
+| 409 | 运营区仍有未完成订单或车辆任务 |
 | 404 | 运营区不存在 |
 | 503 | 数据库不可用 |
 
@@ -2262,7 +2896,7 @@ POST/PUT 请求体：
 | `vehicle_color` | string | 否 | 车辆展示颜色 |
 | `vehicle_model` | string | 否 | 车辆型号 |
 | `operation_status` | string | 是 | 新增车辆时必须为 `offline` |
-| `operation_mode` | string | 否 | 运营模式，默认 `dynamic_bus` |
+| `operation_mode` | string | 否 | 运营模式，默认 `dynamic_bus`，可选值有： `dynamic_bus`、`commute_fixed_waiting`、`commute_cruising` |
 | `current_driver_code` | string/null | 否 | 当前绑定司机编码；同一个司机只能绑定一台未删除车辆 |
 | `remark` | string | 否 | 备注 |
 
@@ -2320,15 +2954,59 @@ POST/PUT 请求体：
 
 更新车辆档案并按运营状态同步运行车队。`vehicle_id` 以路径参数为准，请求体中的 `vehicle_id` 会被忽略。
 
-请求体：同 `POST /admin/vehicles`。
+请求体：同 `POST /admin/vehicles`，并根据 `operation_mode` 增加以下规则：
+
+- `operation_mode="dynamic_bus"`：保持普通动态巴士逻辑，不需要 `line_code`。
+- `operation_mode="commute_fixed_waiting"` 或 `operation_mode="commute_cruising"`：必须额外传入 `line_code`，后端会复用通勤快线车辆绑定逻辑，把车辆绑定到该快线线路。
+- 快线模式下车辆 `operation_area_id` 会以后端查询到的线路所属运营区为准，请求体中的 `operation_area_id` 会被线路运营区覆盖。
+- 车辆从快线模式改回 `dynamic_bus` 时，后端会停用该车辆旧的快线绑定关系。
+
+快线车辆更新示例：
+
+```json
+{
+  "plate_no": "粤A00001",
+  "vehicle_type": "bus",
+  "seat_count": 10,
+  "max_load_count": 10,
+  "vehicle_color": "#64748b",
+  "vehicle_model": "EV-BUS",
+  "operation_status": "operating",
+  "operation_mode": "commute_fixed_waiting",
+  "line_code": "line_001",
+  "current_driver_code": "driver-001",
+  "initial_position": {
+    "lon": 113.1,
+    "lat": 23.1
+  }
+}
+```
+
+快线绑定成功时响应会额外返回：
+
+```json
+{
+  "vehicle": {},
+  "runtime": {},
+  "snap": {},
+  "commute_assignment": {
+    "vehicle_code": "bus-001",
+    "line_code": "line_001",
+    "operation_area_id": 10001,
+    "task_mode": "commute_fixed_waiting",
+    "status": "active"
+  },
+  "commute_runtime_applied": true
+}
+```
 
 状态码：
 
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 更新成功 |
-| 400 | 参数错误、状态枚举非法或可运行车辆缺少位置 |
-| 404 | 车辆不存在 |
+| 400 | 参数错误、状态枚举非法、快线模式缺少 `line_code` 或可运行车辆缺少位置 |
+| 404 | 车辆不存在或快线线路不存在 |
 | 409 | 车辆有未完成任务，不能退出运营 |
 
 ### 4.31 DELETE `/admin/vehicles/<vehicle_id>`

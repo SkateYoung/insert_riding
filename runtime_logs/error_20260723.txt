@@ -1,0 +1,7 @@
+========================================================================================
+time: 2026-07-23 18:35:47
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "GET", "path": "/commute/orders/12345", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36", "status_code": 404, "response_body": "{\"error\":\"commute_order_not_found\",\"message\":\"\\u901a\\u52e4\\u5feb\\u7ebf\\u8ba2\\u5355\\u4e0d\\u5b58\\u5728\"}\n"}
+

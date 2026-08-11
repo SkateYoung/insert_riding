@@ -10,6 +10,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from . import persistence
+from .error_logger import log_exception
 from .models import CityGraph, Vehicle
 from .core import CoreDispatcher
 
@@ -432,6 +433,15 @@ def load_operation_area_into_runtime(area_or_code):
         area_city, loaded_item = _load_operation_area_city(area)
     except Exception as exc:
         error_text = str(exc)
+        log_exception(
+            "api.state.load_operation_area",
+            exc,
+            context={
+                "operation_area_id": operation_area_id,
+                "operation_area_code": area_code,
+                "shp_path": (area or {}).get("shp_path"),
+            },
+        )
         try:
             persistence.record_operation_area_load_result(area_code, {
                 "load_status": "error",
@@ -442,6 +452,11 @@ def load_operation_area_into_runtime(area_or_code):
                 "bounds_json": None,
             })
         except Exception as write_exc:
+            log_exception(
+                "api.state.operation_area_load_writeback",
+                write_exc,
+                context={"operation_area_code": area_code, "load_error": error_text},
+            )
             print(f"[State.Area] 运营区 {area_code} 加载失败状态写回失败：{write_exc}")
         return {"status": "error", "code": area_code, "error": error_text}
 
@@ -564,6 +579,14 @@ def _apply_database_pois(city_map, operation_area):
     try:
         poi_records = persistence.list_pois(operation_area_ids=operation_area_ids)
     except Exception as exc:
+        log_exception(
+            "api.state.apply_database_pois",
+            exc,
+            context={
+                "operation_area_code": operation_area_code,
+                "operation_area_ids": operation_area_ids,
+            },
+        )
         print(f"[State.Init] 运营区 {operation_area_code or operation_area_ids} 站点读取失败，当前运营区不加载 POI：{exc}")
         return 0
     if not poi_records:
@@ -650,6 +673,7 @@ def _vehicle_from_db_record(record, city_map, current_timestamp, operation_area_
     except (TypeError, ValueError):
         vehicle.progress = 0.0
     vehicle.operation_status = operation_status
+    vehicle.operation_mode = record.get("operation_mode") or "dynamic_bus"
     if operation_status == "operating":
         vehicle.rest_status = "operating"
         vehicle.is_resting = False
@@ -691,6 +715,11 @@ def load_fleet_from_persistence(city_map, current_timestamp, operation_area_id=N
             if vehicle is not None:
                 loaded.append(vehicle)
     except Exception as exc:
+        log_exception(
+            "api.state.load_fleet_from_persistence",
+            exc,
+            context={"operation_area_id": expected_area_id},
+        )
         print(f"[State.Init] 数据库车辆加载失败，当前车队置为空：{exc}")
         return []
     return loaded
@@ -811,6 +840,15 @@ def init_system(shp_path=None):
                 new_area_records[operation_area_id] = dict(area)
             except Exception as exc:
                 error_text = str(exc)
+                log_exception(
+                    "api.state.init_system.load_operation_area",
+                    exc,
+                    context={
+                        "operation_area_id": operation_area_id,
+                        "operation_area_code": area_code,
+                        "shp_path": area_shp_path,
+                    },
+                )
                 failed_areas.append({
                     "code": area_code,
                     "name": area.get("name"),
@@ -827,6 +865,11 @@ def init_system(shp_path=None):
                         "bounds_json": None,
                     })
                 except Exception as write_exc:
+                    log_exception(
+                        "api.state.init_system.load_writeback",
+                        write_exc,
+                        context={"operation_area_code": area_code, "load_error": error_text},
+                    )
                     print(f"[State.Init] 运营区 {area_code} 加载失败状态写回失败：{write_exc}")
 
         if not new_city_maps:

@@ -745,6 +745,8 @@ class EtaBackgroundTest(unittest.TestCase):
             passenger_count=1,
             city_map=self.city,
             req_time=request_time.timestamp(),
+            origin_node=self.city.b,
+            destination_node=self.city.c,
         )
         self.vehicle.planned_route = [
             {"type": "O", "order": order},

@@ -1,0 +1,21 @@
+========================================================================================
+time: 2026-08-04 17:16:58
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "GET", "path": "/map/road-network", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "status_code": 400, "response_body": "{\"error\":\"\\u7f3a\\u5c11 operation_area_id\",\"operation_area_id\":null}\n"}
+
+========================================================================================
+time: 2026-08-04 17:17:01
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "GET", "path": "/map/road-network", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "status_code": 400, "response_body": "{\"error\":\"\\u7f3a\\u5c11 operation_area_id\",\"operation_area_id\":null}\n"}
+
+========================================================================================
+time: 2026-08-04 17:17:04
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "GET", "path": "/map/road-network", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "status_code": 400, "response_body": "{\"error\":\"\\u7f3a\\u5c11 operation_area_id\",\"operation_area_id\":null}\n"}
+

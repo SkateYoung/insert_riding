@@ -1,0 +1,126 @@
+========================================================================================
+time: 2026-08-05 09:54:01
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:01\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:02
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:02\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:02
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:02\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:03
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:03\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:03
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:03\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:03
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:03\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:04
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:04\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:04
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:04\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:04
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:04\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:14
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_push_unreachable\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:14\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:14
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_push_unreachable\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:14\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:15
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_push_unreachable\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:15\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:15
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_push_unreachable\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:15\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:54:15
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_push_unreachable\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:54:15\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:55:32
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:55:32\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 09:55:33
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 09:55:33\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 10:00:26
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 10:00:26\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+
+========================================================================================
+time: 2026-08-05 10:00:26
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1785834828365-7589/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546143661\", \"received\": false, \"reason\": \"driver_declined\", \"platform_message_id\": \"72057594546143661:demo-manual-1785834828365-7589:grasp:v1:ffa7c3fdff54ae08ed523fa0a4c2744c\", \"occurred_at\": \"2026-08-05 10:00:26\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1785834828365-7589\"}\n"}
+

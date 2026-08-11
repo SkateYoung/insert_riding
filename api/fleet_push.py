@@ -10,6 +10,8 @@ from urllib.parse import quote
 
 import requests
 
+from .error_logger import log_exception
+
 
 DEFAULT_FLEET_PUSH_BASE_URL = "http://127.0.0.1:18080"
 DEFAULT_VEHICLE_NAVIGATION_PATH = "/bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation"
@@ -71,6 +73,8 @@ def _node_snapshot(node):
         return None
     return {
         "id": getattr(node, "id", None),
+        "poi_id": getattr(node, "poi_id", None),
+        "poi_code": getattr(node, "poi_code", None),
         "lon": getattr(node, "lon", None),
         "lat": getattr(node, "lat", None),
         "name": getattr(node, "name", None),
@@ -88,6 +92,10 @@ def _order_snapshot(order):
         "passenger_count": getattr(order, "passenger_count", None),
         "passenger_phone": getattr(order, "passenger_phone", None),
         "passenger_id": getattr(order, "passenger_id", None),
+        "order_source": getattr(order, "order_source", None),
+        "line_code": getattr(order, "line_code", None),
+        "commute_origin_poi_id": getattr(order, "commute_origin_poi_id", None),
+        "commute_destination_poi_id": getattr(order, "commute_destination_poi_id", None),
         "origin": _node_snapshot(getattr(order, "o_node", None)),
         "destination": _node_snapshot(getattr(order, "d_node", None)),
         "request_time": getattr(order, "request_time", None),
@@ -115,6 +123,13 @@ def _route_step_snapshot(step):
     return {
         "type": step_type,
         "request_id": getattr(order, "request_id", None),
+        "order_source": getattr(order, "order_source", None),
+        "line_code": getattr(order, "line_code", None),
+        "target_poi_id": (
+            getattr(order, "commute_origin_poi_id", None)
+            if step_type == "O"
+            else getattr(order, "commute_destination_poi_id", None)
+        ),
         "target_node": _node_snapshot(target),
     }
 
@@ -129,6 +144,10 @@ def vehicle_snapshot(vehicle):
         "driver_id": getattr(vehicle, "driver_id", None),
         "driver_no": getattr(vehicle, "driver_no", None),
         "current_driver_code": getattr(vehicle, "current_driver_code", None),
+        "operation_mode": getattr(vehicle, "operation_mode", None),
+        "operation_area_id": getattr(vehicle, "operation_area_id", None),
+        "commute_line_code": getattr(vehicle, "commute_line_code", None),
+        "commute_route_version": getattr(vehicle, "commute_route_version", None),
         "gps": copy.deepcopy(getattr(vehicle, "gps", {}) or {}),
         "last_node": getattr(vehicle, "last_node", None),
         "next_node": getattr(vehicle, "next_node", None),
@@ -200,6 +219,15 @@ def _post_payload(url, payload, timeout):
         response.raise_for_status()
         return True
     except Exception as exc:
+        log_exception(
+            "api.fleet_push.post_payload",
+            exc,
+            context={
+                "url": url,
+                "vehicle_id": (payload or {}).get("vehicle_id") if isinstance(payload, dict) else None,
+                "request_id": (payload or {}).get("request_id") if isinstance(payload, dict) else None,
+            },
+        )
         print(f"[FleetPush] vehicle navigation push failed: {exc}")
         return False
 
