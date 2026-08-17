@@ -268,6 +268,13 @@ class CityGraph:
                 new_edges.append(e)
         self.edges = new_edges
 
+        # 剔除离岛节点后，同步清理保留节点中指向已删除节点的邻接关系。
+        # 否则 A* 遍历 neighbors 时会访问不存在的 nodes_map[nbr_id]。
+        for node in self.nodes_map.values():
+            stale_neighbors = [nbr_id for nbr_id in node.neighbors if nbr_id not in allowed]
+            for nbr_id in stale_neighbors:
+                del node.neighbors[nbr_id]
+
     def get_path(self, start_node, end_node, restriction_policy=None):
         """A* (A-Star) 全局最短路径推演扫描算子。
         

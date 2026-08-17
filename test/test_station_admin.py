@@ -61,6 +61,7 @@ class StationAdminApiTest(unittest.TestCase):
                 "id": 1,
                 "operation_area_id": payload["operation_area_id"],
                 "station_name": payload["station_name"],
+                "station_direction": payload["station_direction"],
                 "lon": payload["lon"],
                 "lat": payload["lat"],
             }
@@ -71,12 +72,16 @@ class StationAdminApiTest(unittest.TestCase):
                 {
                     "operation_area_id": 10001,
                     "station_name": "大学城北门",
+                    "area": "大学城外环西路",
+                    "station_direction": "东-西",
                     "lon": 113.12345678,
                     "lat": 23.12345678,
                 },
                 {
                     "operation_area_id": 10001,
                     "station_name": "重复站点",
+                    "area": "大学城外环西路",
+                    "station_direction": "东-西",
                     "lon": 113.12345678,
                     "lat": 23.12345678,
                 },
@@ -90,18 +95,36 @@ class StationAdminApiTest(unittest.TestCase):
         self.assertEqual(data["results"][1]["code"], "station_coordinate_exists")
         self.assertTrue(data["runtime_refresh"]["refreshed"])
 
-    def test_create_station_rejects_coordinate_outside_operation_area(self):
+    def test_create_station_allows_coordinate_outside_operation_area(self):
+        created = []
+
+        def fake_create_station(payload):
+            created.append(payload)
+            return {
+                "id": 2,
+                "operation_area_id": payload["operation_area_id"],
+                "station_name": payload["station_name"],
+                "station_direction": payload["station_direction"],
+                "lon": payload["lon"],
+                "lat": payload["lat"],
+            }
+
+        persistence.create_station = fake_create_station
         response = self.client.post("/admin/stations", json={
             "operation_area_id": 10001,
             "station_name": "outside",
+            "area": "测试道路",
+            "station_direction": "东-西",
             "lon": 120.0,
             "lat": 30.0,
         })
 
         data = response.get_json()
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(data["failure_count"], 1)
-        self.assertEqual(data["results"][0]["code"], "station_coordinate_outside_operation_area")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(data["success_count"], 1)
+        self.assertEqual(data["failure_count"], 0)
+        self.assertEqual(created[0]["lon"], 120.0)
+        self.assertEqual(created[0]["lat"], 30.0)
 
     def test_create_station_requires_station_name(self):
         response = self.client.post("/admin/stations", json={
@@ -114,6 +137,20 @@ class StationAdminApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(data["failure_count"], 1)
         self.assertEqual(data["results"][0]["code"], "station_name_required")
+
+    def test_create_station_requires_station_direction(self):
+        response = self.client.post("/admin/stations", json={
+            "operation_area_id": 10001,
+            "station_name": "missing direction",
+            "area": "测试道路",
+            "lon": 113.12345678,
+            "lat": 23.12345678,
+        })
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(data["failure_count"], 1)
+        self.assertEqual(data["results"][0]["code"], "station_direction_required")
 
     def test_delete_station_by_coordinate_not_found(self):
         persistence.delete_station_by_coordinate = lambda lon, lat, operation_area_id=None: None

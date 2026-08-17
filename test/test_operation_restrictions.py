@@ -126,6 +126,37 @@ class OperationRestrictionAStarTest(unittest.TestCase):
         self.assertEqual(dist, float("inf"))
         self.assertEqual(path, [])
 
+    def test_largest_component_prunes_stale_neighbor_references(self):
+        graph = CityGraph.__new__(CityGraph)
+        orphan = Node("orphan", 113.300000, 23.100000)
+        a = Node("A", 113.000000, 23.000000)
+        b = Node("B", 113.001000, 23.000000)
+        c = Node("C", 113.002000, 23.000000)
+
+        orphan.neighbors = {}
+        a.neighbors = {"B": 1.0, "orphan": 1.0}
+        b.neighbors = {"A": 1.0, "C": 1.0}
+        c.neighbors = {"B": 1.0}
+        graph.nodes_map = {
+            "orphan": orphan,
+            "A": a,
+            "B": b,
+            "C": c,
+        }
+        graph.edges = [
+            {"u": "A", "v": "B", "dist": 1.0},
+            {"u": "B", "v": "A", "dist": 1.0},
+            {"u": "B", "v": "C", "dist": 1.0},
+            {"u": "C", "v": "B", "dist": 1.0},
+            {"u": "A", "v": "orphan", "dist": 1.0},
+        ]
+
+        graph._keep_largest_connected_component()
+
+        self.assertNotIn("orphan", graph.nodes_map)
+        self.assertNotIn("orphan", graph.nodes_map["A"].neighbors)
+        self.assertTrue(all(edge["u"] != "orphan" and edge["v"] != "orphan" for edge in graph.edges))
+
 
 class FakePlanner(AmapDrivingRoutePlanner):
     def __init__(self):

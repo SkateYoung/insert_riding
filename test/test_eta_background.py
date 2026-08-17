@@ -846,7 +846,7 @@ class EtaBackgroundTest(unittest.TestCase):
             {"type": "D", "order": order},
         ]
         mark_vehicle_grasp_ready(self.vehicle, self.city)
-        self.vehicle.gps = {"lon": self.city.b.lon, "lat": self.city.b.lat}
+        self.vehicle.gps = {"lon": self.city.b.lon + 0.01, "lat": self.city.b.lat + 0.01}
 
         original_record_vehicle_route = persistence.record_vehicle_route
         original_record_vehicle_runtime = persistence.record_vehicle_runtime
@@ -859,7 +859,7 @@ class EtaBackgroundTest(unittest.TestCase):
                 self.vehicle,
                 "pickup",
                 request_id=order.request_id,
-                distance_threshold_m=30.0,
+                distance_threshold_m=0.0,
                 current_timestamp=1000.0,
             )
         finally:
@@ -869,6 +869,7 @@ class EtaBackgroundTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["event"]["action"], "pickup")
+        self.assertGreater(result["event"]["distance_to_target"], 0)
         self.assertEqual(order.status, "riding")
         self.assertEqual([step["type"] for step in self.vehicle.planned_route], ["D"])
         self.assertEqual([segment["type"] for segment in self.vehicle.planned_route_segment_raw_point], ["D"])
@@ -1183,6 +1184,37 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(result["segments"][1]["points"][0], result["segments"][0]["points"][-1])
         self.assertTrue(result["segments"][1]["grasp"]["overlap_with_previous_stop"])
 
+    def test_repeated_short_segment_trim_uses_fixed_source(self):
+        shared_stop = {"id": self.city.b.id, "lon": self.city.b.lon, "lat": self.city.b.lat}
+        raw_segments = [
+            {
+                "index": 0,
+                "type": "D",
+                "request_id": "order-b",
+                "target_node": shared_stop,
+                "points": [shared_stop],
+            }
+        ]
+        previous_segments = [
+            {
+                "index": 0,
+                "type": "D",
+                "request_id": "order-b",
+                "target_node": shared_stop,
+                "points": [shared_stop],
+                "source": "overlap_stop_same_point",
+                "grasp": {"ok": True, "reason": "overlap_stop_same_point"},
+            }
+        ]
+
+        first_trim = CoreDispatcher._trim_grasped_segments_to_position(previous_segments, raw_segments)
+        second_trim = CoreDispatcher._trim_grasped_segments_to_position(first_trim, raw_segments)
+
+        self.assertEqual(first_trim[0]["source"], "short_segment_trimmed")
+        self.assertEqual(second_trim[0]["source"], "short_segment_trimmed")
+        self.assertNotIn("trimmed_trimmed", second_trim[0]["source"])
+        self.assertTrue(second_trim[0]["grasp"]["trimmed_from_previous"])
+
     def test_gps_update_trims_existing_grasped_route_without_pending(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
@@ -1233,7 +1265,8 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertNotEqual(self.vehicle.planned_route_grasped_point[0]["lat"], current["lat"])
         self.assertTrue(self.vehicle.planned_route_grasped_point[0]["is_grasp_projection"])
         self.assertLess(len(self.vehicle.planned_route_grasped_point), 4)
-        self.assertIn("trimmed", self.vehicle.planned_route_segment_grasped_point[0]["source"])
+        self.assertEqual(self.vehicle.planned_route_segment_grasped_point[0]["source"], "driving_plan_trimmed")
+        self.assertNotIn("trimmed_trimmed", self.vehicle.planned_route_segment_grasped_point[0]["source"])
         self.assertEqual(runtime_records, [self.vehicle])
 
     def test_pending_grasp_route_does_not_build_eta_job(self):

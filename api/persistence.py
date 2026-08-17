@@ -2481,6 +2481,7 @@ class MySqlPersistence:
         payload = copy.deepcopy(station or {})
         operation_area_id = _int_or_none(payload.get("operation_area_id"))
         station_name = str(payload.get("station_name") or payload.get("poi_name") or "").strip()
+        station_direction = str(payload.get("station_direction") or "").strip()
         lon = self._station_decimal_coordinate(payload.get("longitude", payload.get("lon", payload.get("lng"))))
         lat = self._station_decimal_coordinate(payload.get("latitude", payload.get("lat")))
         connection = None
@@ -2526,13 +2527,13 @@ class MySqlPersistence:
                     station_name,
                     str(payload.get("poi_type") or "pickup_dropoff").strip(),
                     str(payload.get("station_type") or "").strip() or None,
-                    str(payload.get("station_direction") or "").strip() or None,
+                    station_direction or None,
                     _int_or_none(payload.get("direction_angle")),
                     lon,
                     lat,
                     str(payload.get("zone") or "").strip() or None,
                     str(payload.get("address") or "").strip() or None,
-                    str(payload.get("areas") or "").strip() or None,
+                    str(payload.get("areas") or payload.get("area") or "").strip() or None,
                     _int_or_none(payload.get("dept_id")),
                     str(payload.get("org_code") or "").strip() or None,
                     str(payload.get("status") or "enabled").strip() or "enabled",

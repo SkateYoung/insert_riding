@@ -5,6 +5,7 @@
 
 import copy
 import hashlib
+import math
 import os
 import threading
 import time
@@ -35,6 +36,38 @@ class CoreDispatcher:
     MAX_EARLY_PICKUP_WAIT_SECONDS = 3 * 60
     EARLY_PICKUP_WAIT_COST_PER_MIN = 2.0
     LATE_PICKUP_COST_PER_MIN = 8.0
+
+    # 路线成本函数运行时配置：平台可通过接口调整，修改后仅影响后续新一轮派单/插单评估。
+    ROUTE_COST_CONFIG_DEFAULTS = {
+        "W_PASSENGER": 0.4,
+        "W_ENTERPRISE": 0.20,
+        "W_SOCIAL": 0.20,
+        "W_FAIRNESS": 0.05,
+        "WAIT_COST_PER_MIN": 4.0,
+        "IN_CAR_COST_PER_MIN": 3.0,
+        "LATE_ARRIVAL_COST_PER_MIN": 1.0,
+        "OLD_DELAY_COST_PER_MIN": 4.0,
+        "SEVERE_OLD_DELAY_PENALTY": 30.0,
+        "MILEAGE_UTIL_PENALTY_BASE": 25.0,
+        "LOAD_RATE_PENALTY_BASE": 20.0,
+        "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
+    }
+    ROUTE_COST_CONFIG_DESCRIPTIONS = {
+        "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
+        "W_ENTERPRISE": "企业效益总权重，影响里程利用率和满载率成本的整体占比。",
+        "W_SOCIAL": "社会效益总权重，影响总行驶里程代理成本的整体占比。",
+        "W_FAIRNESS": "平台公平总权重，当前公平成本预留为 0。",
+        "WAIT_COST_PER_MIN": "乘客候车每分钟成本，调大后更倾向于缩短接客等待。",
+        "IN_CAR_COST_PER_MIN": "乘客在车每分钟成本，调大后更不愿意让乘客绕路。",
+        "LATE_ARRIVAL_COST_PER_MIN": "乘客晚于最大送达时间后的每分钟成本。",
+        "OLD_DELAY_COST_PER_MIN": "插单导致车上原有乘客延误的每分钟成本。",
+        "SEVERE_OLD_DELAY_PENALTY": "原有乘客延误超过严重阈值后的固定追加惩罚。",
+        "MILEAGE_UTIL_PENALTY_BASE": "里程利用率惩罚基数，调大后更偏向减少空驶。",
+        "LOAD_RATE_PENALTY_BASE": "满载率惩罚基数，调大后更偏向提高座位利用率。",
+        "SOCIAL_DISTANCE_COST_PER_KM": "每公里道路资源/碳排放代理成本。",
+    }
+    route_cost_config = copy.deepcopy(ROUTE_COST_CONFIG_DEFAULTS)
+    route_cost_config_lock = threading.RLock()
     
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
     completed_orders_pool = []
@@ -229,6 +262,52 @@ class CoreDispatcher:
             cls.ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS = lead
             cls.ORDER_MATCH_DISPATCH_LEAD_SECONDS = lead
         return cls.matching_window_config()
+
+    @classmethod
+    def route_cost_config_snapshot(cls):
+        """返回路线成本函数运行时配置快照。"""
+        with cls.route_cost_config_lock:
+            return copy.deepcopy(cls.route_cost_config)
+
+    @classmethod
+    def route_cost_config_response(cls):
+        """返回路线成本配置接口响应结构。"""
+        config = cls.route_cost_config_snapshot()
+        weight_total = sum(float(config.get(key) or 0.0) for key in ("W_PASSENGER", "W_ENTERPRISE", "W_SOCIAL", "W_FAIRNESS"))
+        return {
+            "config": config,
+            "defaults": copy.deepcopy(cls.ROUTE_COST_CONFIG_DEFAULTS),
+            "descriptions": copy.deepcopy(cls.ROUTE_COST_CONFIG_DESCRIPTIONS),
+            "weight_total": weight_total,
+            "runtime_only": True,
+        }
+
+    @classmethod
+    def configure_route_cost(cls, **updates):
+        """运行时更新路线成本函数配置。"""
+        unknown_fields = [key for key in updates if key not in cls.ROUTE_COST_CONFIG_DEFAULTS]
+        if unknown_fields:
+            raise ValueError(f"不支持的路线成本参数: {', '.join(sorted(unknown_fields))}")
+
+        normalized = {}
+        for key, value in updates.items():
+            if value in (None, ""):
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必须是数字") from exc
+            if not math.isfinite(parsed):
+                raise ValueError(f"{key} 必须是有限数字")
+            if parsed < 0:
+                raise ValueError(f"{key} 必须大于或等于 0")
+            normalized[key] = parsed
+
+        with cls.route_cost_config_lock:
+            next_config = copy.deepcopy(cls.route_cost_config)
+            next_config.update(normalized)
+            cls.route_cost_config = next_config
+        return cls.route_cost_config_response()
 
     @staticmethod
     def _mark_fleet_push_pending(vehicle, event=None):
@@ -481,25 +560,27 @@ class CoreDispatcher:
 
         # ===== 综合多目标成本函数架构 =====
         
-        # 1. 权重定义 (严格按照需求配比)
-        W_PASSENGER = 0.40  # 乘客体验 (候车时间、绕行系数、时间窗满意度)
-        W_ENTERPRISE = 0.30 # 企业效益 (满载率、单车收入、里程利用率)
-        W_SOCIAL = 0.20     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
-        W_FAIRNESS = 0.10   # 平台公平 (企业间订单分配基尼系数)
+        # 1. 权重定义：从运行时配置读取快照，避免平台更新时单次评估前后参数不一致。
+        route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+        W_PASSENGER = route_cost_config["W_PASSENGER"]  # 乘客体验 (候车时间、绕行系数、时间窗满意度)
+        W_ENTERPRISE = route_cost_config["W_ENTERPRISE"] # 企业效益 (满载率、单车收入、里程利用率)
+        W_SOCIAL = route_cost_config["W_SOCIAL"]     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
+        W_FAIRNESS = route_cost_config["W_FAIRNESS"]   # 平台公平 (企业间订单分配基尼系数)
 
         # 成本统一在分钟、公里和比例维度上计算，避免秒和米的原始尺度压制其他指标。
-        SECONDS_PER_MINUTE = 60.0
-        METERS_PER_KM = 1000.0
-        WAIT_COST_PER_MIN = 4.0
-        IN_CAR_COST_PER_MIN = 3.0
-        EARLY_PICKUP_WAIT_COST_PER_MIN = CoreDispatcher.EARLY_PICKUP_WAIT_COST_PER_MIN
-        LATE_PICKUP_COST_PER_MIN = CoreDispatcher.LATE_PICKUP_COST_PER_MIN
-        LATE_ARRIVAL_COST_PER_MIN = 1.0
-        OLD_DELAY_COST_PER_MIN = 3.0
-        SEVERE_OLD_DELAY_PENALTY = 25.0
-        MILEAGE_UTIL_PENALTY_BASE = 30.0
-        LOAD_RATE_PENALTY_BASE = 20.0
-        SOCIAL_DISTANCE_COST_PER_KM = 1.0
+        SECONDS_PER_MINUTE = 60.0  # 时间换算基准：把秒转换为分钟，所有按分钟计费/惩罚的成本都依赖该值。
+        METERS_PER_KM = 1000.0  # 距离换算基准：把米转换为公里，用于里程、社会成本等公里级成本计算。
+
+        WAIT_COST_PER_MIN = route_cost_config["WAIT_COST_PER_MIN"]  # 乘客候车成本：每多等 1 分钟增加的成本；调大后系统更倾向于缩短接客等待时间。
+        IN_CAR_COST_PER_MIN = route_cost_config["IN_CAR_COST_PER_MIN"]  # 乘客在车成本：每多坐车 1 分钟增加的成本；调大后系统更不愿意让乘客绕路。
+        EARLY_PICKUP_WAIT_COST_PER_MIN = CoreDispatcher.EARLY_PICKUP_WAIT_COST_PER_MIN  # 车辆早到等待成本：早于期望上车时间时每等待 1 分钟的成本。
+        LATE_PICKUP_COST_PER_MIN = CoreDispatcher.LATE_PICKUP_COST_PER_MIN  # 乘客晚接成本：晚于期望最晚上车时间后每延迟 1 分钟的成本。
+        LATE_ARRIVAL_COST_PER_MIN = route_cost_config["LATE_ARRIVAL_COST_PER_MIN"]  # 乘客晚到成本：晚于订单最大送达时间后每延迟 1 分钟的成本；调大后会更重视准时送达。
+        OLD_DELAY_COST_PER_MIN = route_cost_config["OLD_DELAY_COST_PER_MIN"]  # 老乘客绕路延误成本：插入新单导致车上原有乘客每多延误 1 分钟的成本。
+        SEVERE_OLD_DELAY_PENALTY = route_cost_config["SEVERE_OLD_DELAY_PENALTY"]  # 老乘客严重延误惩罚：当原有乘客延误超过阈值时追加的固定惩罚。
+        MILEAGE_UTIL_PENALTY_BASE = route_cost_config["MILEAGE_UTIL_PENALTY_BASE"]  # 里程利用率惩罚基数：空驶占比越高成本越大；调大后更倾向于提升载客里程占比。
+        LOAD_RATE_PENALTY_BASE = route_cost_config["LOAD_RATE_PENALTY_BASE"]  # 满载率惩罚基数：车辆载客率越低成本越大；调大后更倾向于拼单提高座位利用率。
+        SOCIAL_DISTANCE_COST_PER_KM = route_cost_config["SOCIAL_DISTANCE_COST_PER_KM"]  # 社会里程成本：车辆每行驶 1 公里增加的道路资源/碳排放代理成本。
         
         # ---------------------------------------------------------
         # 维度 A: 乘客体验成本 (Passenger Cost)
@@ -3142,7 +3223,7 @@ class CoreDispatcher:
                 previous = previous_by_key.get(CoreDispatcher._route_segment_key(raw_segment))
                 if previous is not None:
                     segment = copy.deepcopy(previous)
-                    segment["source"] = f"{previous.get('source', 'short_segment_skip_grasp')}_trimmed"
+                    segment["source"] = "short_segment_trimmed"
                     segment_grasp = copy.deepcopy(previous.get("grasp") or {})
                     segment_grasp["trimmed_from_previous"] = True
                     segment["grasp"] = segment_grasp
@@ -4031,7 +4112,7 @@ class CoreDispatcher:
             request_id (str | None): 可选订单号；为空时使用当前下一步。
             lon (float | None): 可选确认位置经度；为空时使用车辆当前 GPS。
             lat (float | None): 可选确认位置纬度；为空时使用车辆当前 GPS。
-            distance_threshold_m (float): 允许确认的最大距离，单位米。
+            distance_threshold_m (float): 兼容旧请求字段，不再用于拦截上下客确认。
             current_timestamp (float | None): 事件业务时间。
 
         Returns:
@@ -4092,24 +4173,14 @@ class CoreDispatcher:
         try:
             check_lon = float(check_lon)
             check_lat = float(check_lat)
-            distance_threshold_m = float(distance_threshold_m)
         except (TypeError, ValueError):
-            return {"ok": False, "status_code": 400, "error": "确认位置和距离阈值必须是数字"}
-        distance_threshold_m = max(0.0, distance_threshold_m)
+            return {"ok": False, "status_code": 400, "error": "确认位置必须是数字"}
         distance_to_target = AuxiliaryFunctions.haversine_distance(
             check_lon,
             check_lat,
             target_node.lon,
             target_node.lat,
         )
-        if distance_to_target > distance_threshold_m:
-            return {
-                "ok": False,
-                "status_code": 409,
-                "error": "车辆距离当前上下客点过远",
-                "distance_to_target": distance_to_target,
-                "distance_threshold_m": distance_threshold_m,
-            }
 
         vehicle.planned_route.pop(0)
         event = CoreDispatcher._apply_reached_route_step(

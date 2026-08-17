@@ -9,7 +9,7 @@ import time
 import random
 from datetime import datetime, timedelta, timezone
 
-from . import persistence
+from . import persistence, reflect_mapping
 from .error_logger import log_exception
 from .models import CityGraph, Vehicle
 from .core import CoreDispatcher
@@ -533,6 +533,90 @@ def _nearest_node_from_coords(city_map, lon, lat):
     return best_node
 
 
+def _node_id_from_coords(lon, lat):
+    """按 CityGraph 节点规则生成经纬度节点 ID。"""
+    return f"{float(lon):.6f}_{float(lat):.6f}"
+
+
+def _node_from_reflect_coords(city_map, lon, lat, tolerance=0.0000015):
+    """按 reflect 映射坐标查找当前路网中已有节点。"""
+    nodes_map = getattr(city_map, "nodes_map", {}) or {}
+    try:
+        node_id = _node_id_from_coords(lon, lat)
+        lon_value = float(lon)
+        lat_value = float(lat)
+    except (TypeError, ValueError):
+        return None
+
+    direct_node = nodes_map.get(node_id)
+    if direct_node is not None:
+        return direct_node
+
+    best_node = None
+    best_dist = float(tolerance) * float(tolerance)
+    for node in nodes_map.values():
+        dx = lon_value - float(node.lon)
+        dy = lat_value - float(node.lat)
+        dist = dx * dx + dy * dy
+        if dist <= best_dist:
+            best_dist = dist
+            best_node = node
+    return best_node
+
+
+def _runtime_node_for_poi_record(city_map, record, reflect_index):
+    """优先使用 reflect 映射选择 POI 路网节点，失败时回退原始坐标吸附。"""
+    lon = record.get("longitude")
+    lat = record.get("latitude")
+    if lon is None or lat is None:
+        return None, None
+
+    reflect_record = reflect_mapping.find_reflect_station(
+        reflect_index,
+        record.get("poi_name"),
+        record.get("areas"),
+        record.get("station_direction"),
+    )
+    if reflect_record is not None:
+        reflect_node = _node_from_reflect_coords(
+            city_map,
+            reflect_record.get("gd_lng"),
+            reflect_record.get("gd_lat"),
+        )
+        reflect_snap_mode = "existing_node"
+        if reflect_node is None:
+            reflect_node = _nearest_node_from_coords(
+                city_map,
+                reflect_record.get("gd_lng"),
+                reflect_record.get("gd_lat"),
+            )
+            reflect_snap_mode = "nearest_node"
+        if reflect_node is not None:
+            metadata = {
+                "poi_snap_source": "reflect_csv" if reflect_snap_mode == "existing_node" else "reflect_csv_nearest_node",
+                "reflect_snap_mode": reflect_snap_mode,
+                "reflect_station_name": reflect_record.get("station_name"),
+                "reflect_road_name": reflect_record.get("road_name"),
+                "reflect_direction": reflect_record.get("direction"),
+                "reflect_lng": reflect_record.get("gd_lng"),
+                "reflect_lat": reflect_record.get("gd_lat"),
+            }
+            return reflect_node, metadata
+
+    fallback_node = _nearest_node_from_coords(city_map, lon, lat)
+    if fallback_node is None:
+        return None, None
+    return fallback_node, {
+        "poi_snap_source": "nearest_node",
+        "reflect_snap_mode": None,
+        "reflect_station_name": None,
+        "reflect_road_name": None,
+        "reflect_direction": None,
+        "reflect_lng": None,
+        "reflect_lat": None,
+    }
+
+
 def _random_poi_node(city_map):
     """从当前路网 POI 中随机选择一个车辆起始节点。"""
     pois = list(getattr(city_map, "pois", []) or [])
@@ -570,6 +654,17 @@ def _apply_database_pois(city_map, operation_area):
 
     for node in getattr(city_map, "pois", []) or []:
         node.is_poi = False
+        node.poi_code = None
+        node.station_id = None
+        node.operation_area_id = None
+        node.operation_area_code = None
+        node.poi_snap_source = None
+        node.reflect_snap_mode = None
+        node.reflect_station_name = None
+        node.reflect_road_name = None
+        node.reflect_direction = None
+        node.reflect_lng = None
+        node.reflect_lat = None
     city_map.pois = []
 
     if not operation_area_ids:
@@ -592,14 +687,12 @@ def _apply_database_pois(city_map, operation_area):
     if not poi_records:
         return 0
 
+    reflect_index = reflect_mapping.load_reflect_station_index()
     snapped = []
+    mapping_results = []
     seen_ids = set()
     for record in poi_records:
-        lon = record.get("longitude")
-        lat = record.get("latitude")
-        if lon is None or lat is None:
-            continue
-        node = _nearest_node_from_coords(city_map, lon, lat)
+        node, snap_metadata = _runtime_node_for_poi_record(city_map, record, reflect_index)
         if node is None or node.id in seen_ids:
             continue
         node.is_poi = True
@@ -608,10 +701,51 @@ def _apply_database_pois(city_map, operation_area):
         node.poi_code = record.get("poi_code")
         node.operation_area_id = record.get("operation_area_id")
         node.operation_area_code = operation_area_code
+        for key, value in (snap_metadata or {}).items():
+            setattr(node, key, value)
         snapped.append(node)
         seen_ids.add(node.id)
+        mapping_results.append({
+            "poi_code": record.get("poi_code"),
+            "poi_name": record.get("poi_name") or record.get("station_name"),
+            "areas": record.get("areas"),
+            "station_direction": record.get("station_direction"),
+            "database_lng": record.get("longitude"),
+            "database_lat": record.get("latitude"),
+            "snap_source": getattr(node, "poi_snap_source", None),
+            "reflect_snap_mode": getattr(node, "reflect_snap_mode", None),
+            "reflect_direction": getattr(node, "reflect_direction", None),
+            "reflect_lng": getattr(node, "reflect_lng", None),
+            "reflect_lat": getattr(node, "reflect_lat", None),
+            "snapped_node_id": node.id,
+            "snapped_lng": node.lon,
+            "snapped_lat": node.lat,
+        })
+    city_map.poi_mapping_results = mapping_results
     if snapped:
         city_map.pois = snapped
+    source_counts = {}
+    for item in mapping_results:
+        source = item.get("snap_source") or "unknown"
+        source_counts[source] = source_counts.get(source, 0) + 1
+        print(
+            "[State.POIMap] "
+            f"area={operation_area_code or operation_area_ids} "
+            f"poi={item.get('poi_name') or item.get('poi_code')} "
+            f"road={item.get('areas')} "
+            f"direction={item.get('station_direction')} "
+            f"source={item.get('snap_source')} "
+            f"mode={item.get('reflect_snap_mode')} "
+            f"reflect_direction={item.get('reflect_direction')} "
+            f"db=({item.get('database_lng')},{item.get('database_lat')}) "
+            f"reflect=({item.get('reflect_lng')},{item.get('reflect_lat')}) "
+            f"node={item.get('snapped_node_id')} "
+            f"node_coord=({item.get('snapped_lng')},{item.get('snapped_lat')})"
+        )
+    print(
+        f"[State.POIMap] 运营区 {operation_area_code or operation_area_ids} "
+        f"POI 映射完成：loaded={len(snapped)}, source_counts={source_counts}"
+    )
     return len(snapped)
 
 

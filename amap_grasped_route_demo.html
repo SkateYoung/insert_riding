@@ -605,6 +605,14 @@
                         <input id="stationNameInput" placeholder="新增站点必填">
                     </div>
                     <div class="field">
+                        <label for="stationAreaNameInput">道路/区域名称</label>
+                        <input id="stationAreaNameInput" placeholder="新增站点必填，写入 map_poi.areas">
+                    </div>
+                    <div class="field">
+                        <label for="stationDirectionInput">站点方向</label>
+                        <input id="stationDirectionInput" placeholder="新增站点必填，对应 Calc_Dir">
+                    </div>
+                    <div class="field">
                         <label for="stationLonInput">经度</label>
                         <input id="stationLonInput" type="number" step="0.00000001" placeholder="113.12345678">
                     </div>
@@ -628,7 +636,7 @@
                 </div>
                 <div class="field">
                     <label for="stationBatchInput">批量 JSON</label>
-                    <textarea id="stationBatchInput" class="json-input" placeholder='[{"operation_area_id":10001,"station_name":"大学城北门","lon":113.12345678,"lat":23.12345678}]'></textarea>
+                    <textarea id="stationBatchInput" class="json-input" placeholder='[{"operation_area_id":10001,"station_name":"大学城北门","area":"大学城外环西路","station_direction":"东-西","lon":113.12345678,"lat":23.12345678}]'></textarea>
                 </div>
                 <div class="compact-actions">
                     <button id="createStationBatchBtn" type="button">批量新增站点</button>
@@ -1212,6 +1220,8 @@
         const operationAreaTableBody = document.getElementById("operationAreaTableBody");
         const stationAreaSelect = document.getElementById("stationAreaSelect");
         const stationNameInput = document.getElementById("stationNameInput");
+        const stationAreaNameInput = document.getElementById("stationAreaNameInput");
+        const stationDirectionInput = document.getElementById("stationDirectionInput");
         const stationLonInput = document.getElementById("stationLonInput");
         const stationLatInput = document.getElementById("stationLatInput");
         const stationCodeInput = document.getElementById("stationCodeInput");
@@ -1562,6 +1572,8 @@
             routeAreaSelect.disabled = isBusy;
             stationAreaSelect.disabled = isBusy;
             stationNameInput.disabled = isBusy;
+            stationAreaNameInput.disabled = isBusy;
+            stationDirectionInput.disabled = isBusy;
             stationLonInput.disabled = isBusy;
             stationLatInput.disabled = isBusy;
             stationCodeInput.disabled = isBusy;
@@ -2010,7 +2022,7 @@
             return ` style="${styles.join(";")}"`;
         }
 
-        function addMarker(point, label, color, className = "", targetLayers = layers, counts = markerPositionCounts, onClick = null, title = "") {
+        function addMarker(point, label, color, className = "", targetLayers = layers, counts = markerPositionCounts, onClick = null, title = "", markerOptions = {}) {
             const normalized = normalizePoint(point);
             if (!normalized) {
                 return null;
@@ -2021,7 +2033,8 @@
                 position: [normalized.lon, normalized.lat],
                 offset: new AMap.Pixel(0, 0),
                 content: `<div class="map-marker ${className}"${style}>${escapeHtml(label)}</div>`,
-                zIndex: 120 + placement.index,
+                zIndex: markerOptions.zIndex ?? (120 + placement.index),
+                topWhenClick: markerOptions.topWhenClick ?? true,
                 title: title || String(label ?? "")
             });
             if (typeof onClick === "function") {
@@ -2578,9 +2591,19 @@
             if (!stationName) {
                 throw new Error("请填写站点名称");
             }
+            const area = stationAreaNameInput.value.trim();
+            if (!area) {
+                throw new Error("请填写道路/区域名称");
+            }
+            const stationDirection = stationDirectionInput.value.trim();
+            if (!stationDirection) {
+                throw new Error("请填写站点方向");
+            }
             const payload = {
                 operation_area_id: operationAreaId,
                 station_name: stationName,
+                area,
+                station_direction: stationDirection,
                 ...stationPointPayload()
             };
             if (stationCodeInput.value.trim()) {
@@ -3756,10 +3779,10 @@
             fillDynamicOrderPoint(dynamicOrderPickTarget, poi, index);
         }
 
-        function drawRoutePoiMarkers() {
+        function drawRoutePoiMarkers(options = {}) {
             clearRoutePoiMarkers();
-            if (!isRouteTabActive() || !cachedPois || !cachedPois.length) {
-                return;
+            if ((!isRouteTabActive() && !options.force) || !cachedPois || !cachedPois.length) {
+                return 0;
             }
             for (const [index, poi] of cachedPois.entries()) {
                 const point = dynamicPoiPoint(poi);
@@ -3774,12 +3797,17 @@
                     routePoiLayers,
                     routePoiMarkerPositionCounts,
                     () => handleDynamicOrderStationMarkerClick(poi, index),
-                    dynamicPoiName(poi, index)
+                    dynamicPoiName(poi, index),
+                    { zIndex: 900 + index, topWhenClick: true }
                 );
             }
+            if (options.fitView && routePoiLayers.length) {
+                map.setFitView(routePoiLayers, false, [60, 60, 60, 420], 16);
+            }
+            return routePoiLayers.length;
         }
 
-        async function loadDynamicOrderPois(message) {
+        async function loadDynamicOrderPois(message, options = {}) {
             const operationAreaId = requireOperationAreaId();
             const data = await apiJson(`/pois?operation_area_id=${encodeURIComponent(operationAreaId)}`);
             cachedPois = (data.pois || [])
@@ -3789,9 +3817,12 @@
                 })
                 .filter(Boolean);
             routePoisLoadedAreaId = String(operationAreaId);
-            drawRoutePoiMarkers();
+            const drawnCount = drawRoutePoiMarkers({
+                fitView: Boolean(options.fitView),
+                force: options.force !== false
+            });
             dynamicOrderInfo.textContent = cachedPois.length
-                ? `已显示 ${cachedPois.length} 个运营区站点。点选起点或终点后，点击地图站点图标即可填入坐标。`
+                ? `已加载 ${cachedPois.length} 个运营区站点，地图已绘制 ${drawnCount} 个。点选起点或终点后，点击地图站点图标即可填入坐标。`
                 : "当前运营区暂无可用站点。";
             if (message) {
                 setStatus(message);
@@ -4877,7 +4908,7 @@
         reloadDynamicPoisBtn.addEventListener("click", async () => {
             setBusy(true);
             try {
-                await loadDynamicOrderPois("动态公交站点已刷新。");
+                await loadDynamicOrderPois("动态公交站点已刷新。", { fitView: true });
             } catch (error) {
                 setStatus(`刷新动态公交站点失败：${error.message}`);
             } finally {
@@ -4892,7 +4923,7 @@
             }
             setBusy(true);
             try {
-                await loadDynamicOrderPois();
+                await loadDynamicOrderPois(null, { fitView: true });
                 setRouteGpsPickMode(false);
                 setStationPickMode(false);
                 setCommutePointTarget(null);
@@ -4914,7 +4945,7 @@
             }
             setBusy(true);
             try {
-                await loadDynamicOrderPois();
+                await loadDynamicOrderPois(null, { fitView: true });
                 setRouteGpsPickMode(false);
                 setStationPickMode(false);
                 setCommutePointTarget(null);
@@ -4969,7 +5000,7 @@
             }
             try {
                 await loadFleet();
-                await loadDynamicOrderPois().catch(error => {
+                await loadDynamicOrderPois(null, { fitView: true }).catch(error => {
                     cachedPois = [];
                     routePoisLoadedAreaId = "";
                     clearRoutePoiMarkers();
@@ -5481,7 +5512,7 @@
         resetManualPickupTimeWindow();
         loadOperationAreas().then(async () => {
             await loadFleet();
-            await loadDynamicOrderPois().catch(error => {
+            await loadDynamicOrderPois(null, { fitView: true }).catch(error => {
                 cachedPois = [];
                 routePoisLoadedAreaId = "";
                 clearRoutePoiMarkers();

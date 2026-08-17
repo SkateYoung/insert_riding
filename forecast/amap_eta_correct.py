@@ -26,7 +26,7 @@ from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 
 ROOT_DIR = Path(__file__).resolve().parent
-DEFAULT_AMAP_KEY = "da290eeed6705c6c3f9621654d23bca6"
+DEFAULT_AMAP_KEY = "00c35fbeab3953e19656422ef6d4107f"
 DEFAULT_SPEED_MPS = 16.666666666666668
 MAX_GRASP_POINTS = 500
 MAX_DRIVING_WAYPOINTS = 16

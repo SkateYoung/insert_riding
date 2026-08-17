@@ -141,10 +141,12 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
     def setUp(self):
         CoreDispatcher.order_pool.clear()
         self._matching_window_config = CoreDispatcher.matching_window_config()
+        self._route_cost_config = CoreDispatcher.route_cost_config_snapshot()
 
     def tearDown(self):
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.configure_matching_window(**self._matching_window_config)
+        CoreDispatcher.configure_route_cost(**self._route_cost_config)
 
     def _run_one_pool_loop(self, fleet, city):
         with mock.patch("api.core.time.sleep", side_effect=_StopPoolLoop), \
@@ -187,7 +189,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             ("V", "O"): _seconds_distance(1500),
             ("O", "D"): _seconds_distance(300),
         })
-        vehicle = _fake_vehicle("V1", "V", base_ts + 5401)
+        vehicle = _fake_vehicle("V1", "V", base_ts + 5521)
         order = _fake_order(city, "FUTURE_READY", "O", "D", base_ts, 7200, 7800)
         CoreDispatcher.order_pool.append(order)
 
@@ -199,7 +201,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
     def test_near_future_order_matches_immediately_when_not_far_reservation(self):
         base_ts = 1_000_000.0
         city = _TinyCity({
-            ("V", "O"): _seconds_distance(2500),
+            ("V", "O"): _seconds_distance(2520),
             ("O", "D"): _seconds_distance(300),
         })
         vehicle = _fake_vehicle("V1", "V", base_ts)
@@ -241,11 +243,71 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertFalse(CoreDispatcher._order_can_enter_matching_window(order, base_ts + 1700))
         self.assertTrue(CoreDispatcher._order_can_enter_matching_window(order, base_ts + 1801))
 
+    def test_route_cost_config_can_update_partial_values(self):
+        result = CoreDispatcher.configure_route_cost(
+            W_PASSENGER=0.8,
+            OLD_DELAY_COST_PER_MIN=9.0,
+        )
+
+        config = result["config"]
+        self.assertEqual(config["W_PASSENGER"], 0.8)
+        self.assertEqual(config["OLD_DELAY_COST_PER_MIN"], 9.0)
+        self.assertEqual(config["IN_CAR_COST_PER_MIN"], self._route_cost_config["IN_CAR_COST_PER_MIN"])
+        self.assertAlmostEqual(
+            result["weight_total"],
+            config["W_PASSENGER"] + config["W_ENTERPRISE"] + config["W_SOCIAL"] + config["W_FAIRNESS"],
+        )
+        self.assertTrue(result["runtime_only"])
+
+    def test_route_cost_config_rejects_invalid_values(self):
+        with self.assertRaises(ValueError):
+            CoreDispatcher.configure_route_cost(UNKNOWN_PARAM=1.0)
+        with self.assertRaises(ValueError):
+            CoreDispatcher.configure_route_cost(W_PASSENGER=-1.0)
+        with self.assertRaises(ValueError):
+            CoreDispatcher.configure_route_cost(W_PASSENGER=float("inf"))
+
+    def test_evaluate_route_uses_runtime_route_cost_config(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("V", "O"): _seconds_distance(60),
+            ("O", "D"): _seconds_distance(120),
+        })
+        order = _fake_order(city, "COST", "O", "D", base_ts, 0, 3600)
+        vehicle_state = {
+            "time": base_ts,
+            "last_node": "V",
+            "next_node": "V",
+            "progress": 0.0,
+        }
+        route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+
+        _, _, _, before_details = CoreDispatcher.evaluate_route(
+            route,
+            vehicle_state,
+            [],
+            city,
+            capacity=4,
+            return_details=True,
+        )
+        CoreDispatcher.configure_route_cost(IN_CAR_COST_PER_MIN=30.0)
+        _, _, _, after_details = CoreDispatcher.evaluate_route(
+            route,
+            vehicle_state,
+            [],
+            city,
+            capacity=4,
+            return_details=True,
+        )
+
+        self.assertGreater(after_details["in_car_cost"], before_details["in_car_cost"])
+        self.assertGreater(after_details["total_cost"], before_details["total_cost"])
+
     def test_vehicle_that_arrives_inside_window_beats_too_early_vehicle(self):
         base_ts = 1_000_000.0
         city = _TinyCity({
             ("NEAR", "O"): _seconds_distance(60),
-            ("FAR", "O"): _seconds_distance(360),
+            ("FAR", "O"): _seconds_distance(420),
             ("O", "D"): _seconds_distance(120),
         })
         near_vehicle = _fake_vehicle("NEAR_V", "NEAR", base_ts)

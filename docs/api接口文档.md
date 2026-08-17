@@ -112,6 +112,7 @@ runtime_logs/error_YYYYMMDD.txt
 | 订单 | POST | `/orders/<request_id>/driver-push-confirmation` | 平台确认司机端是否收到派单 |
 | 订单 | POST | `/admin/orders/query` | 服务端按条件查询订单数据库 |
 | 调度 | GET/POST/PUT | `/admin/dispatch/matching-window-config` | 查看或更新远期订单匹配窗口配置 |
+| 调度 | GET/POST/PUT | `/admin/dispatch/route-cost-config` | 查看或更新插单成本函数配置 |
 | 通勤快线 | GET/POST | `/commute/lines` | 查询或创建通勤快线线路 |
 | 通勤快线 | GET/PUT/DELETE | `/commute/lines/<line_code>` | 查询、更新或删除通勤快线线路 |
 | 通勤快线 | PUT | `/commute/lines/<line_code>/stops` | 整体替换通勤快线固定站序 |
@@ -282,7 +283,7 @@ runtime_logs/error_YYYYMMDD.txt
                 } ...
             ],
             "request_id": "REQ-1781761465166-1-68790",  # 订单id号
-            "source": "grasproad_trimmed_trimmed",
+            "source": "driving_plan_trimmed",
             "startNodeId": "113.400616_23.058379|113.400616_23.058379@0.000000",
             "target_node": {		# 目标点信息（O点或D点）
                 "id": "113.409132_23.060574",
@@ -316,7 +317,7 @@ runtime_logs/error_YYYYMMDD.txt
                 } ...
             ],
             "request_id": "REQ-1781761465166-1-68790",
-            "source": "grasproad_trimmed_trimmed",
+            "source": "driving_plan_trimmed",
             "startNodeId": "113.409132_23.060574",
             "target_node": {
                 "id": "113.409085_23.054287",
@@ -954,6 +955,88 @@ POST/PUT 请求体：
 | 200 | 查询或更新成功 |
 | 400 | 参数不是数字或小于 0 |
 
+### 4.4.3 GET/POST/PUT `/admin/dispatch/route-cost-config`
+
+查看或运行时更新订单插单成本函数配置。配置更新后只影响后续新的派单、插单和重规划评估，不会主动重算已经生成的车辆路线。配置为内存运行时配置，服务重启后恢复代码默认值。
+
+GET 响应示例：
+
+```json
+{
+  "config": {
+    "W_PASSENGER": 0.65,
+    "W_ENTERPRISE": 0.2,
+    "W_SOCIAL": 0.2,
+    "W_FAIRNESS": 0.05,
+    "WAIT_COST_PER_MIN": 4.0,
+    "IN_CAR_COST_PER_MIN": 3.0,
+    "LATE_ARRIVAL_COST_PER_MIN": 1.0,
+    "OLD_DELAY_COST_PER_MIN": 6.0,
+    "SEVERE_OLD_DELAY_PENALTY": 50.0,
+    "MILEAGE_UTIL_PENALTY_BASE": 30.0,
+    "LOAD_RATE_PENALTY_BASE": 20.0,
+    "SOCIAL_DISTANCE_COST_PER_KM": 1.0
+  },
+  "defaults": {},
+  "descriptions": {},
+  "weight_total": 1.1,
+  "runtime_only": true
+}
+```
+
+POST/PUT 请求体示例：
+
+```json
+{
+  "W_PASSENGER": 0.75,
+  "OLD_DELAY_COST_PER_MIN": 8,
+  "IN_CAR_COST_PER_MIN": 5
+}
+```
+
+字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `W_PASSENGER` | number | 否 | 乘客体验总权重 |
+| `W_ENTERPRISE` | number | 否 | 企业效益总权重 |
+| `W_SOCIAL` | number | 否 | 社会效益总权重 |
+| `W_FAIRNESS` | number | 否 | 平台公平总权重 |
+| `WAIT_COST_PER_MIN` | number | 否 | 乘客候车每分钟成本 |
+| `IN_CAR_COST_PER_MIN` | number | 否 | 乘客在车每分钟成本 |
+| `LATE_ARRIVAL_COST_PER_MIN` | number | 否 | 晚于最大送达时间后的每分钟成本 |
+| `OLD_DELAY_COST_PER_MIN` | number | 否 | 插单导致原有乘客延误的每分钟成本 |
+| `SEVERE_OLD_DELAY_PENALTY` | number | 否 | 原有乘客严重延误固定惩罚 |
+| `MILEAGE_UTIL_PENALTY_BASE` | number | 否 | 里程利用率惩罚基数 |
+| `LOAD_RATE_PENALTY_BASE` | number | 否 | 满载率惩罚基数 |
+| `SOCIAL_DISTANCE_COST_PER_KM` | number | 否 | 每公里社会里程成本 |
+
+说明：
+
+- POST/PUT 可只传其中一个或多个字段，未传字段保持当前值。
+- 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
+- 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
+
+成功响应：
+
+```json
+{
+  "status": "ok",
+  "config": {
+    "W_PASSENGER": 0.75
+  },
+  "weight_total": 1.2,
+  "runtime_only": true
+}
+```
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 查询或更新成功 |
+| 400 | 请求体不是 JSON 对象、存在未知字段、参数不是有限数字或小于 0 |
+
 ### 4.5 GET `/orders/pool`
 
 查询待匹配订单池。
@@ -1560,7 +1643,7 @@ POST/PUT 请求体：
 | `request_id` | string | 否 | 订单请求 ID；不传时默认确认车辆当前服务队列第一步 |
 | `lon` | number | 否 | 确认位置经度；不传时使用车辆当前 GPS |
 | `lat` | number | 否 | 确认位置纬度；不传时使用车辆当前 GPS |
-| `distance_threshold_m` | number | 否 | 允许确认的距离阈值，默认 `30` 米 |
+| `distance_threshold_m` | number | 否 | 兼容旧请求字段，当前不再用于拦截上下客确认 |
 
 确认限制：
 
@@ -1568,7 +1651,7 @@ POST/PUT 请求体：
 - 只能确认当前下一步，即 `vehicle.planned_route[0]`。
 - 当前步骤为 `O` 时只能执行 `pickup`，当前步骤为 `D` 时只能执行 `dropoff`。
 - 如果传入 `request_id`，必须与当前第一步订单一致。
-- 确认位置到目标站点距离不能超过 `distance_threshold_m`。
+- 确认位置会写入响应中的 `distance_to_target`，但不再按距离阈值拦截上下客确认。
 
 状态流转：`pickup` 将订单改为 `riding`；`dropoff` 将订单改为 `completed`。确认成功后会更新车辆运行态并触发 `commute_boarding_updated` 单车推送。
 
@@ -1654,7 +1737,6 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `invalid_step_action` | 409 | 当前服务步骤与上/下车动作不匹配 |
 | `request_id_not_current` | 409 | `request_id` 不是车辆当前下一步订单 |
 | `vehicle_position_missing` | 400 | 车辆当前位置为空，无法确认上下客 |
-| `too_far_from_stop` | 409 | 车辆距离当前上下客站点超过阈值 |
 | `database_unavailable` | 503 | 数据库不可用 |
 
 ### 4.8 GET `/fleet`
@@ -1745,7 +1827,7 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 
 - 只允许确认当前车辆 `planned_route[0]` 对应的下一步 O/D。
 - `action=pickup` 只能确认 `O` 步骤，`action=dropoff` 只能确认 `D` 步骤。
-- 后端会校验车辆当前位置或请求体坐标距离目标 O/D 点不超过阈值。
+- 后端会计算车辆当前位置或请求体坐标到目标 O/D 点的距离并随响应返回，但不再按距离阈值拦截。
 - 成功后会推进订单状态并移除当前计划步骤，但不会触发高德重规划，也不会重建 A* 路线。
 
 请求体：
@@ -1769,7 +1851,7 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `request_id` | string/null | 否 | 为空时默认确认当前下一步订单；传入时必须等于当前下一步订单 |
 | `lon` / `lng` / `longitude` | number | 否 | 确认位置经度；为空时使用车辆当前 `gps.lon` |
 | `lat` / `latitude` | number | 否 | 确认位置纬度；为空时使用车辆当前 `gps.lat` |
-| `distance_threshold_m` | number | 否 | 距离阈值，默认 30 米 |
+| `distance_threshold_m` | number | 否 | 兼容旧请求字段，当前不再用于拦截上下客确认 |
 | `occurred_at` | string | 否 | 事件发生时间，格式 `YYYY-MM-DD HH:MM:SS`；为空时使用当前业务时间 |
 
 成功响应：
@@ -1809,9 +1891,9 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 确认成功 |
-| 400 | 未初始化、`action` 非法、时间格式非法、坐标/阈值不是数字 |
+| 400 | 未初始化、`action` 非法、时间格式非法、坐标不是数字 |
 | 404 | 车辆不存在 |
-| 409 | 当前无待确认步骤、`action` 与当前步骤不匹配、`request_id` 不是当前下一步、距离目标点过远 |
+| 409 | 当前无待确认步骤、`action` 与当前步骤不匹配、`request_id` 不是当前下一步 |
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
@@ -1954,7 +2036,14 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
       "zone": "A",
       "snapped_node_id": "113.380100_23.040200",
       "snapped_lon": 113.3801,
-      "snapped_lat": 23.0402
+      "snapped_lat": 23.0402,
+      "poi_snap_source": "reflect_csv",
+      "reflect_snap_mode": "existing_node",
+      "reflect_station_name": "站点A",
+      "reflect_road_name": "道路A",
+      "reflect_direction": "东-西",
+      "reflect_lng": 113.3801,
+      "reflect_lat": 23.0402
     }
   ]
 }
@@ -1971,8 +2060,15 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `pois[].lon` / `pois[].longitude` | number | 数据库 `map_poi.longitude` 原始站点经度 |
 | `pois[].lat` / `pois[].latitude` | number | 数据库 `map_poi.latitude` 原始站点纬度 |
 | `pois[].zone` | string/number/null | 所属分区 |
+| `pois[].station_direction` | string/null | 数据库 `map_poi.station_direction`，用于匹配映射表 `Calc_Dir` |
 | `pois[].snapped_node_id` | string/null | 运行态内部吸附后的路网节点 ID |
 | `pois[].snapped_lon` / `pois[].snapped_lat` | number/null | 运行态内部吸附后的路网节点坐标 |
+| `pois[].poi_snap_source` | string/null | 运行态节点来源；`reflect_csv` 表示映射表坐标命中已有路网节点，`reflect_csv_nearest_node` 表示映射表坐标未命中已有节点后按映射表坐标吸附最近路网节点，`nearest_node` 表示未命中映射表后按数据库原始坐标吸附 |
+| `pois[].reflect_snap_mode` | string/null | 映射表坐标处理方式；`existing_node` 表示已有节点，`nearest_node` 表示按映射表坐标二次吸附 |
+| `pois[].reflect_station_name` | string/null | 命中的映射表 `STIONNAME` |
+| `pois[].reflect_road_name` | string/null | 命中的映射表 `name` |
+| `pois[].reflect_direction` | string/null | 命中的映射表 `Calc_Dir` |
+| `pois[].reflect_lng` / `pois[].reflect_lat` | number/null | 命中的映射表 `gd_lng/gd_lat` |
 
 状态码：
 
@@ -2011,7 +2107,7 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 
 ### 4.13.2 POST `/admin/stations`
 
-新增单个或多个站点，并写入 `map_poi`。新增时会校验站点坐标是否落在所属运营区范围内：优先使用 `map_operation_area.area_polygon/area_points` 做多边形包含判断；若没有面数据，则使用已加载路网边界、`bounds_json` 或 SHP 文件 bbox 兜底校验。新增成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
+新增单个或多个站点，并写入 `map_poi`。新增时只校验运营区是否存在、站点必填字段、经纬度格式与唯一性，不再校验站点坐标是否落在所属运营区 SHP 范围内。新增成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
 
 请求体支持单条：
 
@@ -2019,6 +2115,8 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 {
   "operation_area_id": 10001,
   "station_name": "大学城北门",
+  "area": "大学城外环西路",
+  "station_direction": "东-西",
   "lon": 113.12345678,
   "lat": 23.12345678
 }
@@ -2032,6 +2130,8 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
     {
       "operation_area_id": 10001,
       "station_name": "大学城北门",
+      "area": "大学城外环西路",
+      "station_direction": "东-西",
       "lon": 113.12345678,
       "lat": 23.12345678
     }
@@ -2045,10 +2145,12 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | --- | --- | --- |
 | `operation_area_id` | integer | 运营区业务 ID，对应 `map_operation_area.area_id` |
 | `station_name` | string | 站点名称，落库到 `map_poi.poi_name` |
+| `area` | string | 站点所属道路或区域名称，落库到 `map_poi.areas` |
+| `station_direction` | string | 站点方向，落库到 `map_poi.station_direction`，并用于映射表 `Calc_Dir` 匹配 |
 | `lon`/`lng`/`longitude` | number | 经度 |
 | `lat`/`latitude` | number | 纬度 |
 
-可选字段包括：`poi_code`、`station_id`、`station_type`、`station_direction`、`direction_angle`、`address`、`areas`、`dept_id`、`org_code`、`poi_type`、`zone`、`status`、`source_status`、`audit_status`、`source_create_time`。
+可选字段包括：`poi_code`、`station_id`、`station_type`、`direction_angle`、`address`、`dept_id`、`org_code`、`poi_type`、`zone`、`status`、`source_status`、`audit_status`、`source_create_time`。
 
 响应示例：
 
@@ -2147,11 +2249,11 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `operation_area_id_invalid` | 运营区 ID 格式非法 |
 | `operation_area_not_found` | 运营区不存在或已删除 |
 | `station_name_required` | 缺少站点名称 |
+| `station_area_required` | 缺少站点所属道路或区域名称 |
+| `station_direction_required` | 缺少站点方向 |
 | `station_lon_required` / `station_lat_required` | 缺少经纬度字段 |
 | `station_lon_invalid` / `station_lat_invalid` | 经纬度不是数字 |
 | `station_coordinate_out_of_range` | 经纬度超出合法范围 |
-| `station_coordinate_outside_operation_area` | 新增站点坐标不在运营区 SHP 范围内 |
-| `operation_area_scope_unavailable` | 运营区缺少可校验的范围信息，无法确认站点是否在 SHP 范围内 |
 | `station_coordinate_exists` | 同一运营区已有相同经纬度站点 |
 | `station_code_exists` | 同一运营区站点编号冲突 |
 | `station_not_found_by_coordinate` | 数据库中不存在该经纬度站点 |

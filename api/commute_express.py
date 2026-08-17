@@ -574,7 +574,10 @@ class CommuteExpressService:
         distance_threshold_m=30.0,
         city_map=None,
     ):
-        """确认快线车辆当前上下客步骤。"""
+        """确认快线车辆当前上下客步骤。
+
+        distance_threshold_m 仅用于兼容旧请求体，当前不再按距离拦截确认。
+        """
         action = str(action or "").strip().lower()
         if action not in {"pickup", "dropoff"}:
             raise CommuteExpressError("action 必须是 pickup 或 dropoff", code="invalid_action")
@@ -593,9 +596,12 @@ class CommuteExpressService:
         check_lat = gps.get("lat") if lat is None else lat
         if check_lon is None or check_lat is None:
             raise CommuteExpressError("车辆当前位置为空", code="vehicle_position_missing")
-        distance = AuxiliaryFunctions.haversine_distance(float(check_lon), float(check_lat), target_node.lon, target_node.lat)
-        if distance > float(distance_threshold_m):
-            raise CommuteExpressError("车辆距离当前上下客点过远", code="too_far_from_stop", status_code=409)
+        try:
+            check_lon = float(check_lon)
+            check_lat = float(check_lat)
+        except (TypeError, ValueError):
+            raise CommuteExpressError("车辆当前位置必须是数字", code="vehicle_position_invalid")
+        distance = AuxiliaryFunctions.haversine_distance(check_lon, check_lat, target_node.lon, target_node.lat)
 
         vehicle.planned_route.pop(0)
         order_record = persistence.get_commute_order(order.request_id) or {"request_id": order.request_id}

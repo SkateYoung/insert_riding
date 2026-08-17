@@ -1,0 +1,145 @@
+========================================================================================
+time: 2026-08-17 17:49:33
+level: WARNING
+source: api.routes.station_batch_item
+message: 缺少站点方向
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"area\": \"\\u6d4b\\u8bd5\\u9053\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_name\": \"missing direction\"}", "index": 0, "status": 400, "code": "station_direction_required"}
+
+========================================================================================
+time: 2026-08-17 17:49:33
+level: WARNING
+source: api.routes.station_batch_item
+message: 缺少站点名称
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001}", "index": 0, "status": 400, "code": "station_name_required"}
+
+========================================================================================
+time: 2026-08-17 17:49:33
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"stations\": [{\"area\": \"\\u5927\\u5b66\\u57ce\\u5916\\u73af\\u897f\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_direction\": \"\\u4e1c-\\u897f\", \"station_name\": \"\\u5927\\u5b66\\u57ce\\u5317\\u95e8\"}, {\"area\": \"\\u5927\\u5b66\\u57ce\\u5916\\u73af\\u897f\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_direction\": \"\\u4e1c-\\u897f\", \"station_name\": \"\\u91cd\\u590d\\u7ad9\\u70b9\"}]}", "index": 1, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-17 17:49:33
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"lat\": 23.12345678, \"lon\": 113.12345678}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-17 17:50:15
+level: WARNING
+source: api.routes.station_batch_item
+message: 缺少站点方向
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"area\": \"\\u6d4b\\u8bd5\\u9053\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_name\": \"missing direction\"}", "index": 0, "status": 400, "code": "station_direction_required"}
+
+========================================================================================
+time: 2026-08-17 17:50:15
+level: WARNING
+source: api.routes.station_batch_item
+message: 缺少站点名称
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001}", "index": 0, "status": 400, "code": "station_name_required"}
+
+========================================================================================
+time: 2026-08-17 17:50:15
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"stations\": [{\"area\": \"\\u5927\\u5b66\\u57ce\\u5916\\u73af\\u897f\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_direction\": \"\\u4e1c-\\u897f\", \"station_name\": \"\\u5927\\u5b66\\u57ce\\u5317\\u95e8\"}, {\"area\": \"\\u5927\\u5b66\\u57ce\\u5916\\u73af\\u897f\\u8def\", \"lat\": 23.12345678, \"lon\": 113.12345678, \"operation_area_id\": 10001, \"station_direction\": \"\\u4e1c-\\u897f\", \"station_name\": \"\\u91cd\\u590d\\u7ad9\\u70b9\"}]}", "index": 1, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-17 17:50:15
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{\"lat\": 23.12345678, \"lon\": 113.12345678}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-17 18:14:27
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546143661/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1786961629098-7229\",\"distance_threshold_m\":30,\"lon\":113.33374306120996,\"lat\":23.13002504412811}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-17 18:14:28
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546143661/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1786961629098-7229\",\"distance_threshold_m\":30,\"lon\":113.33374306120996,\"lat\":23.13002504412811}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-17 18:14:33
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546143661/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1786961629098-7229\",\"distance_threshold_m\":30,\"lon\":113.33376063843417,\"lat\":23.13013343701067}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-17 18:14:33
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546143661/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1786961629098-7229\",\"distance_threshold_m\":30,\"lon\":113.33376063843417,\"lat\":23.13013343701067}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-17 18:14:34
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546143661/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1786961629098-7229\",\"distance_threshold_m\":30,\"lon\":113.33376063843417,\"lat\":23.13013343701067}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-17 18:18:22
+level: ERROR
+source: api.core.idle_hotspot_v6_forecast
+message: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+context: {"operation_area_id": 20260713, "clean_order_count": 11, "forecast_time": "2026-08-17 18:30:00"}
+exception: ValueError('The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\core.py", line 2392, in _build_idle_hotspot_cache
+    predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+  File "d:\Bus_Project\insert_riding\forecast\od_forecast_module.py", line 843, in predict_od_flows_v6
+    clf.fit(x, y_full_binary)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\base.py", line 1365, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\ensemble\_hist_gradient_boosting\gradient_boosting.py", line 673, in fit
+    X_train, X_val, y_train, y_val = train_test_split(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\utils\_param_validation.py", line 191, in wrapper
+    return func(*args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2940, in train_test_split
+    train, test = next(cv.split(X=arrays[0], y=stratify))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 1927, in split
+    for train, test in self._iter_indices(X, y, groups):
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2342, in _iter_indices
+    raise ValueError(
+ValueError: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+
+========================================================================================
+time: 2026-08-17 18:19:32
+level: ERROR
+source: api.core.idle_hotspot_v6_forecast
+message: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+context: {"operation_area_id": 20260713, "clean_order_count": 11, "forecast_time": "2026-08-17 18:30:00"}
+exception: ValueError('The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\core.py", line 2392, in _build_idle_hotspot_cache
+    predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+  File "d:\Bus_Project\insert_riding\forecast\od_forecast_module.py", line 843, in predict_od_flows_v6
+    clf.fit(x, y_full_binary)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\base.py", line 1365, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\ensemble\_hist_gradient_boosting\gradient_boosting.py", line 673, in fit
+    X_train, X_val, y_train, y_val = train_test_split(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\utils\_param_validation.py", line 191, in wrapper
+    return func(*args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2940, in train_test_split
+    train, test = next(cv.split(X=arrays[0], y=stratify))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 1927, in split
+    for train, test in self._iter_indices(X, y, groups):
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2342, in _iter_indices
+    raise ValueError(
+ValueError: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+

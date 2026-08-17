@@ -4,7 +4,6 @@
 调度、寻路、预测等业务逻辑统一委托给 api.core.CoreDispatcher。
 """
 
-import json
 import math
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from .commute_express import COMMUTE_OPERATION_MODES, CommuteExpressError, Commu
 from .core import CoreDispatcher
 from .error_logger import log_error, log_exception
 from .models import CityGraph, Order, SPEED_MPS, Vehicle
-from .restrictions import OperationRestrictionError, normalize_policy_payload, point_in_polygon, policy_to_response
+from .restrictions import OperationRestrictionError, normalize_policy_payload, policy_to_response
 
 
 bp = Blueprint("api_routes", __name__)
@@ -126,6 +125,17 @@ def _optional_non_negative_number(data, field_name):
     if value < 0:
         raise ValueError(f"{field_name} 必须大于或等于 0")
     return value
+
+
+def _normalize_route_cost_config_payload(data):
+    """规范化路线成本配置更新请求。"""
+    if not isinstance(data, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    allowed_fields = set(CoreDispatcher.ROUTE_COST_CONFIG_DEFAULTS)
+    unknown_fields = sorted(key for key in data if key not in allowed_fields)
+    if unknown_fields:
+        raise ValueError(f"不支持的路线成本参数: {', '.join(unknown_fields)}")
+    return {key: data[key] for key in data}
 
 
 def _vehicle_to_dict(v):
@@ -469,233 +479,18 @@ def _validate_station_coordinate_range(lon, lat):
         raise StationRequestError("纬度超出合法范围", "station_coordinate_out_of_range", field="lat")
 
 
-def _station_json_or_text(value):
-    """解析运营区范围字段；JSON 失败时保留原始文本。"""
-    if value in (None, ""):
-        return None
-    if isinstance(value, (dict, list, tuple)):
-        return value
-    text = str(value).strip()
-    if not text:
-        return None
-    if text[0] in "[{":
-        try:
-            return json.loads(text)
-        except (TypeError, ValueError):
-            return text
-    return text
-
-
-def _station_point_from_any(value):
-    """把常见 lon/lat 结构转换为统一点字典。"""
-    if isinstance(value, dict):
-        lon = value.get("lon", value.get("lng", value.get("longitude", value.get("x"))))
-        lat = value.get("lat", value.get("latitude", value.get("y")))
-    elif isinstance(value, (list, tuple)) and len(value) >= 2:
-        lon, lat = value[0], value[1]
-    else:
-        return None
-    try:
-        lon = float(lon)
-        lat = float(lat)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(lon) or not math.isfinite(lat):
-        return None
-    if lon < -180 or lon > 180 or lat < -90 or lat > 90:
-        return None
-    return {"lon": lon, "lat": lat}
-
-
-def _station_polygons_from_text(text):
-    """兼容 lon,lat;lon,lat|... 形式的运营区边界文本。"""
-    polygons = []
-    for polygon_text in str(text or "").strip().split("|"):
-        points = []
-        for token in polygon_text.split(";"):
-            parts = token.replace("，", ",").replace(",", " ").split()
-            if len(parts) < 2:
-                continue
-            point = _station_point_from_any((parts[0], parts[1]))
-            if point is not None:
-                points.append(point)
-        if len(points) >= 3:
-            polygons.append(points)
-    return polygons
-
-
-def _station_polygons_from_value(value):
-    """从 area_polygon/area_points 中提取一个或多个 polygon。"""
-    raw = _station_json_or_text(value)
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        return _station_polygons_from_text(raw)
-    if isinstance(raw, dict):
-        if raw.get("type") == "Feature":
-            return _station_polygons_from_value((raw.get("geometry") or {}).get("coordinates"))
-        if raw.get("type") == "FeatureCollection":
-            polygons = []
-            for feature in raw.get("features") or []:
-                polygons.extend(_station_polygons_from_value(feature))
-            return polygons
-        if raw.get("type") in ("Polygon", "MultiPolygon"):
-            return _station_polygons_from_value(raw.get("coordinates"))
-        for key in ("points", "path", "polygon", "area_points", "area_polygon"):
-            if key in raw:
-                return _station_polygons_from_value(raw.get(key))
-        if "polygons" in raw:
-            polygons = []
-            for item in raw.get("polygons") or []:
-                polygons.extend(_station_polygons_from_value(item))
-            return polygons
-        point = _station_point_from_any(raw)
-        return [[point]] if point is not None else []
-    if isinstance(raw, (list, tuple)):
-        if not raw:
-            return []
-        first_point = _station_point_from_any(raw[0])
-        if first_point is not None:
-            points = []
-            for item in raw:
-                point = _station_point_from_any(item)
-                if point is not None:
-                    points.append(point)
-            return [points] if len(points) >= 3 else []
-        polygons = []
-        for item in raw:
-            polygons.extend(_station_polygons_from_value(item))
-        return polygons
-    return []
-
-
-def _station_bounds_from_value(value):
-    """读取 bounds_json 或 SHP bbox 转成统一边界结构。"""
-    raw = _station_json_or_text(value)
-    if not isinstance(raw, dict):
-        return None
-    try:
-        min_lon = float(raw.get("min_lon", raw.get("minx", raw.get("xmin"))))
-        max_lon = float(raw.get("max_lon", raw.get("maxx", raw.get("xmax"))))
-        min_lat = float(raw.get("min_lat", raw.get("miny", raw.get("ymin"))))
-        max_lat = float(raw.get("max_lat", raw.get("maxy", raw.get("ymax"))))
-    except (TypeError, ValueError):
-        return None
-    if not all(math.isfinite(item) for item in (min_lon, max_lon, min_lat, max_lat)):
-        return None
-    return {
-        "min_lon": min(min_lon, max_lon),
-        "max_lon": max(min_lon, max_lon),
-        "min_lat": min(min_lat, max_lat),
-        "max_lat": max(min_lat, max_lat),
-    }
-
-
-def _station_bounds_from_city_map(city_map):
-    """从已加载路网计算当前运营区 SHP 边界。"""
-    nodes = list(getattr(city_map, "nodes_map", {}).values())
-    if not nodes:
-        return None
-    lons = [float(node.lon) for node in nodes]
-    lats = [float(node.lat) for node in nodes]
-    return {
-        "min_lon": min(lons),
-        "max_lon": max(lons),
-        "min_lat": min(lats),
-        "max_lat": max(lats),
-    }
-
-
-def _station_bounds_from_shp(area):
-    """在运营区未加载时，直接读取 SHP 文件 bbox 作为兜底范围。"""
-    shp_path = str((area or {}).get("shp_path") or "").strip()
-    if not shp_path:
-        return None
-    try:
-        import shapefile
-        reader = shapefile.Reader(
-            shp_path,
-            encoding=str((area or {}).get("shp_encoding") or "utf-8").strip() or "utf-8",
-            encodingErrors="ignore",
-        )
-        bbox = list(reader.bbox or [])
-        if hasattr(reader, "close"):
-            reader.close()
-    except Exception:
-        return None
-    if len(bbox) < 4:
-        return None
-    return _station_bounds_from_value({
-        "min_lon": bbox[0],
-        "min_lat": bbox[1],
-        "max_lon": bbox[2],
-        "max_lat": bbox[3],
-    })
-
-
-def _station_area_scope(operation_area_id, cache=None):
-    """读取运营区可用于站点坐标校验的范围。"""
-    area_id = int(operation_area_id)
-    if cache is not None and area_id in cache:
-        return cache[area_id]
-
-    area = persistence.get_operation_area_by_area_id(area_id)
-    if area is None:
-        raise KeyError("operation_area_not_found")
-
-    polygons = (
-        _station_polygons_from_value(area.get("area_polygon"))
-        or _station_polygons_from_value(area.get("area_points"))
-    )
-    if polygons:
-        scope = {"type": "polygon", "polygons": polygons}
-    else:
-        city_map = (state.city_maps or {}).get(area_id)
-        bounds = (
-            _station_bounds_from_city_map(city_map)
-            or _station_bounds_from_value(area.get("bounds_json"))
-            or _station_bounds_from_shp(area)
-        )
-        scope = {"type": "bounds", "bounds": bounds} if bounds else None
-
-    if cache is not None:
-        cache[area_id] = scope
-    return scope
-
-
-def _validate_station_inside_operation_area(payload, cache=None):
-    """校验新增站点坐标是否位于所属运营区 SHP 范围内。"""
-    scope = _station_area_scope(payload.get("operation_area_id"), cache=cache)
-    if not scope:
-        raise StationRequestError(
-            "运营区缺少可校验的 SHP 范围信息",
-            "operation_area_scope_unavailable",
-            field="operation_area_id",
-        )
-
-    point = {"lon": float(payload.get("lon")), "lat": float(payload.get("lat"))}
-    if scope.get("type") == "polygon":
-        inside = any(point_in_polygon(point, {"points": polygon}) for polygon in scope.get("polygons") or [])
-    else:
-        bounds = scope.get("bounds") or {}
-        inside = (
-            bounds.get("min_lon") <= point["lon"] <= bounds.get("max_lon")
-            and bounds.get("min_lat") <= point["lat"] <= bounds.get("max_lat")
-        )
-    if not inside:
-        raise StationRequestError(
-            "站点坐标不在运营区 SHP 范围内",
-            "station_coordinate_outside_operation_area",
-            field="lon,lat",
-        )
-
-
 def _normalize_station_create_payload(item):
     """规范化新增站点请求项。"""
     operation_area_id = _station_required_int(item, "operation_area_id")
     station_name = str(item.get("station_name") or item.get("poi_name") or "").strip()
     if not station_name:
         raise StationRequestError("缺少站点名称", "station_name_required", field="station_name")
+    area = str(item.get("area") or "").strip()
+    if not area:
+        raise StationRequestError("缺少站点所属道路或区域名称", "station_area_required", field="area")
+    station_direction = str(item.get("station_direction") or "").strip()
+    if not station_direction:
+        raise StationRequestError("缺少站点方向", "station_direction_required", field="station_direction")
     lon = _station_coordinate(item, ("lon", "lng", "longitude"), "station_lon_required", "station_lon_invalid")
     lat = _station_coordinate(item, ("lat", "latitude"), "station_lat_required", "station_lat_invalid")
     _validate_station_coordinate_range(lon, lat)
@@ -703,6 +498,9 @@ def _normalize_station_create_payload(item):
     payload.update({
         "operation_area_id": operation_area_id,
         "station_name": station_name,
+        "area": area,
+        "areas": area,
+        "station_direction": station_direction,
         "lon": lon,
         "lat": lat,
         "station_id": _station_optional_int(item, "station_id"),
@@ -2108,6 +1906,24 @@ def admin_dispatch_matching_window_config():
     })
 
 
+@bp.route("/admin/dispatch/route-cost-config", methods=["GET", "POST", "PUT"])
+def admin_dispatch_route_cost_config():
+    """读取或更新路线插单成本函数运行时配置。"""
+    if request.method == "GET":
+        return jsonify(CoreDispatcher.route_cost_config_response())
+
+    data = request.get_json(silent=True)
+    try:
+        updates = _normalize_route_cost_config_payload(data)
+        result = CoreDispatcher.configure_route_cost(**updates)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "status": "ok",
+        **result,
+    })
+
+
 @bp.route("/admin/stations", methods=["POST"])
 def admin_create_stations():
     """新增单个或多个站点。"""
@@ -2119,11 +1935,9 @@ def admin_create_stations():
 
     results = []
     affected_area_ids = set()
-    scope_cache = {}
     for index, item in enumerate(items):
         try:
             payload = _normalize_station_create_payload(item)
-            _validate_station_inside_operation_area(payload, cache=scope_cache)
             station = persistence.create_station(payload)
             affected_area_ids.add(station.get("operation_area_id"))
             results.append({
@@ -3454,6 +3268,13 @@ def get_pois():
                     "lat": snapped_node.lat,
                     "name": snapped_node.name,
                     "zone": snapped_node.zone,
+                    "poi_snap_source": getattr(snapped_node, "poi_snap_source", None),
+                    "reflect_snap_mode": getattr(snapped_node, "reflect_snap_mode", None),
+                    "reflect_station_name": getattr(snapped_node, "reflect_station_name", None),
+                    "reflect_road_name": getattr(snapped_node, "reflect_road_name", None),
+                    "reflect_direction": getattr(snapped_node, "reflect_direction", None),
+                    "reflect_lng": getattr(snapped_node, "reflect_lng", None),
+                    "reflect_lat": getattr(snapped_node, "reflect_lat", None),
                 }
                 if snapped_node is not None
                 else None
@@ -3467,6 +3288,7 @@ def get_pois():
                 "poi_name": record.get("poi_name"),
                 "station_name": record.get("station_name") or record.get("poi_name"),
                 "poi_type": record.get("poi_type"),
+                "station_direction": record.get("station_direction"),
                 "lon": lon,
                 "lat": lat,
                 "longitude": lon,
@@ -3478,6 +3300,13 @@ def get_pois():
                 "snapped_lon": getattr(snapped_node, "lon", None),
                 "snapped_lat": getattr(snapped_node, "lat", None),
                 "snapped_node": snapped_payload,
+                "poi_snap_source": getattr(snapped_node, "poi_snap_source", None),
+                "reflect_snap_mode": getattr(snapped_node, "reflect_snap_mode", None),
+                "reflect_station_name": getattr(snapped_node, "reflect_station_name", None),
+                "reflect_road_name": getattr(snapped_node, "reflect_road_name", None),
+                "reflect_direction": getattr(snapped_node, "reflect_direction", None),
+                "reflect_lng": getattr(snapped_node, "reflect_lng", None),
+                "reflect_lat": getattr(snapped_node, "reflect_lat", None),
             })
         return jsonify({
             "operation_area_id": operation_area_id,
