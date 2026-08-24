@@ -213,6 +213,40 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(CoreDispatcher.order_pool, [])
         self.assertEqual([step["order"].request_id for step in vehicle.planned_route], ["NEAR_FUTURE", "NEAR_FUTURE"])
 
+    def test_locked_route_head_prevents_new_order_from_becoming_first_step(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): 100.0,
+            ("B", "C"): 100.0,
+            ("A", "D"): 100.0,
+            ("D", "C"): 100.0,
+        })
+        vehicle = _fake_vehicle("V1", "A", base_ts)
+        old_order = _fake_order(city, "OLD", "B", "C", base_ts, 0.0, 1200.0)
+        new_order = _fake_order(city, "NEW", "D", "C", base_ts, 0.0, 1200.0)
+        old_order.status = "waiting_pickup"
+        vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        vehicle.gps = {"lon": old_order.o_node.lon, "lat": old_order.o_node.lat}
+
+        original_evaluate_route = CoreDispatcher.evaluate_route
+
+        def prefer_new_order_first(route, *args, **kwargs):
+            cost = 0.0 if route and route[0]["order"].request_id == "NEW" else 10.0
+            return True, cost, {}
+
+        CoreDispatcher.evaluate_route = staticmethod(prefer_new_order_first)
+        try:
+            route, _ = CoreDispatcher._try_insert_order(vehicle, new_order, city)
+        finally:
+            CoreDispatcher.evaluate_route = original_evaluate_route
+
+        self.assertIsNotNone(route)
+        self.assertEqual(route[0]["order"].request_id, "OLD")
+        self.assertEqual(route[0]["type"], "O")
+
     def test_multi_area_future_order_respects_matching_window(self):
         base_ts = 1_000_000.0
         area_id = 10001
@@ -247,11 +281,13 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         result = CoreDispatcher.configure_route_cost(
             W_PASSENGER=0.8,
             OLD_DELAY_COST_PER_MIN=9.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=120.0,
         )
 
         config = result["config"]
         self.assertEqual(config["W_PASSENGER"], 0.8)
         self.assertEqual(config["OLD_DELAY_COST_PER_MIN"], 9.0)
+        self.assertEqual(config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"], 120.0)
         self.assertEqual(config["IN_CAR_COST_PER_MIN"], self._route_cost_config["IN_CAR_COST_PER_MIN"])
         self.assertAlmostEqual(
             result["weight_total"],

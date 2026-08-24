@@ -975,7 +975,8 @@ GET 响应示例：
     "SEVERE_OLD_DELAY_PENALTY": 50.0,
     "MILEAGE_UTIL_PENALTY_BASE": 30.0,
     "LOAD_RATE_PENALTY_BASE": 20.0,
-    "SOCIAL_DISTANCE_COST_PER_KM": 1.0
+    "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
+    "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0
   },
   "defaults": {},
   "descriptions": {},
@@ -990,7 +991,8 @@ POST/PUT 请求体示例：
 {
   "W_PASSENGER": 0.75,
   "OLD_DELAY_COST_PER_MIN": 8,
-  "IN_CAR_COST_PER_MIN": 5
+  "IN_CAR_COST_PER_MIN": 5,
+  "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120
 }
 ```
 
@@ -1010,12 +1012,14 @@ POST/PUT 请求体示例：
 | `MILEAGE_UTIL_PENALTY_BASE` | number | 否 | 里程利用率惩罚基数 |
 | `LOAD_RATE_PENALTY_BASE` | number | 否 | 满载率惩罚基数 |
 | `SOCIAL_DISTANCE_COST_PER_KM` | number | 否 | 每公里社会里程成本 |
+| `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
 
 说明：
 
 - POST/PUT 可只传其中一个或多个字段，未传字段保持当前值。
 - 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
 - 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
+- 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
 
 成功响应：
 

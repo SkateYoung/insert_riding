@@ -1,0 +1,63 @@
+========================================================================================
+time: 2026-08-24 13:56:12
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-manual-1787550972761-2250\",\"operation_area_id\":666666,\"passenger_phone\":\"13950955705\",\"passenger_id\":null,\"origin\":{\"lon\":113.33511,\"lat\":23.107058},\"destination\":{\"lon\":113.335803,\"lat\":23.107488},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 13:58:00\",\"latest\":\"2026-08-24 14:10:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33511000_23_10705800\"}\n"}
+
+========================================================================================
+time: 2026-08-24 14:35:14
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-manual-1787553314889-7529\",\"operation_area_id\":666666,\"passenger_phone\":\"13950955705\",\"passenger_id\":null,\"origin\":{\"lon\":113.33511,\"lat\":23.107058},\"destination\":{\"lon\":113.335803,\"lat\":23.107488},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 13:58:00\",\"latest\":\"2026-08-24 14:10:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33511000_23_10705800\"}\n"}
+
+========================================================================================
+time: 2026-08-24 14:40:16
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787553616941-2-4237\",\"operation_area_id\":666666,\"passenger_phone\":\"13953616942\",\"passenger_id\":\"demo-pax-1787553616941-2\",\"origin\":{\"lon\":113.350467,\"lat\":23.105217},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 14:51:16\",\"latest\":\"2026-08-24 15:03:16\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"poi_code\":\"station_666666_113_33511000_23_10705800\"}\n"}
+
+========================================================================================
+time: 2026-08-24 14:40:17
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787553616991-4-22095\",\"operation_area_id\":666666,\"passenger_phone\":\"13953616994\",\"passenger_id\":\"demo-pax-1787553616991-4\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.337551,\"lat\":23.103642},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 14:45:16\",\"latest\":\"2026-08-24 15:01:16\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
+
+========================================================================================
+time: 2026-08-24 15:54:49
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787558089335-1-48150\",\"operation_area_id\":666666,\"passenger_phone\":\"13958067718\",\"passenger_id\":\"demo-pax-1787558089334-1\",\"origin\":{\"lon\":113.340715,\"lat\":23.098749},\"destination\":{\"lon\":113.35047,\"lat\":23.10523},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 15:57:00\",\"latest\":\"2026-08-24 16:09:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"poi_code\":\"station_666666_113_35047000_23_10523000\"}\n"}
+
+========================================================================================
+time: 2026-08-24 15:54:51
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787558091425-1-81799\",\"operation_area_id\":666666,\"passenger_phone\":\"13958067718\",\"passenger_id\":\"demo-pax-1787558091425-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.337077,\"lat\":23.103595},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 15:57:00\",\"latest\":\"2026-08-24 16:09:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
+
+========================================================================================
+time: 2026-08-24 15:54:53
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787558093349-1-39409\",\"operation_area_id\":666666,\"passenger_phone\":\"13958067718\",\"passenger_id\":\"demo-pax-1787558093349-1\",\"origin\":{\"lon\":113.35047,\"lat\":23.10523},\"destination\":{\"lon\":113.337077,\"lat\":23.103595},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 15:57:00\",\"latest\":\"2026-08-24 16:09:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_35047000_23_10523000\"}\n"}
+
+========================================================================================
+time: 2026-08-24 16:03:25
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787558605473-1-19281\",\"operation_area_id\":666666,\"passenger_phone\":\"13958593640\",\"passenger_id\":\"demo-pax-1787558605473-1\",\"origin\":{\"lon\":113.34606,\"lat\":23.105062},\"destination\":{\"lon\":113.339798,\"lat\":23.103549},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 16:06:00\",\"latest\":\"2026-08-24 16:18:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
+
+========================================================================================
+time: 2026-08-24 16:03:28
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787558608887-1-40240\",\"operation_area_id\":666666,\"passenger_phone\":\"13958593640\",\"passenger_id\":\"demo-pax-1787558608887-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.339671,\"lat\":23.10361},\"expected_pickup_time\":{\"earliest\":\"2026-08-24 16:06:00\",\"latest\":\"2026-08-24 16:18:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
+

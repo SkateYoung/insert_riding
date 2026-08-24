@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from . import fleet_push, persistence
 from .auxiliary import AuxiliaryFunctions
+from .models import SPEED_MPS
 
 
 COMMUTE_FIXED_WAITING = "commute_fixed_waiting"
@@ -34,6 +35,9 @@ class CommuteExpressService:
     该服务只做固定站点顺序上的候选车辆选择。车辆是否真正行驶、GPS 如何推进，
     由外部定位上报负责；快线车辆的 GPS 上报不会触发动态巴士的道路吸附和路线裁剪。
     """
+
+    ROUTE_HEAD_LOCK_DISTANCE_M = 300.0
+    ROUTE_HEAD_LOCK_ETA_SECONDS = 120.0
 
     @staticmethod
     def _int(value, field_name, required=True):
@@ -264,12 +268,42 @@ class CommuteExpressService:
         return True
 
     @classmethod
+    def _route_head_locked(cls, vehicle):
+        """判断快线车辆当前队首是否进入执行保护窗口。"""
+        steps = getattr(vehicle, "planned_route", []) or []
+        if not steps:
+            return False
+        head = steps[0]
+        order = head.get("order") if isinstance(head, dict) else None
+        if order is None:
+            return False
+        target = getattr(order, "o_node", None) if head.get("type") == "O" else getattr(order, "d_node", None)
+        gps = getattr(vehicle, "gps", None) or {}
+        if target is None or gps.get("lon") is None or gps.get("lat") is None:
+            return False
+        try:
+            distance_m = AuxiliaryFunctions.haversine_distance(
+                float(gps.get("lon")),
+                float(gps.get("lat")),
+                float(target.lon),
+                float(target.lat),
+            )
+        except (TypeError, ValueError):
+            return False
+        eta_seconds = distance_m / SPEED_MPS if SPEED_MPS > 0 else float("inf")
+        return (
+            distance_m <= cls.ROUTE_HEAD_LOCK_DISTANCE_M
+            or eta_seconds <= cls.ROUTE_HEAD_LOCK_ETA_SECONDS
+        )
+
+    @classmethod
     def _best_local_insertion_plan(cls, vehicle, stops, order_obj):
         """局部插入新订单 O/D，保持车辆已有服务步骤相对顺序不变。"""
         existing_steps = list(getattr(vehicle, "planned_route", []) or [])
         capacity = int(getattr(vehicle, "capacity", 0) or 0)
         if capacity <= 0:
             return None
+        min_origin_index = 1 if cls._route_head_locked(vehicle) and existing_steps else 0
         baseline_distance = cls._route_distance_for_steps(vehicle, stops, existing_steps)
         if baseline_distance is None:
             baseline_distance = 0.0 if not existing_steps else None
@@ -279,7 +313,7 @@ class CommuteExpressService:
         origin_step = {"type": "O", "order": order_obj}
         destination_step = {"type": "D", "order": order_obj}
         best = None
-        for origin_index in range(len(existing_steps) + 1):
+        for origin_index in range(min_origin_index, len(existing_steps) + 1):
             with_origin = existing_steps[:origin_index] + [origin_step] + existing_steps[origin_index:]
             for destination_index in range(origin_index + 1, len(with_origin) + 1):
                 candidate_steps = (
@@ -546,8 +580,9 @@ class CommuteExpressService:
             return {"status": order.get("status"), "order": order}
         vehicle = cls._runtime_vehicle_by_id(fleet, order.get("assigned_vehicle_code"))
         if vehicle is not None:
+            planned_route = list(getattr(vehicle, "planned_route", []) or [])
             vehicle.planned_route = [
-                step for step in getattr(vehicle, "planned_route", []) or []
+                step for step in planned_route
                 if str(getattr(step.get("order"), "request_id", "")) != str(request_id)
             ]
             vehicle.on_board_orders = [

@@ -190,7 +190,9 @@ class CommuteExpressServiceTest(unittest.TestCase):
             "passenger_phone": "13800000000",
             "passenger_count": 1,
         }
-        with self._patch_persistence(), mock.patch("api.commute_express.fleet_push.submit_vehicle_navigation", return_value=True):
+        with self._patch_persistence(), \
+                mock.patch.object(CommuteExpressService, "_route_head_locked", return_value=False), \
+                mock.patch("api.commute_express.fleet_push.submit_vehicle_navigation", return_value=True):
             result = CommuteExpressService.create_order(payload, [vehicle])
 
         self.assertEqual(result["status"], "waiting_pickup")
@@ -200,6 +202,40 @@ class CommuteExpressServiceTest(unittest.TestCase):
             [step["type"] for step in vehicle.planned_route if step["order"].request_id == "old_order"],
             ["O", "D"],
         )
+
+    def test_local_insertion_keeps_locked_head_first(self):
+        vehicle = _vehicle(lon=113.0030, lat=23.0000)
+        old_order = SimpleNamespace(
+            request_id="old_order",
+            passenger_count=1,
+            status="waiting_pickup",
+            order_source="commute_express",
+            line_code="line_001",
+            commute_origin_poi_id=4,
+            commute_destination_poi_id=1,
+            o_node=CommuteExpressService._node_like_from_stop(self.stops[3]),
+            d_node=CommuteExpressService._node_like_from_stop(self.stops[0]),
+        )
+        vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        payload = {
+            "request_id": "new_order",
+            "line_code": "line_001",
+            "origin_lon": 113.0010,
+            "origin_lat": 23.0000,
+            "destination_lon": 113.0020,
+            "destination_lat": 23.0000,
+            "passenger_phone": "13800000000",
+            "passenger_count": 1,
+        }
+        with self._patch_persistence(), mock.patch("api.commute_express.fleet_push.submit_vehicle_navigation", return_value=True):
+            result = CommuteExpressService.create_order(payload, [vehicle])
+
+        self.assertEqual(result["status"], "waiting_pickup")
+        self.assertEqual(vehicle.planned_route[0]["order"].request_id, "old_order")
+        self.assertEqual(vehicle.planned_route[0]["type"], "O")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+========================================================================================
+time: 2026-08-18 09:34:50
+level: ERROR
+source: api.core.idle_hotspot_v6_forecast
+message: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+context: {"operation_area_id": 20260713, "clean_order_count": 11, "forecast_time": "2026-08-18 09:45:00"}
+exception: ValueError('The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\core.py", line 2477, in _build_idle_hotspot_cache
+    predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+  File "d:\Bus_Project\insert_riding\forecast\od_forecast_module.py", line 843, in predict_od_flows_v6
+    clf.fit(x, y_full_binary)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\base.py", line 1365, in wrapper
+    return fit_method(estimator, *args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\ensemble\_hist_gradient_boosting\gradient_boosting.py", line 673, in fit
+    X_train, X_val, y_train, y_val = train_test_split(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\utils\_param_validation.py", line 191, in wrapper
+    return func(*args, **kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2940, in train_test_split
+    train, test = next(cv.split(X=arrays[0], y=stratify))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 1927, in split
+    for train, test in self._iter_indices(X, y, groups):
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\sklearn\model_selection\_split.py", line 2342, in _iter_indices
+    raise ValueError(
+ValueError: The least populated class in y has only 1 member, which is too few. The minimum number of groups for any class cannot be less than 2.
+

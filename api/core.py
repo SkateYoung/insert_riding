@@ -39,18 +39,19 @@ class CoreDispatcher:
 
     # 路线成本函数运行时配置：平台可通过接口调整，修改后仅影响后续新一轮派单/插单评估。
     ROUTE_COST_CONFIG_DEFAULTS = {
-        "W_PASSENGER": 0.4,
+        "W_PASSENGER": 0.35,
         "W_ENTERPRISE": 0.20,
         "W_SOCIAL": 0.20,
         "W_FAIRNESS": 0.05,
-        "WAIT_COST_PER_MIN": 4.0,
-        "IN_CAR_COST_PER_MIN": 3.0,
+        "WAIT_COST_PER_MIN": 5.0,
+        "IN_CAR_COST_PER_MIN": 5.0,
         "LATE_ARRIVAL_COST_PER_MIN": 1.0,
-        "OLD_DELAY_COST_PER_MIN": 4.0,
-        "SEVERE_OLD_DELAY_PENALTY": 30.0,
-        "MILEAGE_UTIL_PENALTY_BASE": 25.0,
-        "LOAD_RATE_PENALTY_BASE": 20.0,
+        "OLD_DELAY_COST_PER_MIN": 25.0,
+        "SEVERE_OLD_DELAY_PENALTY": 25.0,
+        "MILEAGE_UTIL_PENALTY_BASE": 5.0,
+        "LOAD_RATE_PENALTY_BASE": 10.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 80.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
         "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
@@ -65,6 +66,7 @@ class CoreDispatcher:
         "MILEAGE_UTIL_PENALTY_BASE": "里程利用率惩罚基数，调大后更偏向减少空驶。",
         "LOAD_RATE_PENALTY_BASE": "满载率惩罚基数，调大后更偏向提高座位利用率。",
         "SOCIAL_DISTANCE_COST_PER_KM": "每公里道路资源/碳排放代理成本。",
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": "非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受此阈值限制。",
     }
     route_cost_config = copy.deepcopy(ROUTE_COST_CONFIG_DEFAULTS)
     route_cost_config_lock = threading.RLock()
@@ -91,6 +93,10 @@ class CoreDispatcher:
 
     #司机端因为网络信号原因未及时接到订单的对该订单匹配的冷却时间(即该订单冷却时间内无法再匹配该车辆)
     DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS = 3 * 60
+
+    # 车辆接近当前队首上下客点时锁定队首，避免插单/取消重排打断司机端正在执行的动作。
+    ROUTE_HEAD_LOCK_DISTANCE_M = 300.0
+    ROUTE_HEAD_LOCK_ETA_SECONDS = 120.0
 
     # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
@@ -721,6 +727,82 @@ class CoreDispatcher:
         return _result(True, cost, arrival_times, cost_details)
 
     @staticmethod
+    def _route_step_key(step):
+        """生成路线步骤稳定键，用于判断队首步骤是否被重排。"""
+        if not isinstance(step, dict):
+            return None
+        order = step.get("order")
+        request_id = getattr(order, "request_id", None)
+        if request_id is None:
+            return None
+        return (str(step.get("type") or ""), str(request_id))
+
+    @staticmethod
+    def _route_step_target_node(step):
+        """读取 O/D 步骤对应的目标路网节点。"""
+        if not isinstance(step, dict):
+            return None
+        order = step.get("order")
+        if order is None:
+            return None
+        return getattr(order, "o_node", None) if step.get("type") == "O" else getattr(order, "d_node", None)
+
+    @staticmethod
+    def _vehicle_position_for_head_lock(vehicle, city_map):
+        """读取用于队首保护判断的车辆当前位置。"""
+        gps = getattr(vehicle, "gps", None) or {}
+        lon = gps.get("lon")
+        lat = gps.get("lat")
+        if lon is not None and lat is not None:
+            try:
+                return float(lon), float(lat)
+            except (TypeError, ValueError):
+                pass
+
+        node_id = getattr(vehicle, "next_node", None) or getattr(vehicle, "last_node", None)
+        node = getattr(city_map, "nodes_map", {}).get(node_id) if city_map is not None else None
+        if node is None:
+            node_id = getattr(vehicle, "last_node", None)
+            node = getattr(city_map, "nodes_map", {}).get(node_id) if city_map is not None else None
+        if node is None:
+            return None
+        return float(node.lon), float(node.lat)
+
+    @staticmethod
+    def route_head_protection_info(vehicle, city_map):
+        """判断车辆当前队首是否进入执行保护窗口。"""
+        route = getattr(vehicle, "planned_route", None) or []
+        if not route:
+            return {"locked": False}
+
+        head = route[0]
+        target_node = CoreDispatcher._route_step_target_node(head)
+        position = CoreDispatcher._vehicle_position_for_head_lock(vehicle, city_map)
+        if target_node is None or position is None:
+            return {"locked": False, "reason": "missing_position_or_target"}
+
+        distance_m = AuxiliaryFunctions.haversine_distance(
+            position[0],
+            position[1],
+            float(target_node.lon),
+            float(target_node.lat),
+        )
+        eta_seconds = distance_m / SPEED_MPS if SPEED_MPS > 0 else float("inf")
+        locked = (
+            distance_m <= CoreDispatcher.ROUTE_HEAD_LOCK_DISTANCE_M
+            or eta_seconds <= CoreDispatcher.ROUTE_HEAD_LOCK_ETA_SECONDS
+        )
+        return {
+            "locked": locked,
+            "reason": "distance_or_eta_window" if locked else "outside_window",
+            "head_key": CoreDispatcher._route_step_key(head),
+            "distance_m": distance_m,
+            "eta_seconds": eta_seconds,
+            "distance_threshold_m": CoreDispatcher.ROUTE_HEAD_LOCK_DISTANCE_M,
+            "eta_threshold_seconds": CoreDispatcher.ROUTE_HEAD_LOCK_ETA_SECONDS,
+        }
+
+    @staticmethod
     def _try_insert_order(vehicle, new_order, city_map):
         """【组客内循环】：针对单车的贪婪性全路径缝隙插入探测寻优。
         
@@ -739,8 +821,11 @@ class CoreDispatcher:
 
         best_route = None
         best_cost = float('inf')
-        route = vehicle.planned_route
+        route = list(getattr(vehicle, "planned_route", []) or [])
         n = len(route)
+        head_protection = CoreDispatcher.route_head_protection_info(vehicle, city_map)
+        locked_head_key = head_protection.get("head_key") if head_protection.get("locked") and n > 0 else None
+        min_origin_index = 1 if locked_head_key else 0
         o_step = {'type': 'O', 'order': new_order}
         d_step = {'type': 'D', 'order': new_order}
         v_state = {
@@ -756,7 +841,7 @@ class CoreDispatcher:
         if vehicle.on_board_orders and route:
             _, _, orig_etas = CoreDispatcher.evaluate_route(route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
         
-        for i in range(n + 1):
+        for i in range(min_origin_index, n + 1):
             temp_route = route[:i] + [o_step] + route[i:]
             for j in range(i + 1, n + 2):
                 test_route = temp_route[:j] + [d_step] + temp_route[j:]
@@ -774,13 +859,15 @@ class CoreDispatcher:
                 safety -= 1
                 improved = False
                 n_route = len(best_route)
-                for i in range(n_route - 1):
+                for i in range(min_origin_index, n_route - 1):
                     for j in range(i + 1, n_route):
                         # 执行序列反转
                         mut_route = best_route[:]
                         sub = mut_route[i : j + 1]
                         sub.reverse()
                         mut_route[i : j + 1] = sub
+                        if locked_head_key and CoreDispatcher._route_step_key(mut_route[0]) != locked_head_key:
+                            continue
                         
                         # 检查逻辑合规性：不能在接到人之前就送人
                         valid = True
@@ -1035,6 +1122,8 @@ class CoreDispatcher:
             best_priority_score = 0.0
             best_cancel_risk_score = 0.0
             order_candidates = []
+            route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+            busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
             current_timestamp = max(
                 (getattr(v, "time", 0.0) for v in area_fleet),
                 default=time.time(),
@@ -1064,7 +1153,7 @@ class CoreDispatcher:
                         if route is not None and absolute_cost != float("inf")
                         else float("inf")
                     )
-                    if not is_idle and absolute_cost > 200.0:
+                    if not is_idle and absolute_cost > busy_vehicle_max_absolute_cost:
                         cost = float("inf")
                     if cost < c1:
                         c2 = c1
@@ -1255,6 +1344,8 @@ class CoreDispatcher:
                     best_priority_score = 0.0
                     best_cancel_risk_score = 0.0
                     order_candidates = []
+                    route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+                    busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
                     current_timestamp = max(
                         (getattr(v, "time", 0.0) for v in fleet),
                         default=time.time(),
@@ -1289,7 +1380,7 @@ class CoreDispatcher:
                             )
 
                             # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
-                            if not is_idle and absolute_cost > 100.0:
+                            if not is_idle and absolute_cost > busy_vehicle_max_absolute_cost:
                                 cost = float('inf')
 
                             # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)，这里使用增量成本。
@@ -4192,6 +4283,7 @@ class CoreDispatcher:
         event["distance_to_target"] = distance_to_target
         event["confirmed_position"] = {"lon": check_lon, "lat": check_lat}
         CoreDispatcher._drop_completed_route_prefix(vehicle, step)
+        CoreDispatcher._start_rest_if_ready(vehicle)
         persistence.record_vehicle_route(vehicle)
         persistence.record_vehicle_runtime(
             vehicle,

@@ -876,6 +876,39 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual([segment["type"] for segment in self.vehicle.planned_route_segment_grasped_point], ["D"])
         self.assertEqual([o.request_id for o in self.vehicle.on_board_orders], [order.request_id])
 
+    def test_cancel_locked_route_head_removes_vehicle_steps_immediately(self):
+        order = make_order(self.city)
+        order.status = "waiting_pickup"
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        self.vehicle.gps = {"lon": order.o_node.lon, "lat": order.o_node.lat}
+
+        original_record_vehicle_route = persistence.record_vehicle_route
+        original_record_vehicle_runtime = persistence.record_vehicle_runtime
+        original_record_order_snapshot = persistence.record_order_snapshot
+        persistence.record_vehicle_route = lambda *args, **kwargs: None
+        persistence.record_vehicle_runtime = lambda *args, **kwargs: None
+        persistence.record_order_snapshot = lambda *args, **kwargs: None
+        try:
+            cancel_result = CoreDispatcher.cancel_order(
+                order.request_id,
+                [self.vehicle],
+                self.city,
+                cancel_time=datetime.now().replace(microsecond=0),
+            )
+        finally:
+            persistence.record_vehicle_route = original_record_vehicle_route
+            persistence.record_vehicle_runtime = original_record_vehicle_runtime
+            persistence.record_order_snapshot = original_record_order_snapshot
+
+        self.assertEqual(cancel_result["status"], "cancelled")
+        self.assertEqual(order.status, "cancelled")
+        self.assertEqual(self.vehicle.on_board_orders, [])
+        self.assertEqual(self.vehicle.planned_route, [])
+
     def test_driver_push_confirmation_success_moves_matched_to_waiting_pickup(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [
