@@ -278,17 +278,32 @@ def _route_version(vehicle):
     return _short_route_version("route", parts)
 
 
-def _operation_status(vehicle):
-    rest_status = getattr(vehicle, "rest_status", None)
-    if rest_status == "resting":
-        return "resting"
-    if rest_status in {"closing", "preparing_closure"}:
+def _normalize_vehicle_operation_status(status, default="operating"):
+    """规范化车辆运营状态，避免旧运行态值继续驱动业务。"""
+    normalized = str(status or default or "operating").strip()
+    if normalized == "preparing_closure":
         return "closing"
-    if getattr(vehicle, "planned_route", None) or getattr(vehicle, "on_board_orders", None):
-        return "serving"
-    if getattr(vehicle, "idle_target", None):
-        return "idle"
-    return "idle"
+    if normalized in {"idle", "serving"}:
+        return "operating"
+    return normalized
+
+
+def _rest_status_from_operation_status(operation_status):
+    """由 operation_status 派生旧版 rest_status 字段。"""
+    operation_status = _normalize_vehicle_operation_status(operation_status)
+    if operation_status in {"closing", "resting"}:
+        return operation_status
+    return "operating"
+
+
+def _operation_status(vehicle):
+    operation_status = getattr(vehicle, "operation_status", None)
+    if operation_status:
+        return _normalize_vehicle_operation_status(operation_status)
+    rest_status = getattr(vehicle, "rest_status", None)
+    if rest_status:
+        return _normalize_vehicle_operation_status(rest_status)
+    return "operating"
 
 
 def _order_status(order, default="pooled"):
@@ -4192,7 +4207,7 @@ class MySqlPersistence:
             payload.get("seat_count") or 0,
             payload.get("max_load_count") or 0,
             payload.get("vehicle_color"),
-            payload.get("operation_status") or "idle",
+            _normalize_vehicle_operation_status(payload.get("operation_status") or "operating"),
             payload.get("operation_mode") or "dynamic_bus",
             operation_area_id,
             driver_id,
@@ -4490,6 +4505,16 @@ class MySqlPersistence:
             _to_datetime(payload.get("reported_at")) or _now_dt(),
             tenant_id,
         ))
+        if payload.get("operation_status") not in (None, ""):
+            self._execute(cursor, """
+                UPDATE bus_vehicle
+                SET operation_status=%s, updated_at=CURRENT_TIMESTAMP(3)
+                WHERE id=%s AND tenant_id=%s AND deleted=0
+            """, (
+                _normalize_vehicle_operation_status(payload.get("operation_status")),
+                vehicle_id,
+                tenant_id,
+            ))
 
     def _op_location_log(self, cursor, tenant_id, payload):
         vehicle_id = self._fetch_id(cursor, "bus_vehicle", "vehicle_code", payload.get("vehicle_code"), tenant_id)
@@ -5029,7 +5054,7 @@ def record_driver(vehicle):
         "driver_code": _driver_code(vehicle),
         "driver_no": getattr(vehicle, "driver_no", None),
         "driver_name": getattr(vehicle, "driver_no", None) or _driver_code(vehicle),
-        "work_status": "resting" if getattr(vehicle, "is_resting", False) else "listening",
+        "work_status": "resting" if _operation_status(vehicle) == "resting" else "listening",
     })
 
 
@@ -5060,9 +5085,12 @@ def record_vehicle_runtime(vehicle, report_time=None):
     """
     gps = getattr(vehicle, "gps", {}) or {}
     idle_target = getattr(vehicle, "idle_target", None) or {}
+    operation_status = _operation_status(vehicle)
+    rest_status = _rest_status_from_operation_status(operation_status)
     enqueue("vehicle_runtime", {
         "vehicle_code": _vehicle_code(vehicle),
         "driver_code": _driver_code(vehicle),
+        "operation_status": operation_status,
         "current_lon": gps.get("lon"),
         "current_lat": gps.get("lat"),
         "last_node_code": getattr(vehicle, "last_node", None),
@@ -5072,12 +5100,8 @@ def record_vehicle_runtime(vehicle, report_time=None):
         "on_board_order_ids": [str(getattr(o, "request_id", "")) for o in getattr(vehicle, "on_board_orders", []) or []],
         "planned_step_count": len(getattr(vehicle, "planned_route", []) or []),
         "segment_route": getattr(vehicle, "planned_route_segment_grasped_point", None),
-        "rest_status": getattr(vehicle, "rest_status", "operating"),
-        "can_accept_order": (
-            not getattr(vehicle, "is_rest_requested", False)
-            and not getattr(vehicle, "is_resting", False)
-            and getattr(vehicle, "rest_status", "operating") == "operating"
-        ),
+        "rest_status": rest_status,
+        "can_accept_order": operation_status == "operating",
         "route_version": _route_version(vehicle),
         "route_grasp_status": getattr(vehicle, "planned_route_grasp_status", None),
         "route_grasp_error": getattr(vehicle, "planned_route_grasp_error", None),
@@ -5408,7 +5432,8 @@ def record_rest_request(vehicle, result=None):
     """
     result = result or {}
     gps = getattr(vehicle, "gps", {}) or {}
-    started_at = getattr(vehicle, "rest_started_time", None) if getattr(vehicle, "is_resting", False) else None
+    operation_status = _operation_status(vehicle)
+    started_at = getattr(vehicle, "rest_started_time", None) if operation_status == "resting" else None
     source = str(result.get("source") or "driver").strip() or "driver"
     reason = str(result.get("reason") or "").strip()
     decision = str(result.get("decision") or "").strip()
@@ -5423,7 +5448,7 @@ def record_rest_request(vehicle, result=None):
         "driver_code": _driver_code(vehicle),
         "desired_rest_time": getattr(vehicle, "desired_rest_time", None),
         "rest_duration_minutes": int((getattr(vehicle, "rest_duration", 0) or 0) / 60) or 20,
-        "status": result.get("status") or getattr(vehicle, "rest_status", None) or "requested",
+        "status": result.get("status") or _rest_status_from_operation_status(operation_status) or "requested",
         "request_lon": gps.get("lon"),
         "request_lat": gps.get("lat"),
         "requested_at": _now_dt(),

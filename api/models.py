@@ -602,6 +602,7 @@ class Vehicle:
         
         # 新增状态机：疲劳监控与休眠状态
         self.driving_time = 0.0
+        self.operation_status = "operating"
         self.is_rest_requested = False
         self.is_resting = False
         self.rest_timer = 0.0
@@ -635,14 +636,34 @@ class Vehicle:
         else:
             self.time = float(current_time)
 
+        operation_status = str(getattr(self, "operation_status", "operating") or "operating")
+        if operation_status == "preparing_closure":
+            operation_status = "closing"
+            self.operation_status = "closing"
+        if operation_status == "closing":
+            self.rest_status = "closing"
+            self.is_resting = False
+            self.is_rest_requested = True
+        elif operation_status == "resting":
+            self.rest_status = "resting"
+            self.is_resting = True
+            self.is_rest_requested = True
+        else:
+            self.operation_status = "operating"
+            self.rest_status = "operating"
+            self.is_resting = False
+            self.is_rest_requested = False
+
         # ============== 疲劳与休息状态机时钟管理 ==============
         if self.is_resting:
+            self.operation_status = "resting"
             self.rest_status = "resting"
             # 当车在休息状态下，不累计驾驶时间，停止物理移动，专注累加休息倒数机制
             self.rest_timer += dt
             if self.rest_timer >= self.rest_duration:
                 self.is_resting = False
                 self.is_rest_requested = False
+                self.operation_status = "operating"
                 self.rest_status = "operating"
                 self.desired_rest_time = None
                 self.rest_started_time = None
@@ -653,10 +674,11 @@ class Vehicle:
 
         if (
             self.desired_rest_time is not None
-            and self.rest_status == "operating"
+            and getattr(self, "operation_status", "operating") == "operating"
             and self.time >= self.desired_rest_time - self.rest_prepare_threshold
         ):
             self.is_rest_requested = True
+            self.operation_status = "closing"
             self.rest_status = "closing"
             print(f"[Vehicle.Rest] {self.id} 已接近预约休息时间，切换为收车中。")
             
@@ -667,6 +689,7 @@ class Vehicle:
         # 收车预备 -> 正式深睡沉淀 判定：身上再无接驳负债
         if self.is_rest_requested and len(self.on_board_orders) == 0 and len(self.planned_route) == 0:
             self.is_resting = True
+            self.operation_status = "resting"
             self.rest_status = "resting"
             self.rest_started_time = self.time
             self.rest_timer = 0.0

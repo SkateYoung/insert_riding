@@ -203,6 +203,24 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertFalse(vehicle.is_rest_requested)
         self.assertFalse(vehicle.is_resting)
 
+    def test_vehicle_acceptance_uses_operation_status_only(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.operation_status = "operating"
+        vehicle.rest_status = "resting"
+        vehicle.is_rest_requested = True
+        vehicle.is_resting = True
+
+        self.assertTrue(CoreDispatcher._vehicle_can_accept_order(vehicle))
+
+    def test_vehicle_closing_status_blocks_order_even_if_rest_fields_stale(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.operation_status = "closing"
+        vehicle.rest_status = "operating"
+        vehicle.is_rest_requested = False
+        vehicle.is_resting = False
+
+        self.assertFalse(CoreDispatcher._vehicle_can_accept_order(vehicle))
+
     def test_rest_endpoint_accepts_platform_source(self):
         self.create_driver()
         self.create_vehicle(driver="driver-1")

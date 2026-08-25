@@ -23,7 +23,6 @@ bp = Blueprint("api_routes", __name__)
 
 REST_STATUS_TEXT = {
     "operating": "运营中",
-    "preparing_closure": "准备收车中",
     "closing": "收车中",
     "resting": "休息中",
     "offline": "离线",
@@ -147,6 +146,10 @@ def _vehicle_to_dict(v):
     Returns:
         dict: 包含车辆身份、载客状态、订单计划、轨迹点和空车预测信息的快照。
     """
+    operation_status = CoreDispatcher.normalize_vehicle_operation_status(
+        getattr(v, "operation_status", None)
+    )
+    rest_status = CoreDispatcher.rest_status_from_operation_status(operation_status)
     return {
         "id": v.id,
         "color": v.color,
@@ -203,11 +206,11 @@ def _vehicle_to_dict(v):
         "next_node": v.next_node,
         "progress": v.progress,
         "driving_time": v.driving_time,
-        "is_resting": v.is_resting,
-        "is_rest_requested": v.is_rest_requested,
-        "rest_status": getattr(v, "rest_status", "operating"),
-        "rest_status_text": REST_STATUS_TEXT.get(getattr(v, "rest_status", "operating"), "未知"),
-        "operation_status": getattr(v, "operation_status", getattr(v, "rest_status", "operating")),
+        "is_resting": operation_status == "resting",
+        "is_rest_requested": operation_status in {"closing", "resting"},
+        "rest_status": rest_status,
+        "operation_status": operation_status,
+        "rest_status_text": REST_STATUS_TEXT.get(rest_status, "未知"),
         "desired_rest_time": getattr(v, "desired_rest_time", None),
         "desired_rest_time_text": (
             state.format_timestamp(v.desired_rest_time)
@@ -872,10 +875,12 @@ def _runtime_payload_from_position(position, operation_status, existing_vehicle=
     Raises:
         ValueError: 系统已初始化但车辆位置无法吸附到路网节点。
     """
-    rest_status = operation_status if operation_status in {"resting", "closing"} else "operating"
+    operation_status = CoreDispatcher.normalize_vehicle_operation_status(operation_status)
+    rest_status = CoreDispatcher.rest_status_from_operation_status(operation_status)
     payload = {
         "rest_status": rest_status,
         "can_accept_order": operation_status == "operating",
+        "operation_status": operation_status,
     }
     snap_info = None
     if position is None and existing_vehicle:
@@ -1243,12 +1248,9 @@ def _clear_operation_area_runtime_after_delete(operation_area_id):
             if getattr(vehicle, "operation_area_id", None) == area_id
         ]
     for vehicle in area_fleet:
-        vehicle.operation_status = "offline"
+        CoreDispatcher.apply_vehicle_operation_status(vehicle, "offline")
         vehicle.operation_area_id = None
         vehicle.operation_area_code = ""
-        vehicle.is_resting = False
-        vehicle.is_rest_requested = False
-        vehicle.rest_status = "operating"
         vehicle.planned_route = []
         vehicle.planned_route_point = []
         vehicle.planned_route_grasped_point = []
@@ -1276,19 +1278,7 @@ def _set_runtime_vehicle_status(vehicle, operation_status):
     Returns:
         None。
     """
-    vehicle.operation_status = operation_status
-    if operation_status == "operating":
-        vehicle.is_resting = False
-        vehicle.is_rest_requested = False
-        vehicle.rest_status = "operating"
-    elif operation_status == "resting":
-        vehicle.is_resting = True
-        vehicle.is_rest_requested = True
-        vehicle.rest_status = "resting"
-    elif operation_status == "closing":
-        vehicle.is_resting = False
-        vehicle.is_rest_requested = True
-        vehicle.rest_status = "closing"
+    CoreDispatcher.apply_vehicle_operation_status(vehicle, operation_status)
 
 
 def _apply_vehicle_record_to_runtime(vehicle_record):

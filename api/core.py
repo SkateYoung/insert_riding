@@ -1480,10 +1480,38 @@ class CoreDispatcher:
         """判断车辆当前是否允许继续接收新订单。"""
         return (
             not CoreDispatcher._is_commute_vehicle(vehicle)
-            and not getattr(vehicle, "is_rest_requested", False)
-            and not getattr(vehicle, "is_resting", False)
-            and getattr(vehicle, "rest_status", "operating") == "operating"
+            and CoreDispatcher.normalize_vehicle_operation_status(
+                getattr(vehicle, "operation_status", None)
+            ) == "operating"
         )
+
+    @staticmethod
+    def normalize_vehicle_operation_status(status, default="operating"):
+        """规范化车辆运营状态，兼容历史运行态中的旧状态值。"""
+        normalized = str(status or default or "operating").strip()
+        if normalized == "preparing_closure":
+            return "closing"
+        if normalized in {"idle", "serving"}:
+            return "operating"
+        return normalized
+
+    @staticmethod
+    def rest_status_from_operation_status(operation_status):
+        """由 operation_status 派生旧版 rest_status 展示字段。"""
+        operation_status = CoreDispatcher.normalize_vehicle_operation_status(operation_status)
+        if operation_status in {"closing", "resting"}:
+            return operation_status
+        return "operating"
+
+    @staticmethod
+    def apply_vehicle_operation_status(vehicle, operation_status):
+        """统一设置车辆运营状态，并同步旧字段的兼容快照。"""
+        operation_status = CoreDispatcher.normalize_vehicle_operation_status(operation_status)
+        vehicle.operation_status = operation_status
+        vehicle.rest_status = CoreDispatcher.rest_status_from_operation_status(operation_status)
+        vehicle.is_resting = operation_status == "resting"
+        vehicle.is_rest_requested = operation_status in {"closing", "resting"}
+        return operation_status
 
     @staticmethod
     def _event_timestamp(value=None):
@@ -1727,9 +1755,11 @@ class CoreDispatcher:
     @staticmethod
     def _start_rest_if_ready(vehicle):
         """车辆已经停止接单且没有未完成任务时，立即进入休息状态。"""
-        if vehicle.is_rest_requested and not vehicle.on_board_orders and not vehicle.planned_route:
-            vehicle.is_resting = True
-            vehicle.rest_status = "resting"
+        operation_status = CoreDispatcher.normalize_vehicle_operation_status(
+            getattr(vehicle, "operation_status", None)
+        )
+        if operation_status == "closing" and not vehicle.on_board_orders and not vehicle.planned_route:
+            CoreDispatcher.apply_vehicle_operation_status(vehicle, "resting")
             vehicle.rest_started_time = vehicle.time
             vehicle.rest_timer = 0.0
             return True
@@ -1887,7 +1917,11 @@ class CoreDispatcher:
             )
 
         estimated_finish_time = CoreDispatcher.estimate_vehicle_route_finish_time(vehicle, city_map)
-        if vehicle.is_resting:
+        operation_status = CoreDispatcher.normalize_vehicle_operation_status(
+            getattr(vehicle, "operation_status", None)
+        )
+        if operation_status == "resting":
+            CoreDispatcher.apply_vehicle_operation_status(vehicle, "resting")
             return {
                 "status": "resting",
                 "decision": "already_resting",
@@ -1897,13 +1931,12 @@ class CoreDispatcher:
         if desired_rest_time is None:
             CoreDispatcher._clear_idle_parking(vehicle)
             vehicle.desired_rest_time = None
-            vehicle.is_rest_requested = True
-            vehicle.rest_status = "closing"
+            CoreDispatcher.apply_vehicle_operation_status(vehicle, "closing")
             CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
             CoreDispatcher._start_rest_if_ready(vehicle)
             persistence.record_vehicle_runtime(vehicle)
             return {
-                "status": vehicle.rest_status,
+                "status": getattr(vehicle, "rest_status", "operating"),
                 "decision": "close_now",
                 "estimated_finish_time": estimated_finish_time,
             }
@@ -1912,24 +1945,22 @@ class CoreDispatcher:
         vehicle.desired_rest_time = desired_rest_time
         threshold_time = desired_rest_time - vehicle.rest_prepare_threshold
 
-        if estimated_finish_time is None or estimated_finish_time >= threshold_time:
+        if vehicle.time >= threshold_time:
             CoreDispatcher._clear_idle_parking(vehicle)
-            vehicle.is_rest_requested = True
-            vehicle.rest_status = "preparing_closure"
+            CoreDispatcher.apply_vehicle_operation_status(vehicle, "closing")
             CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
             CoreDispatcher._start_rest_if_ready(vehicle)
             persistence.record_vehicle_runtime(vehicle)
             return {
-                "status": vehicle.rest_status,
+                "status": getattr(vehicle, "rest_status", "operating"),
                 "decision": "prepare_closure",
                 "estimated_finish_time": estimated_finish_time,
             }
 
-        if not vehicle.is_rest_requested:
-            vehicle.rest_status = "operating"
-            vehicle.is_resting = False
+        if operation_status != "operating":
+            CoreDispatcher.apply_vehicle_operation_status(vehicle, "operating")
         return {
-            "status": vehicle.rest_status,
+            "status": getattr(vehicle, "rest_status", "operating"),
             "decision": "keep_operating_until_rest_time",
             "estimated_finish_time": estimated_finish_time,
         }
@@ -1938,32 +1969,34 @@ class CoreDispatcher:
     def refresh_scheduled_rest_requests(fleet, city_map):
         """周期性检查预约休息车辆，接近休息时间时切换为收车中。"""
         for vehicle in fleet:
-            if vehicle.is_resting:
+            operation_status = CoreDispatcher.normalize_vehicle_operation_status(
+                getattr(vehicle, "operation_status", None)
+            )
+            if operation_status == "resting":
+                CoreDispatcher.apply_vehicle_operation_status(vehicle, "resting")
                 CoreDispatcher._clear_idle_parking(vehicle)
                 if not vehicle.planned_route:
                     vehicle.planned_route_point = []
                 continue
-            if vehicle.is_rest_requested:
+            if operation_status == "closing":
                 if not vehicle.planned_route:
                     CoreDispatcher._clear_idle_parking(vehicle)
                     CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
-                CoreDispatcher._start_rest_if_ready(vehicle)
+                if CoreDispatcher._start_rest_if_ready(vehicle):
+                    persistence.record_vehicle_runtime(vehicle)
                 continue
             if vehicle.desired_rest_time is None:
                 continue
 
-            estimated_finish_time = CoreDispatcher.estimate_vehicle_route_finish_time(vehicle, city_map)
             threshold_time = vehicle.desired_rest_time - vehicle.rest_prepare_threshold
             should_close = vehicle.time >= threshold_time
-            if estimated_finish_time is not None and estimated_finish_time >= threshold_time:
-                should_close = True
 
             if should_close:
                 CoreDispatcher._clear_idle_parking(vehicle)
-                vehicle.is_rest_requested = True
-                vehicle.rest_status = "closing"
+                CoreDispatcher.apply_vehicle_operation_status(vehicle, "closing")
                 CoreDispatcher.refresh_vehicle_route_metadata(vehicle, city_map)
                 CoreDispatcher._start_rest_if_ready(vehicle)
+                persistence.record_vehicle_runtime(vehicle)
 
     # ============================================================
     # 功能四：车辆 GPS 路网吸附

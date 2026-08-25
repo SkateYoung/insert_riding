@@ -1,0 +1,14 @@
+========================================================================================
+time: 2026-08-25 01:45:59
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787593559925-1-20852\",\"operation_area_id\":666666,\"passenger_phone\":\"13993540256\",\"passenger_id\":\"demo-pax-1787593559925-1\",\"origin\":{\"lon\":113.339671,\"lat\":23.10361},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 01:48:00\",\"latest\":\"2026-08-25 02:00:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"poi_code\":\"station_666666_113_33511000_23_10705800\"}\n"}
+
+========================================================================================
+time: 2026-08-25 01:46:01
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787593561612-1-30497\",\"operation_area_id\":666666,\"passenger_phone\":\"13993540256\",\"passenger_id\":\"demo-pax-1787593561612-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.340715,\"lat\":23.098749},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 01:48:00\",\"latest\":\"2026-08-25 02:00:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
+

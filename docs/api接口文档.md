@@ -335,8 +335,9 @@ runtime_logs/error_YYYYMMDD.txt
     "rest_duration_minutes": 20.0,
     "rest_started_time": null,
     "rest_started_time_text": null,   
-    "rest_status": "operating",		  # 车辆状态英文表示
-    "rest_status_text": "运营中",		# 车辆状态中文表示
+    "operation_status": "operating",  # 车辆运营状态，平台维护的唯一车辆状态来源
+    "rest_status": "operating",		  # 兼容展示字段，由 operation_status 派生
+    "rest_status_text": "运营中",		# 兼容展示文本，由 operation_status 派生
     "rest_timer": 0.0,
     "time": 1781759552.0,
     "time_text": "2026-06-18 13:12:32",
@@ -1493,7 +1494,7 @@ POST/PUT 请求体示例：
 - 上下车坐标必须都属于该线路站点，且起终点不能相同。
 - 定点候客和巡游车辆都使用车辆 GPS 到上车站点的直线距离做就近匹配。
 - 无 GPS 的快线车辆不参与匹配。
-- 候选车辆必须绑定同一线路、同一运营区，绑定状态为 `active`，车辆 `operation_mode` 为 `commute_fixed_waiting` 或 `commute_cruising`，且 `rest_status='operating'`。
+- 候选车辆必须绑定同一线路、同一运营区，绑定状态为 `active`，车辆 `operation_mode` 为 `commute_fixed_waiting` 或 `commute_cruising`，且 `operation_status='operating'`。
 - 车辆接单和插单时会保持已有上下客步骤相对顺序，只局部插入新订单 O/D，并校验全程载客数不超过容量。
 - 匹配成功后订单状态为 `waiting_pickup`；无可用车辆时状态为 `pooled`。
 - 快线订单写入 `bus_order`，`order_source='commute_express'`，线路和站点序列快照写入 `route_segments`。
@@ -1901,7 +1902,7 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 
 ### 4.11 POST `/fleet/<vehicle_id>/rest`
 
-司机端或平台请求车辆休息。接口兼容旧请求体，不传 `source` 时按司机主动休息处理；平台可通过 `source=platform` 复用同一接口发起立即休息或预约休息。
+司机端或平台请求车辆休息。接口兼容旧请求体，不传 `source` 时按司机主动休息处理；平台可通过 `source=platform` 复用同一接口发起立即休息或预约休息。车辆状态统一写入 `operation_status`，`rest_status/rest_status_text` 仅作为兼容展示字段返回。
 
 请求体为空的话，表示立即收车：
 

@@ -140,7 +140,10 @@ def refresh_runtime_state(current_timestamp=None):
         clock_tick_count += 1
 
         for vehicle in fleet:
+            before_operation_status = getattr(vehicle, "operation_status", None)
             vehicle.tick(dt, current_time=current_timestamp)
+            if getattr(vehicle, "operation_status", None) != before_operation_status:
+                persistence.record_vehicle_runtime(vehicle, report_time=current_timestamp)
         for operation_area_id, area_city in city_maps.items():
             CoreDispatcher.refresh_scheduled_rest_requests(fleet_by_area.get(operation_area_id, []), area_city)
         return dt
@@ -760,8 +763,10 @@ def _vehicle_from_db_record(record, city_map, current_timestamp, operation_area_
     Returns:
         Vehicle | None: 可进入运行车队的车辆对象；离线、维修或缺少位置时返回 None。
     """
-    operation_status = record.get("operation_status") or "offline"
-    if operation_status not in {"operating", "resting", "closing", "idle", "serving"}:
+    operation_status = CoreDispatcher.normalize_vehicle_operation_status(
+        record.get("operation_status") or "offline"
+    )
+    if operation_status not in {"operating", "resting", "closing"}:
         return None
 
     current_lon = record.get("current_lon")
@@ -806,20 +811,8 @@ def _vehicle_from_db_record(record, city_map, current_timestamp, operation_area_
         vehicle.progress = float(record.get("edge_progress") or 0.0)
     except (TypeError, ValueError):
         vehicle.progress = 0.0
-    vehicle.operation_status = operation_status
     vehicle.operation_mode = record.get("operation_mode") or "dynamic_bus"
-    if operation_status == "operating":
-        vehicle.rest_status = "operating"
-        vehicle.is_resting = False
-        vehicle.is_rest_requested = False
-    elif operation_status == "resting":
-        vehicle.rest_status = "resting"
-        vehicle.is_resting = True
-        vehicle.is_rest_requested = True
-    elif operation_status == "closing":
-        vehicle.rest_status = "closing"
-        vehicle.is_resting = False
-        vehicle.is_rest_requested = True
+    CoreDispatcher.apply_vehicle_operation_status(vehicle, operation_status)
     return vehicle
 
 

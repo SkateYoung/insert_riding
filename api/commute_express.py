@@ -407,7 +407,7 @@ class CommuteExpressService:
                 continue
             if str(getattr(vehicle, "operation_mode", "") or "") not in COMMUTE_OPERATION_MODES:
                 continue
-            if getattr(vehicle, "rest_status", "operating") != "operating":
+            if str(getattr(vehicle, "operation_status", "operating") or "operating") != "operating":
                 continue
             if passenger_count > int(getattr(vehicle, "capacity", 0) or 0):
                 continue
