@@ -5248,7 +5248,7 @@ def record_order_snapshot(order, city_map=None, status=None, vehicle=None, route
     ))
 
 
-def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, details=None):
+def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, details=None, record_vehicle_state=True):
     """订单派给车辆后写入调度任务、订单、路线和运行态。
 
     Args:
@@ -5279,11 +5279,12 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
         },
         "finished_at": _now_dt(),
     })
-    record_vehicle_route(vehicle, path_result=path_result)
-    record_vehicle_runtime(vehicle)
+    if record_vehicle_state:
+        record_vehicle_route(vehicle, path_result=path_result)
+        record_vehicle_runtime(vehicle)
 
 
-def record_order_matched_pending(order, vehicle, city_map=None, path_result=None, details=None):
+def record_order_matched_pending(order, vehicle, city_map=None, path_result=None, details=None, record_vehicle_state=True):
     """订单已匹配车辆但仍等待司机端接收确认。"""
     return record_dispatch_assignment(
         order,
@@ -5291,6 +5292,7 @@ def record_order_matched_pending(order, vehicle, city_map=None, path_result=None
         city_map=city_map,
         path_result=path_result,
         details=details,
+        record_vehicle_state=record_vehicle_state,
     )
 
 

@@ -1569,6 +1569,133 @@ def init_route():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _response_error_payload(response_or_tuple, default_status=400):
+    """把内部校验响应转换为批量接口可返回的错误对象。"""
+    status_code = default_status
+    response_obj = response_or_tuple
+    if isinstance(response_or_tuple, tuple):
+        response_obj = response_or_tuple[0]
+        if len(response_or_tuple) > 1:
+            status_code = int(response_or_tuple[1])
+    payload = response_obj.get_json(silent=True) if hasattr(response_obj, "get_json") else None
+    if not isinstance(payload, dict):
+        payload = {"error": str(response_obj)}
+    return payload, status_code
+
+
+def _create_single_order_for_batch(data):
+    """按单体 /order 规则创建一个订单，供批量发起复用。"""
+    origin = data.get("origin") or {}
+    destination = data.get("destination") or {}
+    expected_pickup_time = data.get("expected_pickup_time") or {}
+    operation_area_id = _request_operation_area_id(data)
+    operation_area = _operation_area_by_area_id(operation_area_id)
+    operation_area_code = str((operation_area or {}).get("code") or "").strip() or None
+    city_map, area_error = _city_for_operation_area_or_error(operation_area_id)
+    if area_error is not None:
+        payload, status_code = _response_error_payload(area_error)
+        return payload, status_code
+
+    try:
+        request_id = str(data["request_id"])
+        o_lon = float(origin["lon"])
+        o_lat = float(origin["lat"])
+        d_lon = float(destination["lon"])
+        d_lat = float(destination["lat"])
+        expected_pickup_earliest = _parse_datetime(expected_pickup_time.get("earliest"), "expected_pickup_time.earliest")
+        expected_pickup_latest = _parse_datetime(expected_pickup_time.get("latest"), "expected_pickup_time.latest")
+        passenger_count = int(data["passenger_count"])
+        passenger_phone = str(data["passenger_phone"]).strip()
+        passenger_id = str(data.get("passenger_id") or "").strip()
+    except KeyError as exc:
+        return {"error": f"缺少必填字段: {exc.args[0]}"}, 400
+    except (TypeError, ValueError) as exc:
+        return {"error": str(exc)}, 400
+
+    if not operation_area_id:
+        return {"error": "operation_area_id 必须填写"}, 400
+    if not passenger_phone:
+        return {"error": "passenger_phone 必须填写"}, 400
+    if passenger_count <= 0:
+        return {"error": "passenger_count 必须为正整数"}, 400
+    if expected_pickup_latest < expected_pickup_earliest:
+        return {"error": "expected_pickup_time.latest 不能早于 earliest"}, 400
+
+    try:
+        _validate_order_coordinate(o_lon, o_lat, "origin")
+        _validate_order_coordinate(d_lon, d_lat, "destination")
+    except ValueError as exc:
+        return {"error": str(exc), "code": "station_coordinate_invalid"}, 400
+
+    if (round(o_lon, 8), round(o_lat, 8)) == (round(d_lon, 8), round(d_lat, 8)):
+        return {"error": "起点和终点不能是同一个站点", "code": "same_origin_destination"}, 409
+
+    origin_station, station_error = _order_station_by_coordinate(operation_area_id, o_lon, o_lat, "origin")
+    if station_error is not None:
+        payload, status_code = _response_error_payload(station_error)
+        return payload, status_code
+    destination_station, station_error = _order_station_by_coordinate(operation_area_id, d_lon, d_lat, "destination")
+    if station_error is not None:
+        payload, status_code = _response_error_payload(station_error)
+        return payload, status_code
+    if origin_station.get("id") == destination_station.get("id"):
+        return {"error": "起点和终点不能是同一个站点", "code": "same_origin_destination"}, 409
+
+    origin_node, station_error = _runtime_node_for_order_station(city_map, origin_station, "origin")
+    if station_error is not None:
+        payload, status_code = _response_error_payload(station_error)
+        return payload, status_code
+    destination_node, station_error = _runtime_node_for_order_station(city_map, destination_station, "destination")
+    if station_error is not None:
+        payload, status_code = _response_error_payload(station_error)
+        return payload, status_code
+
+    with state.state_lock:
+        time_snapshot = state.current_time()
+        request_time = state.parse_business_datetime(time_snapshot["time_text"])
+        order = Order(
+            request_id=request_id,
+            o_lon=o_lon,
+            o_lat=o_lat,
+            d_lon=d_lon,
+            d_lat=d_lat,
+            request_time=request_time,
+            expected_pickup_earliest=expected_pickup_earliest,
+            expected_pickup_latest=expected_pickup_latest,
+            passenger_count=passenger_count,
+            city_map=city_map,
+            passenger_phone=passenger_phone,
+            passenger_id=passenger_id,
+            operation_area_id=operation_area_id,
+            operation_area_code=operation_area_code,
+            req_time=time_snapshot["timestamp"],
+            origin_node=origin_node,
+            destination_node=destination_node,
+        )
+        CoreDispatcher.pool_and_route_planning(state.fleet_for_operation_area(operation_area_id), order, city_map)
+        pool_size = len(CoreDispatcher.order_pool)
+
+    return {
+        "status": "pooled",
+        "request_id": order.request_id,
+        "origin_node": order.o_node.name,
+        "origin_coords": {"lon": order.o_lon, "lat": order.o_lat},
+        "destination_node": order.d_node.name,
+        "destination_coords": {"lon": order.d_lon, "lat": order.d_lat},
+        "request_time": order.request_time.isoformat(sep=" "),
+        "expected_pickup_time": {
+            "earliest": order.expected_pickup_earliest.isoformat(sep=" "),
+            "latest": order.expected_pickup_latest.isoformat(sep=" "),
+        },
+        "passenger_count": order.passenger_count,
+        "passenger_phone": order.passenger_phone,
+        "passenger_id": order.passenger_id,
+        "operation_area_id": order.operation_area_id,
+        "operation_area_code": order.operation_area_code,
+        "pool_size": pool_size,
+    }, 200
+
+
 @bp.route("/order", methods=["POST"])
 def create_order():
     """创建新订单并注入调度池。
@@ -1591,6 +1718,38 @@ def create_order():
         return jsonify({"error": "系统未初始化，请先调用 POST /init"}), 400
 
     data = request.get_json(silent=True) or {}
+    if isinstance(data, dict) and "orders" in data:
+        orders = data.get("orders")
+        if not isinstance(orders, list) or not orders:
+            return jsonify({"error": "orders 必须是非空数组"}), 400
+        results = []
+        for index, item in enumerate(orders):
+            if not isinstance(item, dict):
+                results.append({
+                    "index": index,
+                    "success": False,
+                    "status": 400,
+                    "error": "订单项必须是 JSON 对象",
+                })
+                continue
+            payload, status_code = _create_single_order_for_batch(item)
+            result = {
+                "index": index,
+                "success": status_code == 200,
+                "status": status_code,
+            }
+            result.update(payload)
+            results.append(result)
+        success_count = sum(1 for item in results if item.get("success"))
+        failure_count = len(results) - success_count
+        status_code = 200 if failure_count == 0 else 207 if success_count > 0 else 400
+        return jsonify({
+            "total": len(results),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "results": results,
+            "pool_size": len(CoreDispatcher.order_pool),
+        }), status_code
     origin = data.get("origin") or {}
     destination = data.get("destination") or {}
     expected_pickup_time = data.get("expected_pickup_time") or {}
@@ -1782,6 +1941,32 @@ def cancel_order(request_id):
     """
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
+
+    data = request.get_json(silent=True) or {}
+    if isinstance(data, dict) and "request_ids" in data:
+        request_ids = data.get("request_ids")
+        if not isinstance(request_ids, list) or not request_ids:
+            return jsonify({"error": "request_ids 必须是非空数组"}), 400
+        with state.state_lock:
+            result = CoreDispatcher.cancel_orders(
+                request_ids,
+                state.fleet,
+                state.city_maps,
+                cancel_time=state.now_datetime(),
+            )
+        if result["success_count"] == result["total"]:
+            status_code = 200
+        elif result["success_count"] > 0:
+            status_code = 207
+        else:
+            statuses = {item.get("status") for item in result.get("results", [])}
+            if "rejected" in statuses:
+                status_code = 409
+            elif "not_found" in statuses:
+                status_code = 404
+            else:
+                status_code = 400
+        return jsonify(result), status_code
 
     with state.state_lock:
         cancel_city = None

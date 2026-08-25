@@ -454,8 +454,16 @@
             </div>
             <div class="quick-actions">
                 <button id="randomOrder1Btn" type="button">发起 1 单</button>
-                <button id="randomOrder10Btn" type="button">发起 10 单</button>
-                <button id="randomOrder50Btn" type="button">发起 50 单</button>
+                <button id="randomOrder10Btn" type="button">批量发起 10 单</button>
+                <button id="randomOrder50Btn" type="button">批量发起 50 单</button>
+            </div>
+            <div class="field">
+                <label for="batchCancelOrderInput">批量取消订单ID</label>
+                <textarea id="batchCancelOrderInput" rows="3" placeholder="多个 request_id 用换行、逗号或空格分隔"></textarea>
+            </div>
+            <div class="compact-actions">
+                <button id="batchCancelOrderBtn" type="button" class="danger">批量取消动态订单</button>
+                <button id="fillRecentOrderIdsBtn" type="button" class="secondary" disabled>填入最近随机订单</button>
             </div>
         </div>
 
@@ -1184,6 +1192,9 @@
         const randomOrder1Btn = document.getElementById("randomOrder1Btn");
         const randomOrder10Btn = document.getElementById("randomOrder10Btn");
         const randomOrder50Btn = document.getElementById("randomOrder50Btn");
+        const batchCancelOrderInput = document.getElementById("batchCancelOrderInput");
+        const batchCancelOrderBtn = document.getElementById("batchCancelOrderBtn");
+        const fillRecentOrderIdsBtn = document.getElementById("fillRecentOrderIdsBtn");
         const manualPickupEarliestInput = document.getElementById("manualPickupEarliestInput");
         const manualPickupLatestInput = document.getElementById("manualPickupLatestInput");
         const manualPassengerCountInput = document.getElementById("manualPassengerCountInput");
@@ -1404,6 +1415,7 @@
         let commutePois = [];
         let cachedPois = null;
         let platformPendingOrders = [];
+        let recentDynamicOrderIds = [];
 
         function setStatus(message) {
             statusEl.textContent = message;
@@ -1419,6 +1431,9 @@
             randomOrder1Btn.disabled = isBusy;
             randomOrder10Btn.disabled = isBusy;
             randomOrder50Btn.disabled = isBusy;
+            batchCancelOrderInput.disabled = isBusy;
+            batchCancelOrderBtn.disabled = isBusy;
+            fillRecentOrderIdsBtn.disabled = isBusy || recentDynamicOrderIds.length === 0;
             manualPickupEarliestInput.disabled = isBusy;
             manualPickupLatestInput.disabled = isBusy;
             manualPassengerCountInput.disabled = isBusy;
@@ -3899,6 +3914,7 @@
                     method: "POST",
                     body: payload
                 });
+                rememberDynamicOrderIds([result.request_id || payload.request_id]);
                 await loadFleet();
                 setStatus(`动态公交订单已提交：${result.request_id || payload.request_id}`);
             } catch (error) {
@@ -3955,33 +3971,74 @@
             };
         }
 
+        function rememberDynamicOrderIds(ids) {
+            const normalized = (ids || [])
+                .map(item => String(item || "").trim())
+                .filter(Boolean);
+            if (!normalized.length) {
+                return;
+            }
+            recentDynamicOrderIds = Array.from(new Set([...normalized, ...recentDynamicOrderIds])).slice(0, 100);
+            fillRecentOrderIdsBtn.disabled = false;
+        }
+
+        function parseBatchCancelOrderIds() {
+            const ids = batchCancelOrderInput.value
+                .split(/[\s,，;；]+/)
+                .map(item => item.trim())
+                .filter(Boolean);
+            return Array.from(new Set(ids));
+        }
+
+        async function cancelDynamicOrdersBatch() {
+            const requestIds = parseBatchCancelOrderIds();
+            if (!requestIds.length) {
+                throw new Error("请先输入要取消的 request_id");
+            }
+            const result = await apiJson("/orders/batch/cancel", {
+                method: "POST",
+                body: { request_ids: requestIds }
+            });
+            await loadFleet();
+            const affectedVehicles = (result.affected_vehicles || [])
+                .map(item => item.vehicle_id || item.id)
+                .filter(Boolean);
+            setStatus([
+                `批量取消完成：成功 ${result.success_count || 0}/${result.total || requestIds.length}`,
+                `失败：${result.failure_count || 0}`,
+                affectedVehicles.length ? `受影响车辆：${affectedVehicles.join(", ")}` : null
+            ].filter(Boolean).join("\n"));
+            return result;
+        }
+
         async function createRandomOrders(count, options = {}) {
             setBusy(true);
-            const created = [];
-            const errors = [];
             try {
                 const pois = await loadPoisForRandomOrders();
                 const manualOptions = options.useManualPickupTime ? readManualOrderOptions() : null;
+                const orders = [];
                 for (let index = 0; index < count; index += 1) {
-                    const payload = buildRandomOrderPayload(pois, index, manualOptions || {});
-                    try {
-                        const result = await apiJson("/order", {
-                            method: "POST",
-                            body: payload
-                        });
-                        created.push(result.request_id || payload.request_id);
-                    } catch (error) {
-                        errors.push(`${payload.request_id}: ${error.message}`);
-                    }
-                    if (count === 1 || (index + 1) % 5 === 0 || index + 1 === count) {
-                        setStatus(`随机订单提交中：${index + 1}/${count}\n成功：${created.length}\n失败：${errors.length}`);
-                    }
+                    orders.push(buildRandomOrderPayload(pois, index, manualOptions || {}));
                 }
+                setStatus(`正在批量提交随机订单：${orders.length} 单`);
+                const result = await apiJson("/order", {
+                    method: "POST",
+                    body: { orders }
+                });
+                const created = (result.results || [])
+                    .filter(item => item.success)
+                    .map(item => item.request_id || orders[item.index]?.request_id)
+                    .filter(Boolean);
+                const errors = (result.results || [])
+                    .filter(item => !item.success)
+                    .map(item => `${orders[item.index]?.request_id || item.index}: ${item.error || item.message || "提交失败"}`);
+                rememberDynamicOrderIds(created);
                 await loadFleet();
                 setStatus([
-                    `随机订单提交完成：${created.length}/${count}`,
+                    `随机订单批量提交完成：${result.success_count || created.length}/${result.total || count}`,
                     errors.length ? `失败：${errors.length}` : null,
-                    created.length ? `最近订单：${created.slice(-5).join(", ")}` : null
+                    created.length ? `最近订单：${created.slice(0, 8).join(", ")}` : null,
+                    errors.length ? `首个失败：${errors[0]}` : null
                 ].filter(Boolean).join("\n"));
             } catch (error) {
                 setStatus(`随机订单提交失败：${error.message}`);
@@ -4904,6 +4961,20 @@
         randomOrder1Btn.addEventListener("click", () => createRandomOrders(1, { useManualPickupTime: true }));
         randomOrder10Btn.addEventListener("click", () => createRandomOrders(10));
         randomOrder50Btn.addEventListener("click", () => createRandomOrders(50));
+        batchCancelOrderBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await cancelDynamicOrdersBatch();
+            } catch (error) {
+                setStatus(`批量取消动态订单失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
+        fillRecentOrderIdsBtn.addEventListener("click", () => {
+            batchCancelOrderInput.value = recentDynamicOrderIds.join("\n");
+            setStatus(`已填入最近 ${recentDynamicOrderIds.length} 个动态订单ID。`);
+        });
         resetManualPickupTimeBtn.addEventListener("click", resetManualPickupTimeWindow);
         reloadDynamicPoisBtn.addEventListener("click", async () => {
             setBusy(true);

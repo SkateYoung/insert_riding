@@ -977,12 +977,34 @@ GET 响应示例：
     "MILEAGE_UTIL_PENALTY_BASE": 30.0,
     "LOAD_RATE_PENALTY_BASE": 20.0,
     "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
-    "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0
+    "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0,
+    "PLANNED_ROUTE_INSERTION_PENALTY": 30.0
   },
   "defaults": {},
   "descriptions": {},
   "weight_total": 1.1,
   "runtime_only": true
+}
+```
+
+批量请求体：
+
+```json
+{
+  "orders": [
+    {
+      "request_id": "order_10001",
+      "operation_area_id": 10001,
+      "passenger_phone": "13900000001",
+      "origin": {"lon": 113.38, "lat": 23.04},
+      "destination": {"lon": 113.39, "lat": 23.05},
+      "expected_pickup_time": {
+        "earliest": "2026-06-07 12:05:00",
+        "latest": "2026-06-07 12:20:00"
+      },
+      "passenger_count": 2
+    }
+  ]
 }
 ```
 
@@ -993,7 +1015,8 @@ POST/PUT 请求体示例：
   "W_PASSENGER": 0.75,
   "OLD_DELAY_COST_PER_MIN": 8,
   "IN_CAR_COST_PER_MIN": 5,
-  "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120
+  "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120,
+  "PLANNED_ROUTE_INSERTION_PENALTY": 40
 }
 ```
 
@@ -1014,6 +1037,7 @@ POST/PUT 请求体示例：
 | `LOAD_RATE_PENALTY_BASE` | number | 否 | 满载率惩罚基数 |
 | `SOCIAL_DISTANCE_COST_PER_KM` | number | 否 | 每公里社会里程成本 |
 | `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
+| `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 已有任务车辆插单惩罚；调大后更倾向于把订单分给空车，调小后更容易给顺路忙车插单 |
 
 说明：
 
@@ -1021,6 +1045,7 @@ POST/PUT 请求体示例：
 - 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
 - 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
+- 当存在可行空车时，订单只在空车候选中择优；无可行空车时才会评估已有任务车辆插单，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
 
 成功响应：
 
@@ -1034,6 +1059,34 @@ POST/PUT 请求体示例：
   "runtime_only": true
 }
 ```
+
+批量响应：
+
+```json
+{
+  "total": 2,
+  "success_count": 1,
+  "failure_count": 1,
+  "pool_size": 1,
+  "results": [
+    {
+      "index": 0,
+      "success": true,
+      "status": 200,
+      "request_id": "order_10001"
+    },
+    {
+      "index": 1,
+      "success": false,
+      "status": 409,
+      "code": "same_origin_destination",
+      "error": "起点和终点不能是同一个站点"
+    }
+  ]
+}
+```
+
+批量发起采用逐项处理，某一项失败不会回滚其他成功订单。全部成功返回 `200`，部分成功返回 `207`，全部失败返回 `400`。
 
 状态码：
 
@@ -1108,9 +1161,21 @@ POST/PUT 请求体示例：
 | --- | --- | --- |
 | `request_id` | string | 订单 ID |
 
-请求体：无。
 
-成功响应，订单仍在待匹配池：
+
+请求体：单个取消时可为空。批量取消时传：
+
+```json
+{
+  "request_ids": ["order_10001", "order_10002"]
+}
+```
+
+批量取消时，URL 中 `<request_id>` 可填兼容占位值，例如 `batch`；实际取消列表以 `request_ids` 为准。
+
+
+
+单个成功响应，订单仍在待匹配池：
 
 ```json
 {
@@ -1121,7 +1186,7 @@ POST/PUT 请求体示例：
 }
 ```
 
-成功响应，订单已派车但未上车：
+单个成功响应，订单已派车但未上车：
 
 ```json
 {
@@ -1136,7 +1201,7 @@ POST/PUT 请求体示例：
 }
 ```
 
-失败响应，订单已上车：
+单个失败响应，订单已上车：
 
 ```json
 {
@@ -1148,11 +1213,40 @@ POST/PUT 请求体示例：
 }
 ```
 
+批量响应：
+
+```json
+{
+  "total": 2,
+  "success_count": 2,
+  "failure_count": 0,
+  "results": [
+    {
+      "status": "cancelled",
+      "request_id": "order_10001",
+      "source": "vehicle_route",
+      "vehicle_id": "巴士-绿色01"
+    }
+  ],
+  "affected_vehicles": [
+    {
+      "vehicle_id": "巴士-绿色01",
+      "cancelled_request_ids": ["order_10001", "order_10002"],
+      "planned_route": [],
+      "planned_route_point": []
+    }
+  ]
+}
+```
+
+批量取消同一辆车上的多个订单时，会一次性移除对应 O/D 步骤，并且该车辆只触发一次路线重建和高德规划。部分取消失败时返回 `207`，成功项不会回滚。
+
 状态码：
 
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 取消成功 |
+| 207 | 批量取消部分成功 |
 | 404 | 订单不存在 |
 | 409 | 订单已上车、已完成、已取消或状态不允许取消 |
 

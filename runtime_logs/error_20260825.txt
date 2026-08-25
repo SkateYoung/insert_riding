@@ -12,3 +12,220 @@ source: flask.response
 message: HTTP 409
 context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"request_id\":\"demo-1787593561612-1-30497\",\"operation_area_id\":666666,\"passenger_phone\":\"13993540256\",\"passenger_id\":\"demo-pax-1787593561612-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.340715,\"lat\":23.098749},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 01:48:00\",\"latest\":\"2026-08-25 02:00:00\"},\"passenger_count\":1}", "status_code": 409, "response_body": "{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"poi_code\":\"station_666666_113_33979800_23_10354900\"}\n"}
 
+========================================================================================
+time: 2026-08-25 11:36:04
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787628964081-1-9788\",\"operation_area_id\":666666,\"passenger_phone\":\"13928853986\",\"passenger_id\":\"demo-pax-1787628964081-1\",\"origin\":{\"lon\":113.33511,\"lat\":23.107058},\"destination\":{\"lon\":113.34606,\"lat\":23.105062},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:37:00\",\"latest\":\"2026-08-25 11:49:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_33511000_23_10705800\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:40:05
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629205017-1-33718\",\"operation_area_id\":666666,\"passenger_phone\":\"13928853986\",\"passenger_id\":\"demo-pax-1787629205017-1\",\"origin\":{\"lon\":113.335506,\"lat\":23.099088},\"destination\":{\"lon\":113.339798,\"lat\":23.103549},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:37:00\",\"latest\":\"2026-08-25 11:49:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_33979800_23_10354900\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:41:20
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629280625-1-41424\",\"operation_area_id\":666666,\"passenger_phone\":\"13928853986\",\"passenger_id\":\"demo-pax-1787629280625-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:37:00\",\"latest\":\"2026-08-25 11:49:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_33979800_23_10354900\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:41:22
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629282842-1-1115\",\"operation_area_id\":666666,\"passenger_phone\":\"13928853986\",\"passenger_id\":\"demo-pax-1787629282842-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.340715,\"lat\":23.098749},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:37:00\",\"latest\":\"2026-08-25 11:49:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_33979800_23_10354900\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:44:56
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629495393-1-31234\",\"operation_area_id\":666666,\"passenger_phone\":\"13928853986\",\"passenger_id\":\"demo-pax-1787629495393-1\",\"origin\":{\"lon\":113.339746,\"lat\":23.098539},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:37:00\",\"latest\":\"2026-08-25 11:49:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_33511000_23_10705800\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:50:29
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629829390-1-20161\",\"operation_area_id\":666666,\"passenger_phone\":\"13929774163\",\"passenger_id\":\"demo-pax-1787629829390-1\",\"origin\":{\"lon\":113.334565,\"lat\":23.103265},\"destination\":{\"lon\":113.35047,\"lat\":23.10523},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:52:00\",\"latest\":\"2026-08-25 12:04:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:50:31
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629831654-1-68644\",\"operation_area_id\":666666,\"passenger_phone\":\"13929774163\",\"passenger_id\":\"demo-pax-1787629831654-1\",\"origin\":{\"lon\":113.34606,\"lat\":23.105062},\"destination\":{\"lon\":113.339798,\"lat\":23.103549},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:52:00\",\"latest\":\"2026-08-25 12:04:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_33979800_23_10354900\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:50:47
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629847022-1-89628\",\"operation_area_id\":666666,\"passenger_phone\":\"13929774163\",\"passenger_id\":\"demo-pax-1787629847022-1\",\"origin\":{\"lon\":113.35047,\"lat\":23.10523},\"destination\":{\"lon\":113.337551,\"lat\":23.103642},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:52:00\",\"latest\":\"2026-08-25 12:04:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:50:49
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629849438-1-66735\",\"operation_area_id\":666666,\"passenger_phone\":\"13929774163\",\"passenger_id\":\"demo-pax-1787629849438-1\",\"origin\":{\"lon\":113.33511,\"lat\":23.107058},\"destination\":{\"lon\":113.335506,\"lat\":23.099088},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:52:00\",\"latest\":\"2026-08-25 12:04:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_33511000_23_10705800\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:53:16
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787629996174-1-61916\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787629996174-1\",\"origin\":{\"lon\":113.35047,\"lat\":23.10523},\"destination\":{\"lon\":113.339671,\"lat\":23.10361},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:53:30
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787630010003-1-80783\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787630010003-1\",\"origin\":{\"lon\":113.35047,\"lat\":23.10523},\"destination\":{\"lon\":113.350467,\"lat\":23.105217},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:53:46
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787630026480-1-89994\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787630026480-1\",\"origin\":{\"lon\":113.335803,\"lat\":23.107488},\"destination\":{\"lon\":113.35047,\"lat\":23.10523},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:54:55
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787630095021-1-7356\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787630095021-1\",\"origin\":{\"lon\":113.340715,\"lat\":23.098749},\"destination\":{\"lon\":113.35047,\"lat\":23.10523},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_35047000_23_10523000\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:54:56
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787630096381-1-32430\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787630096381-1\",\"origin\":{\"lon\":113.339798,\"lat\":23.103549},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"origin_station_not_loaded\",\"error\":\"origin \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"origin\",\"index\":0,\"poi_code\":\"station_666666_113_33979800_23_10354900\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 11:55:35
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "POST", "path": "/order", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"orders\":[{\"request_id\":\"demo-1787630135455-1-39380\",\"operation_area_id\":666666,\"passenger_phone\":\"13929988519\",\"passenger_id\":\"demo-pax-1787630135455-1\",\"origin\":{\"lon\":113.335506,\"lat\":23.099088},\"destination\":{\"lon\":113.33511,\"lat\":23.107058},\"expected_pickup_time\":{\"earliest\":\"2026-08-25 11:56:00\",\"latest\":\"2026-08-25 12:08:00\"},\"passenger_count\":1}]}", "status_code": 400, "response_body": "{\"failure_count\":1,\"pool_size\":0,\"results\":[{\"code\":\"destination_station_not_loaded\",\"error\":\"destination \\u7ad9\\u70b9\\u5c1a\\u672a\\u52a0\\u8f7d\\u5230\\u5f53\\u524d\\u8fd0\\u8425\\u533a\\u8def\\u7f51\",\"field\":\"destination\",\"index\":0,\"poi_code\":\"station_666666_113_33511000_23_10705800\",\"status\":409,\"success\":false}],\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-25 12:00:25
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-7-78406\",\"distance_threshold_m\":30,\"lon\":113.34066680326711,\"lat\":23.098750839466895}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:00:27
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-7-78406\",\"distance_threshold_m\":30,\"lon\":113.34066680326711,\"lat\":23.098750839466895}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:02:10
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:02:10
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:08
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:09
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:09
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:09
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34596405174335,\"lat\":23.10485586184251}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:32
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34595019077325,\"lat\":23.1050774170898}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:35
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34595019077325,\"lat\":23.1050774170898}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:03:35
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787630241352-3-60427\",\"distance_threshold_m\":30,\"lon\":113.34595019077325,\"lat\":23.1050774170898}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:30:09
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546112333/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787632037776-7-4361\",\"distance_threshold_m\":30,\"lon\":113.38329,\"lat\":23.063328}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:30:09
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546112333/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787632037776-7-4361\",\"distance_threshold_m\":30,\"lon\":113.38329,\"lat\":23.063328}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:30:10
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546112333/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787632037776-7-4361\",\"distance_threshold_m\":30,\"lon\":113.38329,\"lat\":23.063328}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:30:11
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546112333/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-1787632037776-7-4361\",\"distance_threshold_m\":30,\"lon\":113.38329,\"lat\":23.063328}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-08-25 12:32:50
+level: WARNING
+source: flask.response
+message: HTTP 400
+context: {"method": "PUT", "path": "/admin/vehicles/72057594546111234", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"vehicle_code\":\"72057594546111234\",\"plate_no\":\"粤A00004\",\"vehicle_type\":\"bus\",\"operation_status\":\"operating\",\"seat_count\":10,\"max_load_count\":10,\"vehicle_color\":\"#8b6765\",\"vehicle_model\":\"\",\"operation_mode\":\"commute_fixed_waiting\",\"current_driver_code\":\"700045866645051565\",\"remark\":\"测试\",\"initial_position\":{\"lon\":113.38722864,\"lat\":23.06883207},\"operation_area_id\":666666}", "status_code": 400, "response_body": "{\"error\":\"operation_mode \\u4e3a\\u901a\\u52e4\\u5feb\\u7ebf\\u6a21\\u5f0f\\u65f6 line_code \\u4e0d\\u80fd\\u4e3a\\u7a7a\"}\n"}
+

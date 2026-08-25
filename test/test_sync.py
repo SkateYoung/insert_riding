@@ -213,6 +213,126 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(CoreDispatcher.order_pool, [])
         self.assertEqual([step["order"].request_id for step in vehicle.planned_route], ["NEAR_FUTURE", "NEAR_FUTURE"])
 
+    def test_area_cycle_refreshes_vehicle_route_once_for_multiple_assignments(self):
+        base_ts = 1_000_000.0
+        node_ids = ["V", "O1", "D1", "O2", "D2"]
+        distances = {
+            (start, end): _seconds_distance(60)
+            for start in node_ids
+            for end in node_ids
+            if start != end
+        }
+        city = _TinyCity(distances)
+        vehicle = _fake_vehicle("V1", "V", base_ts)
+        order_a = _fake_order(city, "BATCH_A", "O1", "D1", base_ts, 0, 1200)
+        order_b = _fake_order(city, "BATCH_B", "O2", "D2", base_ts, 0, 1200)
+        CoreDispatcher.order_pool.extend([order_a, order_b])
+
+        with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
+                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={"path": [], "segments": []}) as refreshed, \
+                mock.patch("api.core.persistence.record_order_matched_pending"):
+            assigned = CoreDispatcher._process_pool_matching_area_cycle([vehicle], city)
+
+        self.assertEqual(assigned, 2)
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual(refreshed.call_count, 1)
+        self.assertEqual(order_a.status, "matched")
+        self.assertEqual(order_b.status, "matched")
+        self.assertEqual(
+            sorted({step["order"].request_id for step in vehicle.planned_route}),
+            ["BATCH_A", "BATCH_B"],
+        )
+
+    def test_area_cycle_prefers_feasible_idle_vehicle_over_busy_vehicle(self):
+        base_ts = 1_000_000.0
+        node_ids = ["IDLE", "BUSY", "O_NEW", "D_NEW", "O_OLD", "D_OLD"]
+        distances = {
+            (start, end): _seconds_distance(60)
+            for start in node_ids
+            for end in node_ids
+            if start != end
+        }
+        distances[("IDLE", "O_NEW")] = _seconds_distance(600)
+        distances[("BUSY", "O_NEW")] = _seconds_distance(30)
+        city = _TinyCity(distances)
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        old_order = _fake_order(city, "OLD", "O_OLD", "D_OLD", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        CoreDispatcher.order_pool.append(new_order)
+
+        assigned = self._run_area_cycle([busy_vehicle, idle_vehicle], city)
+
+        self.assertEqual(assigned, 1)
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual([step["order"].request_id for step in idle_vehicle.planned_route], ["NEW", "NEW"])
+        self.assertEqual(
+            [step["order"].request_id for step in busy_vehicle.planned_route],
+            ["OLD", "OLD"],
+        )
+
+    def test_area_cycle_spreads_batch_orders_to_remaining_idle_vehicles(self):
+        base_ts = 1_000_000.0
+        node_ids = ["V1", "V2", "O1", "D1", "O2", "D2"]
+        distances = {
+            (start, end): _seconds_distance(60)
+            for start in node_ids
+            for end in node_ids
+            if start != end
+        }
+        distances[("V1", "O1")] = _seconds_distance(30)
+        distances[("V1", "O2")] = _seconds_distance(30)
+        distances[("V2", "O1")] = _seconds_distance(300)
+        distances[("V2", "O2")] = _seconds_distance(300)
+        city = _TinyCity(distances)
+        vehicle_a = _fake_vehicle("V1", "V1", base_ts)
+        vehicle_b = _fake_vehicle("V2", "V2", base_ts)
+        order_a = _fake_order(city, "SPREAD_A", "O1", "D1", base_ts, 0, 3600)
+        order_b = _fake_order(city, "SPREAD_B", "O2", "D2", base_ts, 0, 3600)
+        CoreDispatcher.order_pool.extend([order_a, order_b])
+
+        assigned = self._run_area_cycle([vehicle_a, vehicle_b], city)
+
+        self.assertEqual(assigned, 2)
+        self.assertEqual(CoreDispatcher.order_pool, [])
+        self.assertEqual(
+            sorted({step["order"].request_id for step in vehicle_a.planned_route}),
+            ["SPREAD_A"],
+        )
+        self.assertEqual(
+            sorted({step["order"].request_id for step in vehicle_b.planned_route}),
+            ["SPREAD_B"],
+        )
+
+    def test_busy_vehicle_candidate_cost_includes_insertion_penalty(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("BUSY", "O_NEW"): _seconds_distance(60),
+            ("O_NEW", "D_NEW"): _seconds_distance(60),
+        })
+        vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        vehicle.planned_route = [{"type": "O", "order": old_order}]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        CoreDispatcher.configure_route_cost(PLANNED_ROUTE_INSERTION_PENALTY=25.0)
+
+        with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=10.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", return_value=([{"type": "O", "order": new_order}], 40.0)):
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["candidate_class"], "busy")
+        self.assertEqual(candidate["cost"], 55.0)
+
     def test_locked_route_head_prevents_new_order_from_becoming_first_step(self):
         base_ts = 1_000_000.0
         city = _TinyCity({
@@ -282,12 +402,14 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             W_PASSENGER=0.8,
             OLD_DELAY_COST_PER_MIN=9.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=120.0,
+            PLANNED_ROUTE_INSERTION_PENALTY=35.0,
         )
 
         config = result["config"]
         self.assertEqual(config["W_PASSENGER"], 0.8)
         self.assertEqual(config["OLD_DELAY_COST_PER_MIN"], 9.0)
         self.assertEqual(config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"], 120.0)
+        self.assertEqual(config["PLANNED_ROUTE_INSERTION_PENALTY"], 35.0)
         self.assertEqual(config["IN_CAR_COST_PER_MIN"], self._route_cost_config["IN_CAR_COST_PER_MIN"])
         self.assertAlmostEqual(
             result["weight_total"],

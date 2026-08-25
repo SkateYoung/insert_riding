@@ -39,19 +39,20 @@ class CoreDispatcher:
 
     # 路线成本函数运行时配置：平台可通过接口调整，修改后仅影响后续新一轮派单/插单评估。
     ROUTE_COST_CONFIG_DEFAULTS = {
-        "W_PASSENGER": 0.35,
-        "W_ENTERPRISE": 0.20,
+        "W_PASSENGER": 0.50,
+        "W_ENTERPRISE": 0.30,
         "W_SOCIAL": 0.20,
         "W_FAIRNESS": 0.05,
         "WAIT_COST_PER_MIN": 5.0,
         "IN_CAR_COST_PER_MIN": 5.0,
-        "LATE_ARRIVAL_COST_PER_MIN": 1.0,
-        "OLD_DELAY_COST_PER_MIN": 25.0,
-        "SEVERE_OLD_DELAY_PENALTY": 25.0,
-        "MILEAGE_UTIL_PENALTY_BASE": 5.0,
-        "LOAD_RATE_PENALTY_BASE": 10.0,
+        "LATE_ARRIVAL_COST_PER_MIN": 0.0,
+        "OLD_DELAY_COST_PER_MIN": 15.0,
+        "SEVERE_OLD_DELAY_PENALTY": 30.0,
+        "MILEAGE_UTIL_PENALTY_BASE": 0.1,
+        "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 80.0,
+        "PLANNED_ROUTE_INSERTION_PENALTY": 10.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
         "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
@@ -67,6 +68,7 @@ class CoreDispatcher:
         "LOAD_RATE_PENALTY_BASE": "满载率惩罚基数，调大后更偏向提高座位利用率。",
         "SOCIAL_DISTANCE_COST_PER_KM": "每公里道路资源/碳排放代理成本。",
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": "非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受此阈值限制。",
+        "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
     }
     route_cost_config = copy.deepcopy(ROUTE_COST_CONFIG_DEFAULTS)
     route_cost_config_lock = threading.RLock()
@@ -95,8 +97,8 @@ class CoreDispatcher:
     DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS = 3 * 60
 
     # 车辆接近当前队首上下客点时锁定队首，避免插单/取消重排打断司机端正在执行的动作。
-    ROUTE_HEAD_LOCK_DISTANCE_M = 300.0
-    ROUTE_HEAD_LOCK_ETA_SECONDS = 120.0
+    ROUTE_HEAD_LOCK_DISTANCE_M = 100.0
+    ROUTE_HEAD_LOCK_ETA_SECONDS = 60.0
 
     # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
@@ -633,7 +635,7 @@ class CoreDispatcher:
                         delay_time = arrival_times[order.request_id] - original_etas[order.request_id]
                         if delay_time > 0:
                             old_passenger_delay_cost += (delay_time / SECONDS_PER_MINUTE) * OLD_DELAY_COST_PER_MIN
-                            if delay_time > 180.0:
+                            if delay_time > 360.0:
                                 old_passenger_severe_delay_cost += SEVERE_OLD_DELAY_PENALTY
                     break
 
@@ -946,6 +948,79 @@ class CoreDispatcher:
         return cost if is_feasible else 0.0
 
     @staticmethod
+    def _vehicle_is_idle_for_matching(vehicle):
+        """判断车辆是否为真实空车，空车优先派单会使用该口径。"""
+        return (
+            len(getattr(vehicle, "on_board_orders", []) or []) == 0
+            and len(getattr(vehicle, "planned_route", []) or []) == 0
+        )
+
+    @staticmethod
+    def _best_vehicle_candidate_for_order(order, fleet, city_map, current_timestamp, route_cost_config=None):
+        """为单个订单选择候选车辆，存在可行空车时只在空车中择优。
+
+        返回值包含最优车辆、最优路线、最优成本和次优成本。次优成本只在同一候选层
+        内比较，避免空车优先规则被忙车候选的成本干扰。
+        """
+        route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot()
+        busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
+        planned_route_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
+        idle_candidates = []
+        busy_candidates = []
+
+        for vehicle in fleet or []:
+            if CoreDispatcher._vehicle_excluded_for_order(order, vehicle, current_timestamp):
+                continue
+            if not CoreDispatcher._vehicle_has_capacity_for_order(vehicle, order):
+                continue
+            if not CoreDispatcher._vehicle_can_accept_order(vehicle):
+                continue
+
+            original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(vehicle, city_map)
+            route, absolute_cost = CoreDispatcher._try_insert_order(vehicle, order, city_map)
+            if route is None or absolute_cost == float("inf"):
+                continue
+
+            is_idle = CoreDispatcher._vehicle_is_idle_for_matching(vehicle)
+            if is_idle:
+                cost = absolute_cost - original_cost
+                idle_candidates.append({
+                    "vehicle": vehicle,
+                    "route": route,
+                    "cost": cost,
+                    "absolute_cost": absolute_cost,
+                    "is_idle": True,
+                })
+                continue
+
+            if absolute_cost > busy_vehicle_max_absolute_cost:
+                continue
+            cost = absolute_cost - original_cost + planned_route_insertion_penalty
+            busy_candidates.append({
+                "vehicle": vehicle,
+                "route": route,
+                "cost": cost,
+                "absolute_cost": absolute_cost,
+                "is_idle": False,
+            })
+
+        candidates = idle_candidates if idle_candidates else busy_candidates
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item["cost"])
+        best = candidates[0]
+        second_cost = candidates[1]["cost"] if len(candidates) > 1 else float("inf")
+        return {
+            "vehicle": best["vehicle"],
+            "route": best["route"],
+            "cost": best["cost"],
+            "second_cost": second_cost,
+            "candidate_class": "idle" if idle_candidates else "busy",
+            "absolute_cost": best["absolute_cost"],
+        }
+
+    @staticmethod
     def _vehicle_committed_passenger_count(vehicle):
         """统计车辆已承诺服务的乘客数。
 
@@ -1107,6 +1182,7 @@ class CoreDispatcher:
             return 0
 
         assign_count = 0
+        deferred_assignments = {}
         while True:
             area_order_indices = [
                 index for index, order in enumerate(CoreDispatcher.order_pool)
@@ -1123,7 +1199,6 @@ class CoreDispatcher:
             best_cancel_risk_score = 0.0
             order_candidates = []
             route_cost_config = CoreDispatcher.route_cost_config_snapshot()
-            busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
             current_timestamp = max(
                 (getattr(v, "time", 0.0) for v in area_fleet),
                 default=time.time(),
@@ -1134,45 +1209,25 @@ class CoreDispatcher:
                 if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
                     continue
 
-                c1, c2 = float("inf"), float("inf")
-                v1, r1 = None, None
-
-                for v in area_fleet:
-                    if CoreDispatcher._vehicle_excluded_for_order(order, v, current_timestamp):
-                        continue
-                    if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
-                        continue
-                    if not CoreDispatcher._vehicle_can_accept_order(v):
-                        continue
-
-                    original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(v, city_map)
-                    route, absolute_cost = CoreDispatcher._try_insert_order(v, order, city_map)
-                    is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
-                    cost = (
-                        absolute_cost - original_cost
-                        if route is not None and absolute_cost != float("inf")
-                        else float("inf")
-                    )
-                    if not is_idle and absolute_cost > busy_vehicle_max_absolute_cost:
-                        cost = float("inf")
-                    if cost < c1:
-                        c2 = c1
-                        c1 = cost
-                        v1 = v
-                        r1 = route
-                    elif cost < c2:
-                        c2 = cost
-
-                if c1 == float("inf"):
+                best_vehicle_candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                    order,
+                    area_fleet,
+                    city_map,
+                    current_timestamp,
+                    route_cost_config=route_cost_config,
+                )
+                if best_vehicle_candidate is None:
                     continue
 
-                regret = None if c2 == float("inf") else max(0.0, c2 - c1)
+                c2 = best_vehicle_candidate["second_cost"]
+                regret = None if c2 == float("inf") else max(0.0, c2 - best_vehicle_candidate["cost"])
                 order_candidates.append({
                     "order_index": i,
-                    "vehicle": v1,
-                    "route": r1,
+                    "vehicle": best_vehicle_candidate["vehicle"],
+                    "route": best_vehicle_candidate["route"],
                     "regret": regret,
                     "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
+                    "candidate_class": best_vehicle_candidate["candidate_class"],
                 })
 
             finite_regrets = [
@@ -1213,7 +1268,7 @@ class CoreDispatcher:
                 break
 
             target_o = CoreDispatcher.order_pool.pop(best_o_idx)
-            CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
+            assignment = CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                 target_o,
                 global_best_v,
                 global_best_route,
@@ -1222,17 +1277,29 @@ class CoreDispatcher:
                     "cancel_risk_score": best_cancel_risk_score,
                     "priority_score": best_priority_score,
                 },
+                defer_route_refresh=True,
             )
+            deferred_assignments.setdefault(id(global_best_v), {
+                "vehicle": global_best_v,
+                "assignments": [],
+            })["assignments"].append(assignment)
             assign_count += 1
             print(
                 f"[Core.Pool] [Match] 运营区 {area_id or 'default'} 订单 {target_o.request_id} "
                 f"划拨给 {global_best_v.id}，风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
             )
 
+        for group in deferred_assignments.values():
+            CoreDispatcher._finalize_deferred_vehicle_assignments(
+                group["vehicle"],
+                group["assignments"],
+                city_map,
+            )
+
         return assign_count
 
     @staticmethod
-    def _assign_order_to_vehicle_pending_confirmation(order, vehicle, route, city_map, details=None):
+    def _assign_order_to_vehicle_pending_confirmation(order, vehicle, route, city_map, details=None, defer_route_refresh=False):
         """把订单临时派给车辆，并等待平台确认司机端收到后再转 waiting_pickup。"""
         was_idle_before_assignment = (
             len(getattr(vehicle, "on_board_orders", []) or []) == 0
@@ -1242,6 +1309,13 @@ class CoreDispatcher:
         CoreDispatcher._clear_idle_parking(vehicle)
         vehicle.planned_route = route
         order.status = "matched"
+        assignment = {
+            "order": order,
+            "event_reason": event_reason,
+            "details": details or {},
+        }
+        if defer_route_refresh:
+            return assignment
         route_result = CoreDispatcher.refresh_vehicle_route_metadata(
             vehicle,
             city_map,
@@ -1265,6 +1339,44 @@ class CoreDispatcher:
                 "driver_push_pending": True,
             },
         )
+        return route_result
+
+    @staticmethod
+    def _finalize_deferred_vehicle_assignments(vehicle, assignments, city_map):
+        """同一轮匹配结束后，按车辆合并刷新路线和司机端待确认信息。"""
+        assignments = [item for item in assignments or [] if isinstance(item, dict)]
+        if not assignments:
+            return None
+        fleet_push_events = [
+            {
+                "event_reason": item.get("event_reason"),
+                "request_id": getattr(item.get("order"), "request_id", None),
+            }
+            for item in assignments
+        ]
+        route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+            vehicle,
+            city_map,
+            fleet_push_event=fleet_push_events,
+        )
+        for item in assignments:
+            order = item["order"]
+            CoreDispatcher._set_driver_push_pending(
+                order,
+                vehicle,
+                event_reason=item.get("event_reason"),
+            )
+            persistence.record_order_matched_pending(
+                order,
+                vehicle,
+                city_map=city_map,
+                path_result=route_result,
+                details={
+                    **(item.get("details") or {}),
+                    "driver_push_pending": True,
+                },
+                record_vehicle_state=False,
+            )
         return route_result
 
     @staticmethod
@@ -1345,7 +1457,6 @@ class CoreDispatcher:
                     best_cancel_risk_score = 0.0
                     order_candidates = []
                     route_cost_config = CoreDispatcher.route_cost_config_snapshot()
-                    busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
                     current_timestamp = max(
                         (getattr(v, "time", 0.0) for v in fleet),
                         default=time.time(),
@@ -1357,52 +1468,26 @@ class CoreDispatcher:
                         if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
                             continue
 
-                        c1, c2 = float('inf'), float('inf')
-                        v1, r1 = None, None
-
-                        for v in fleet:
-                            if CoreDispatcher._vehicle_excluded_for_order(order, v, current_timestamp):
-                                continue
-                            # ===== 查看车辆已承诺容量是否还能接收该订单 =====
-                            if not CoreDispatcher._vehicle_has_capacity_for_order(v, order):
-                                continue
-                            # ===== 疲劳驾驶与休息拦截限流 =====
-                            if not CoreDispatcher._vehicle_can_accept_order(v):
-                                continue
-
-                            original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(v, city_map)
-                            route, absolute_cost = CoreDispatcher._try_insert_order(v, order, city_map)
-                            is_idle = len(v.on_board_orders) == 0 and len(v.planned_route) == 0
-                            cost = (
-                                absolute_cost - original_cost
-                                if route is not None and absolute_cost != float('inf')
-                                else float('inf')
-                            )
-
-                            # 规则：约束忙碌中车辆强行掉头大绕路；对全空闲车绿灯放行以保障接单率
-                            if not is_idle and absolute_cost > busy_vehicle_max_absolute_cost:
-                                cost = float('inf')
-
-                            # 维护全局对该订单的“最优车”(c1) 和 “次优车”(c2)，这里使用增量成本。
-                            if cost < c1:
-                                c2 = c1
-                                c1 = cost
-                                v1 = v
-                                r1 = route
-                            elif cost < c2:
-                                c2 = cost
-
-                        if c1 == float('inf'):
+                        best_vehicle_candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                            order,
+                            fleet,
+                            city_map,
+                            current_timestamp,
+                            route_cost_config=route_cost_config,
+                        )
+                        if best_vehicle_candidate is None:
                             continue
 
                         # 计算后悔值：次优成本与最优成本的差额
-                        regret = None if c2 == float('inf') else max(0.0, c2 - c1)
+                        c2 = best_vehicle_candidate["second_cost"]
+                        regret = None if c2 == float('inf') else max(0.0, c2 - best_vehicle_candidate["cost"])
                         order_candidates.append({
                             "order_index": i,
-                            "vehicle": v1,
-                            "route": r1,
+                            "vehicle": best_vehicle_candidate["vehicle"],
+                            "route": best_vehicle_candidate["route"],
                             "regret": regret,
                             "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
+                            "candidate_class": best_vehicle_candidate["candidate_class"],
                         })
 
                     finite_regrets = [
@@ -1865,6 +1950,187 @@ class CoreDispatcher:
             "status": "not_found",
             "request_id": request_id,
             "message": "未找到该订单。",
+        }
+
+    @staticmethod
+    def _cancel_city_map(city_map, vehicle=None, order=None):
+        """批量取消时按车辆或订单运营区选择对应路网。"""
+        if not isinstance(city_map, dict):
+            return city_map
+        area_id = None
+        if vehicle is not None:
+            area_id = CoreDispatcher._operation_area_id_of(vehicle)
+        if area_id is None and order is not None:
+            area_id = CoreDispatcher._order_operation_area_id(order)
+        return city_map.get(area_id)
+
+    @staticmethod
+    def cancel_orders(request_ids, fleet, city_map, cancel_time=None):
+        """批量取消未上车订单，并按车辆合并刷新后续路线。"""
+        unique_ids = []
+        seen = set()
+        for raw_request_id in request_ids or []:
+            request_id = str(raw_request_id or "").strip()
+            if not request_id or request_id in seen:
+                continue
+            seen.add(request_id)
+            unique_ids.append(request_id)
+
+        results = {}
+        vehicle_groups = {}
+        requested = set(unique_ids)
+
+        for index in range(len(CoreDispatcher.order_pool) - 1, -1, -1):
+            order = CoreDispatcher.order_pool[index]
+            request_id = str(getattr(order, "request_id", ""))
+            if request_id not in requested or request_id in results:
+                continue
+            CoreDispatcher.order_pool.pop(index)
+            CoreDispatcher._archive_cancelled_order(order, cancel_time=cancel_time)
+            results[request_id] = {
+                "status": "cancelled",
+                "request_id": request_id,
+                "source": "order_pool",
+                "message": "订单仍在待匹配池中，已取消。",
+            }
+
+        remaining = requested - set(results)
+        for vehicle in fleet or []:
+            if not remaining:
+                break
+            for order in getattr(vehicle, "on_board_orders", []) or []:
+                request_id = str(getattr(order, "request_id", ""))
+                if request_id in remaining and request_id not in results:
+                    results[request_id] = {
+                        "status": "rejected",
+                        "code": "already_on_board",
+                        "request_id": request_id,
+                        "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+                        "message": "乘客已上车，乘客端取消订单被拒绝。",
+                    }
+
+            remaining = requested - set(results)
+            matched_by_id = {}
+            for step in getattr(vehicle, "planned_route", []) or []:
+                order = step.get("order")
+                request_id = str(getattr(order, "request_id", ""))
+                if request_id in remaining:
+                    matched_by_id.setdefault(request_id, []).append(step)
+
+            cancellable = {}
+            for request_id, steps in matched_by_id.items():
+                if not any(step.get("type") == "O" for step in steps):
+                    results[request_id] = {
+                        "status": "rejected",
+                        "code": "origin_step_missing",
+                        "request_id": request_id,
+                        "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+                        "message": "订单已进入上车后的送达阶段，无法按乘客未上车取消处理。",
+                    }
+                    continue
+                cancellable[request_id] = steps[0]["order"]
+
+            if cancellable:
+                group = vehicle_groups.setdefault(id(vehicle), {
+                    "vehicle": vehicle,
+                    "orders": {},
+                })
+                group["orders"].update(cancellable)
+                for request_id in cancellable:
+                    results[request_id] = {
+                        "status": "pending_vehicle_route_cancel",
+                        "request_id": request_id,
+                    }
+
+        remaining = requested - {
+            request_id for request_id, result in results.items()
+            if result.get("status") != "pending_vehicle_route_cancel"
+        } - {
+            request_id for group in vehicle_groups.values()
+            for request_id in group["orders"]
+        }
+        for order in CoreDispatcher.completed_orders_pool:
+            request_id = str(getattr(order, "request_id", ""))
+            if request_id in remaining and request_id not in results:
+                results[request_id] = {
+                    "status": "rejected",
+                    "code": "already_finished_or_cancelled",
+                    "request_id": request_id,
+                    "message": "订单已结束或已取消，不能重复取消。",
+                }
+
+        for request_id in unique_ids:
+            if request_id not in results:
+                results[request_id] = {
+                    "status": "not_found",
+                    "request_id": request_id,
+                    "message": "未找到该订单。",
+                }
+
+        affected_vehicles = []
+        for group in vehicle_groups.values():
+            vehicle = group["vehicle"]
+            orders = group["orders"]
+            request_id_set = set(orders)
+            vehicle.planned_route = [
+                step for step in getattr(vehicle, "planned_route", []) or []
+                if str(getattr(step.get("order"), "request_id", "")) not in request_id_set
+            ]
+            events = []
+            for request_id, order in orders.items():
+                if getattr(order, "driver_push_pending", False):
+                    CoreDispatcher._clear_driver_push_pending(order, vehicle)
+                CoreDispatcher._archive_cancelled_order(order, cancel_time=cancel_time)
+                events.append({
+                    "event_reason": "order_cancelled",
+                    "request_id": request_id,
+                })
+
+            selected_city_map = CoreDispatcher._cancel_city_map(city_map, vehicle=vehicle)
+            path_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                selected_city_map,
+                fleet_push_event=events,
+            ) if selected_city_map is not None else None
+            CoreDispatcher._start_rest_if_ready(vehicle)
+            raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(path_result) if path_result else []
+            if path_result is None or not raw_segments:
+                persistence.record_vehicle_route(vehicle, path_result=path_result)
+                persistence.record_vehicle_runtime(vehicle)
+
+            vehicle_payload = {
+                "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+                "cancelled_request_ids": list(orders),
+                "planned_route": [
+                    {
+                        "type": step["type"],
+                        "request_id": step["order"].request_id,
+                    }
+                    for step in getattr(vehicle, "planned_route", []) or []
+                ],
+                "planned_route_point": getattr(vehicle, "planned_route_point", []),
+                "path_result": path_result,
+            }
+            affected_vehicles.append(vehicle_payload)
+            for request_id in orders:
+                results[request_id] = {
+                    "status": "cancelled",
+                    "request_id": request_id,
+                    "source": "vehicle_route",
+                    "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
+                    "planned_route": vehicle_payload["planned_route"],
+                    "planned_route_point": vehicle_payload["planned_route_point"],
+                    "path_result": path_result,
+                    "message": "订单已从车辆计划路径中移除，车辆轨迹已刷新。",
+                }
+
+        ordered_results = [results[request_id] for request_id in unique_ids]
+        return {
+            "total": len(ordered_results),
+            "success_count": sum(1 for item in ordered_results if item.get("status") == "cancelled"),
+            "failure_count": sum(1 for item in ordered_results if item.get("status") != "cancelled"),
+            "results": ordered_results,
+            "affected_vehicles": affected_vehicles,
         }
 
     @staticmethod
@@ -3616,10 +3882,12 @@ class CoreDispatcher:
             vehicle.idle_target_eta_status = None
             vehicle.idle_target_eta_error = None
         if fleet_push_event:
-            CoreDispatcher._mark_fleet_push_pending(
-                vehicle,
-                event=fleet_push_event,
-            )
+            events = fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+            for event in events:
+                CoreDispatcher._mark_fleet_push_pending(
+                    vehicle,
+                    event=event,
+                )
         CoreDispatcher._submit_vehicle_route_grasp_async(vehicle)
         persistence.record_vehicle_route(vehicle, path_result=result)
         persistence.record_vehicle_runtime(vehicle)

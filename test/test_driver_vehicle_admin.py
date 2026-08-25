@@ -370,6 +370,72 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["code"], "same_origin_destination")
 
+    def test_batch_create_order_allows_partial_success(self):
+        now = datetime.now().replace(microsecond=0)
+        response = self.client.post("/order", json={
+            "orders": [
+                {
+                    "request_id": "batch-order-ok",
+                    "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    "destination": {"lon": self.city.c.lon, "lat": self.city.c.lat},
+                    "expected_pickup_time": {
+                        "earliest": now.isoformat(sep=" "),
+                        "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+                    },
+                    "operation_area_id": 10001,
+                    "passenger_count": 1,
+                    "passenger_phone": "13900000001",
+                },
+                {
+                    "request_id": "batch-order-bad",
+                    "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    "destination": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+                    "expected_pickup_time": {
+                        "earliest": now.isoformat(sep=" "),
+                        "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+                    },
+                    "operation_area_id": 10001,
+                    "passenger_count": 1,
+                    "passenger_phone": "13900000002",
+                },
+            ],
+        })
+
+        self.assertEqual(response.status_code, 207)
+        data = response.get_json()
+        self.assertEqual(data["success_count"], 1)
+        self.assertEqual(data["failure_count"], 1)
+        self.assertEqual(data["pool_size"], 1)
+        self.assertEqual(CoreDispatcher.order_pool[0].request_id, "batch-order-ok")
+        self.assertEqual(data["results"][1]["code"], "same_origin_destination")
+
+    def test_batch_cancel_vehicle_orders_refreshes_route_once(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-1"
+        vehicle.operation_area_id = 10001
+        order_a = make_order(self.city, request_id="cancel-a")
+        order_b = make_order(self.city, request_id="cancel-b")
+        vehicle.planned_route = [
+            {"type": "O", "order": order_a},
+            {"type": "O", "order": order_b},
+            {"type": "D", "order": order_a},
+            {"type": "D", "order": order_b},
+        ]
+        state.fleet.append(vehicle)
+        state.fleet_by_area[10001].append(vehicle)
+
+        with patch("api.core.CoreDispatcher.refresh_vehicle_route_metadata", return_value={"path": [], "segments": []}) as refreshed:
+            response = self.client.post("/orders/batch/cancel", json={
+                "request_ids": ["cancel-a", "cancel-b"],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["success_count"], 2)
+        self.assertEqual(len(data["affected_vehicles"]), 1)
+        self.assertEqual(refreshed.call_count, 1)
+        self.assertEqual(vehicle.planned_route, [])
+
     def test_driver_crud_duplicate_no_and_bound_delete_conflict(self):
         created = self.create_driver()
         self.assertEqual(created.status_code, 201)

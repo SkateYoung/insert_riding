@@ -44,7 +44,7 @@ def _env_float(names, default):
     return float(default)
 
 
-SPEED_KMH = 60
+SPEED_KMH = 30
 SPEED_MPS = SPEED_KMH * 1000.0 / 3600.0   # 平均推演物理时速：8.33 m/s (同步 JS 设定)
 BUSINESS_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 DEFAULT_REST_DURATION_SECONDS = 20 * 60
