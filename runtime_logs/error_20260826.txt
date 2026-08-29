@@ -1,0 +1,271 @@
+========================================================================================
+time: 2026-08-26 18:51:56
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1787741516.1144822, "request_id": "demo-manual-1787741511351-5419", "vehicle_code": "72057594546112333", "route_version": "grasp:v1:9f0ee2400e5c6f2cf165464218d93445", "status": "success", "task_no": "dispatch:demo-manual-1787741511351-5419:grasp:v1:9f0ee2400e5c6f2cf165464218d93445:1787741516114", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4060, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4152, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4393, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4108, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-08-26 18:54:55
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: order
+context: {"op": "order", "tenant_id": "000000", "queued_at": 1787741695.2919693, "request_id": "demo-manual-1787741695242-5546", "operation_area_id": 666666, "status": "pooled", "payload_keys": ["actual_pickup_distance_m", "actual_pickup_time", "answer_time", "cancel_reason", "cancel_time", "cancel_type", "completion_time", "destination_lat", "destination_lon", "destination_name", "destination_node_code", "destination_poi_code", "estimated_arrival_eta_seconds", "estimated_arrival_time", "estimated_dropoff_eta_seconds", "estimated_dropoff_time", "eta_error", "eta_status", "eta_updated_at", "expected_pickup_earliest", "expected_pickup_latest", "loaded_distance_m", "max_arrival_time", "max_pickup_time", "operation_area_id", "order_source", "origin_lat", "origin_lon", "origin_name", "origin_node_code", "origin_poi_code", "passenger_code", "passenger_count", "passenger_phone", "passenger_ready_time", "request_id", "request_time", "route_error", "route_status", "status"]}
+exception: OverflowError('timestamp out of range for platform time_t')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4060, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4152, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4356, in _op_order
+    _to_datetime(payload.get("max_arrival_time")),
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 132, in _to_datetime
+    return datetime.fromtimestamp(float(value)).replace(microsecond=0)
+OverflowError: timestamp out of range for platform time_t
+
+========================================================================================
+time: 2026-08-26 18:59:33
+level: WARNING
+source: flask.response
+message: HTTP 405
+context: {"method": "POST", "path": "/orders/pool", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "PostmanRuntime/7.56.1", "request_body": "{\r\n  \"request_id\": \"order_1003412123\",\r\n  \"operation_area_id\": \"20260713\",\r\n  \"passenger_phone\": \"13900000001\",\r\n  \"origin\": {\r\n    \"lon\": 113.33386900,\r\n    \"lat\": 23.13065900\r\n  },\r\n  \"destination\": {\r\n    \"lon\": 113.32941700,\r\n    \"lat\": 23.12732400\r\n  },\r\n  \"expected_pickup_time\": {\r\n    \"earliest\": \"2026-08-04 17:12:00\",\r\n    \"latest\": \"2026-08-04 17:15:00\"\r\n  },\r\n  \"passenger_count\": 1\r\n}", "status_code": 405, "response_body": "{\"error\":\"Method Not Allowed\",\"message\":\"The method is not allowed for the requested URL.\"}\n"}
+
+========================================================================================
+time: 2026-08-26 19:13:52
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1787742832.0618892, "request_id": "demo-manual-1787742828161-3583", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:8f96f57f36d9b3e385a652a6830f6087", "status": "success", "task_no": "dispatch:demo-manual-1787742828161-3583:grasp:v1:8f96f57f36d9b3e385a652a6830f6087:1787742832061", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4064, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4156, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4397, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4112, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-08-26 19:18:49
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1787743129.1679757, "request_id": "demo-manual-1787743128067-960", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:cb5d6f7532b9127fb7164796cf98e42d", "status": "success", "task_no": "dispatch:demo-manual-1787743128067-960:grasp:v1:cb5d6f7532b9127fb7164796cf98e42d:1787743129167", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4064, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4156, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4397, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4112, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-08-26 19:45:46
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-26 19:45:46
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "status_code": 404, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_not_found_by_coordinate\",\"error\":\"station_not_found_by_coordinate\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u6570\\u636e\\u5e93\\u4e2d\\u4e0d\\u5b58\\u5728\\u8be5\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":404,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:45:59
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-26 19:45:59
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "status_code": 404, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_not_found_by_coordinate\",\"error\":\"station_not_found_by_coordinate\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u6570\\u636e\\u5e93\\u4e2d\\u4e0d\\u5b58\\u5728\\u8be5\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":404,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:46:00
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-26 19:46:00
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "status_code": 404, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_not_found_by_coordinate\",\"error\":\"station_not_found_by_coordinate\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u6570\\u636e\\u5e93\\u4e2d\\u4e0d\\u5b58\\u5728\\u8be5\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":404,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:46:21
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-26 19:46:21
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "status_code": 404, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_not_found_by_coordinate\",\"error\":\"station_not_found_by_coordinate\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u6570\\u636e\\u5e93\\u4e2d\\u4e0d\\u5b58\\u5728\\u8be5\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":404,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:46:22
+level: WARNING
+source: api.routes.station_batch_item
+message: 数据库中不存在该经纬度站点
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "index": 0, "status": 404, "code": "station_not_found_by_coordinate"}
+
+========================================================================================
+time: 2026-08-26 19:46:22
+level: WARNING
+source: flask.response
+message: HTTP 404
+context: {"method": "DELETE", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"lon\":113.335906,\"lat\":23.098532,\"operation_area_id\":666666}", "status_code": 404, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_not_found_by_coordinate\",\"error\":\"station_not_found_by_coordinate\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u6570\\u636e\\u5e93\\u4e2d\\u4e0d\\u5b58\\u5728\\u8be5\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":404,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:53:05
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"阅江路总站（宝地广场对面）\",\"area\":\"芳园路\",\"station_direction\":\"西-东\",\"lon\":113.3427,\"lat\":23.103534}", "index": 0, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-26 19:53:05
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"阅江路总站（宝地广场对面）\",\"area\":\"芳园路\",\"station_direction\":\"西-东\",\"lon\":113.3427,\"lat\":23.103534}", "status_code": 409, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_coordinate_exists\",\"error\":\"station_coordinate_exists\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u540c\\u4e00\\u8fd0\\u8425\\u533a\\u5df2\\u6709\\u76f8\\u540c\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":409,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:54:51
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "index": 0, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-26 19:54:51
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "status_code": 409, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_coordinate_exists\",\"error\":\"station_coordinate_exists\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u540c\\u4e00\\u8fd0\\u8425\\u533a\\u5df2\\u6709\\u76f8\\u540c\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":409,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:54:53
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "index": 0, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-26 19:54:53
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "status_code": 409, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_coordinate_exists\",\"error\":\"station_coordinate_exists\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u540c\\u4e00\\u8fd0\\u8425\\u533a\\u5df2\\u6709\\u76f8\\u540c\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":409,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:54:53
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "index": 0, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-26 19:54:53
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"开元广场南门\",\"area\":\"芳园路\",\"station_direction\":\"东-西\",\"lon\":113.344559,\"lat\":23.103654}", "status_code": 409, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_coordinate_exists\",\"error\":\"station_coordinate_exists\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u540c\\u4e00\\u8fd0\\u8425\\u533a\\u5df2\\u6709\\u76f8\\u540c\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":409,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+
+========================================================================================
+time: 2026-08-26 19:57:49
+level: WARNING
+source: api.routes.station_batch_item
+message: 同一运营区已有相同经纬度站点
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"海港花园站（西行）\",\"area\":\"新港东路\",\"station_direction\":\"东-西\",\"lon\":113.344499,\"lat\":23.098812}", "index": 0, "status": 409, "code": "station_coordinate_exists"}
+
+========================================================================================
+time: 2026-08-26 19:57:49
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/stations", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36", "request_body": "{\"operation_area_id\":666666,\"station_name\":\"海港花园站（西行）\",\"area\":\"新港东路\",\"station_direction\":\"东-西\",\"lon\":113.344499,\"lat\":23.098812}", "status_code": 409, "response_body": "{\"failure_count\":1,\"results\":[{\"code\":\"station_coordinate_exists\",\"error\":\"station_coordinate_exists\",\"field\":\"lon,lat\",\"index\":0,\"message\":\"\\u540c\\u4e00\\u8fd0\\u8425\\u533a\\u5df2\\u6709\\u76f8\\u540c\\u7ecf\\u7eac\\u5ea6\\u7ad9\\u70b9\",\"status\":409,\"success\":false}],\"runtime_refresh\":{\"refreshed\":[],\"runtime_refreshed\":false,\"skipped\":[]},\"success_count\":0,\"total\":1}\n"}
+

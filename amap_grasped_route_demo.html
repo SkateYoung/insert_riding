@@ -267,10 +267,8 @@
             text-align: center;
             border: 2px solid #fff;
             box-shadow: 0 4px 12px rgba(15, 23, 42, 0.34);
-            transform: translate(
-                calc(-50% + var(--marker-dx, 0px)),
-                calc(-50% + var(--marker-dy, 0px))
-            );
+            transform: translate(calc(-50% + var(--marker-dx, 0px)),
+                    calc(-50% + var(--marker-dy, 0px)));
             white-space: nowrap;
         }
 
@@ -307,13 +305,27 @@
         .map-marker.route-station {
             background: #0ea5e9;
         }
+
+        .map-marker.road-network-station {
+            min-width: 20px;
+            width: 20px;
+            height: 20px;
+            padding: 0;
+            border-radius: 5px;
+            background: #facc15;
+            color: #111827;
+            font-size: 10px;
+            line-height: 20px;
+            border-color: #0f172a;
+        }
     </style>
     <script>
         window._AMapSecurityConfig = {
             securityJsCode: "0b80fd2cbff37b5fa47b96173410c6ad"
         };
     </script>
-    <script src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e&plugin=AMap.Scale,AMap.ToolBar"></script>
+    <script
+        src="https://webapi.amap.com/maps?v=2.0&key=447d5396499811870f1d4f67542a978e&plugin=AMap.Scale,AMap.ToolBar"></script>
 </head>
 
 <body>
@@ -331,148 +343,156 @@
         </div>
 
         <div id="routeTab" class="tab-panel active">
-        <div class="field">
-            <label for="apiBaseInput">后端地址</label>
-            <input id="apiBaseInput" value="http://127.0.0.1:5000">
-        </div>
-
-        <div class="field">
-            <label for="platformBaseInput">平台测试服务地址</label>
-            <input id="platformBaseInput" value="http://127.0.0.1:18080">
-        </div>
-
-        <div class="field">
-            <label for="routeAreaSelect">运营区域</label>
-            <select id="routeAreaSelect"></select>
-        </div>
-
-        <div class="field">
-            <label for="vehicleSelect">车辆</label>
-            <select id="vehicleSelect"></select>
-        </div>
-
-        <div class="field">
-            <label for="routeSegmentSelect">路线显示范围</label>
-            <select id="routeSegmentSelect">
-                <option value="all">全部路线</option>
-            </select>
-        </div>
-
-        <div class="actions">
-            <button id="loadFleetBtn" type="button">加载车队</button>
-            <button id="refreshVehicleBtn" type="button" class="secondary">刷新车辆</button>
-            <button id="updatePathBtn" type="button">上报/吸附车辆位置</button>
-            <button id="pickRouteVehiclePositionBtn" type="button" class="secondary">鼠标 GPS 上报模式</button>
-            <button id="replanAmapRouteBtn" type="button">优先重规划高德路径</button>
-            <button id="clearBtn" type="button" class="secondary">清空地图</button>
-        </div>
-
-        <div class="tool-block">
-            <div class="section-title">司机上下客确认</div>
-            <div id="boardingInfo" class="hint">请选择车辆并刷新路线。</div>
-            <div class="compact-actions">
-                <button id="confirmPickupBtn" type="button" disabled>已上车</button>
-                <button id="confirmDropoffBtn" type="button" class="secondary" disabled>已下车</button>
-            </div>
-        </div>
-
-        <div class="tool-block">
-            <div class="section-title">平台派单接收测试</div>
-            <div id="platformPendingInfo" class="hint">请选择车辆后从平台测试服务读取待确认订单。</div>
             <div class="field">
-                <label for="platformPendingOrderSelect">当前车辆待确认订单</label>
-                <select id="platformPendingOrderSelect"></select>
+                <label for="apiBaseInput">后端地址</label>
+                <input id="apiBaseInput" value="http://127.0.0.1:5000">
             </div>
-            <div class="compact-actions">
-                <button id="refreshPlatformPendingBtn" type="button" class="secondary">刷新平台待确认</button>
-                <button id="platformAckBtn" type="button" disabled>司机已收到</button>
-                <button id="platformUnreachableBtn" type="button" class="secondary" disabled>网络未收到</button>
-                <button id="platformDeclineBtn" type="button" class="danger" disabled>司机主动拒单</button>
-            </div>
-        </div>
 
-        <div class="tool-block">
-            <div class="section-title">动态公交点选下单</div>
             <div class="field">
-                <label for="dynamicOrderRequestInput">订单请求ID</label>
-                <input id="dynamicOrderRequestInput" placeholder="可为空，自动生成">
+                <label for="platformBaseInput">平台测试服务地址</label>
+                <input id="platformBaseInput" value="http://127.0.0.1:18080">
             </div>
-            <div class="form-grid">
-                <div class="field">
-                    <label for="dynamicOriginLonInput">起点经度</label>
-                    <input id="dynamicOriginLonInput" type="number" step="0.00000001">
-                </div>
-                <div class="field">
-                    <label for="dynamicOriginLatInput">起点纬度</label>
-                    <input id="dynamicOriginLatInput" type="number" step="0.00000001">
-                </div>
-                <div class="field">
-                    <label for="dynamicDestinationLonInput">终点经度</label>
-                    <input id="dynamicDestinationLonInput" type="number" step="0.00000001">
-                </div>
-                <div class="field">
-                    <label for="dynamicDestinationLatInput">终点纬度</label>
-                    <input id="dynamicDestinationLatInput" type="number" step="0.00000001">
-                </div>
-            </div>
-            <div class="compact-actions">
-                <button id="reloadDynamicPoisBtn" type="button" class="secondary">显示运营区站点</button>
-                <button id="createDynamicOrderBtn" type="button">发起动态订单</button>
-                <button id="pickDynamicOriginBtn" type="button" class="secondary">点选起点站</button>
-                <button id="pickDynamicDestinationBtn" type="button" class="secondary">点选终点站</button>
-            </div>
-            <div id="dynamicOrderInfo" class="hint">选择运营区域后显示站点，点击“点选起点站/终点站”再点击地图站点图标即可填入精确坐标；下方乘客与时间窗也会用于动态订单。</div>
-        </div>
 
-        <div class="tool-block">
-            <div class="section-title">乘客与时间窗 / 模拟随机订单</div>
-            <div class="form-grid">
-                <div class="field">
-                    <label for="manualPickupEarliestInput">最早上车时间</label>
-                    <input id="manualPickupEarliestInput" type="datetime-local">
-                </div>
-                <div class="field">
-                    <label for="manualPickupLatestInput">最晚上车时间</label>
-                    <input id="manualPickupLatestInput" type="datetime-local">
-                </div>
-                <div class="field">
-                    <label for="manualPassengerCountInput">乘客人数</label>
-                    <input id="manualPassengerCountInput" type="number" min="1" max="10" value="1">
-                </div>
-                <div class="field">
-                    <label for="manualPassengerPhoneInput">乘客手机号</label>
-                    <input id="manualPassengerPhoneInput" type="tel" placeholder="必填">
-                </div>
-                <div class="field">
-                    <label for="manualPassengerIdInput">乘客ID</label>
-                    <input id="manualPassengerIdInput" type="text" placeholder="可为空">
-                </div>
-                <div class="field">
-                    <label>&nbsp;</label>
-                    <button id="resetManualPickupTimeBtn" type="button" class="secondary">重置时间窗</button>
-                </div>
-            </div>
-            <div class="quick-actions">
-                <button id="randomOrder1Btn" type="button">发起 1 单</button>
-                <button id="randomOrder10Btn" type="button">批量发起 10 单</button>
-                <button id="randomOrder50Btn" type="button">批量发起 50 单</button>
-            </div>
             <div class="field">
-                <label for="batchCancelOrderInput">批量取消订单ID</label>
-                <textarea id="batchCancelOrderInput" rows="3" placeholder="多个 request_id 用换行、逗号或空格分隔"></textarea>
+                <label for="routeAreaSelect">运营区域</label>
+                <select id="routeAreaSelect"></select>
             </div>
-            <div class="compact-actions">
-                <button id="batchCancelOrderBtn" type="button" class="danger">批量取消动态订单</button>
-                <button id="fillRecentOrderIdsBtn" type="button" class="secondary" disabled>填入最近随机订单</button>
-            </div>
-        </div>
 
-        <div class="legend">
-            <span style="--line-color:#2563eb;">后端原始 A* 路线</span>
-            <span style="--line-color:#a855f7;">后端高德纠偏路线</span>
-            <span style="--line-color:#f97316;">纠偏分段路线</span>
-            <span style="--line-color:#ef4444;">运营禁区</span>
-        </div>
+            <div class="field">
+                <label for="vehicleSelect">车辆</label>
+                <select id="vehicleSelect"></select>
+            </div>
+
+            <div class="field">
+                <label for="routeSegmentSelect">路线显示范围</label>
+                <select id="routeSegmentSelect">
+                    <option value="all">全部路线</option>
+                </select>
+            </div>
+
+            <div class="actions">
+                <button id="loadFleetBtn" type="button">加载车队</button>
+                <button id="refreshVehicleBtn" type="button" class="secondary">刷新车辆</button>
+                <button id="loadRoadNetworkBtn" type="button" class="secondary">显示 SHP 路网</button>
+                <button id="updatePathBtn" type="button">上报/吸附车辆位置</button>
+                <button id="pickRouteVehiclePositionBtn" type="button" class="secondary">鼠标 GPS 上报模式</button>
+                <button id="replanAmapRouteBtn" type="button">优先重规划高德路径</button>
+                <button id="clearBtn" type="button" class="secondary">清空地图</button>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">司机上下客确认</div>
+                <div id="boardingInfo" class="hint">请选择车辆并刷新路线。</div>
+                <div class="field">
+                    <label for="boardingStepSelect">选择待确认订单</label>
+                    <select id="boardingStepSelect"></select>
+                </div>
+                <div class="compact-actions">
+                    <button id="confirmPickupBtn" type="button" disabled>已上车</button>
+                    <button id="confirmDropoffBtn" type="button" class="secondary" disabled>已下车</button>
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">平台派单接收测试</div>
+                <div id="platformPendingInfo" class="hint">请选择车辆后从平台测试服务读取待确认订单。</div>
+                <div class="field">
+                    <label for="platformPendingOrderSelect">当前车辆待确认订单</label>
+                    <select id="platformPendingOrderSelect"></select>
+                </div>
+                <div class="compact-actions">
+                    <button id="refreshPlatformPendingBtn" type="button" class="secondary">刷新平台待确认</button>
+                    <button id="platformAckBtn" type="button" disabled>司机已收到</button>
+                    <button id="platformUnreachableBtn" type="button" class="secondary" disabled>网络未收到</button>
+                    <button id="platformDeclineBtn" type="button" class="danger" disabled>司机主动拒单</button>
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">动态公交点选下单</div>
+                <div class="field">
+                    <label for="dynamicOrderRequestInput">订单请求ID</label>
+                    <input id="dynamicOrderRequestInput" placeholder="可为空，自动生成">
+                </div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="dynamicOriginLonInput">起点经度</label>
+                        <input id="dynamicOriginLonInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="dynamicOriginLatInput">起点纬度</label>
+                        <input id="dynamicOriginLatInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="dynamicDestinationLonInput">终点经度</label>
+                        <input id="dynamicDestinationLonInput" type="number" step="0.00000001">
+                    </div>
+                    <div class="field">
+                        <label for="dynamicDestinationLatInput">终点纬度</label>
+                        <input id="dynamicDestinationLatInput" type="number" step="0.00000001">
+                    </div>
+                </div>
+                <div class="compact-actions">
+                    <button id="reloadDynamicPoisBtn" type="button" class="secondary">显示运营区站点</button>
+                    <button id="createDynamicOrderBtn" type="button">发起动态订单</button>
+                    <button id="pickDynamicOriginBtn" type="button" class="secondary">点选起点站</button>
+                    <button id="pickDynamicDestinationBtn" type="button" class="secondary">点选终点站</button>
+                </div>
+                <div id="dynamicOrderInfo" class="hint">选择运营区域后显示站点，点击“点选起点站/终点站”再点击地图站点图标即可填入精确坐标；下方乘客与时间窗也会用于动态订单。
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">乘客与时间窗 / 模拟随机订单</div>
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="manualPickupEarliestInput">最早上车时间</label>
+                        <input id="manualPickupEarliestInput" type="datetime-local">
+                    </div>
+                    <div class="field">
+                        <label for="manualPickupLatestInput">最晚上车时间</label>
+                        <input id="manualPickupLatestInput" type="datetime-local">
+                    </div>
+                    <div class="field">
+                        <label for="manualPassengerCountInput">乘客人数</label>
+                        <input id="manualPassengerCountInput" type="number" min="1" max="10" value="1">
+                    </div>
+                    <div class="field">
+                        <label for="manualPassengerPhoneInput">乘客手机号</label>
+                        <input id="manualPassengerPhoneInput" type="tel" placeholder="必填">
+                    </div>
+                    <div class="field">
+                        <label for="manualPassengerIdInput">乘客ID</label>
+                        <input id="manualPassengerIdInput" type="text" placeholder="可为空">
+                    </div>
+                    <div class="field">
+                        <label>&nbsp;</label>
+                        <button id="resetManualPickupTimeBtn" type="button" class="secondary">重置时间窗</button>
+                    </div>
+                </div>
+                <div class="quick-actions">
+                    <button id="randomOrder1Btn" type="button">发起 1 单</button>
+                    <button id="randomOrder10Btn" type="button">批量发起 10 单</button>
+                    <button id="randomOrder50Btn" type="button">批量发起 50 单</button>
+                </div>
+                <div class="field">
+                    <label for="batchCancelOrderInput">批量取消订单ID</label>
+                    <textarea id="batchCancelOrderInput" rows="3" placeholder="多个 request_id 用换行、逗号或空格分隔"></textarea>
+                </div>
+                <div class="compact-actions">
+                    <button id="batchCancelOrderBtn" type="button" class="danger">批量取消动态订单</button>
+                    <button id="fillRecentOrderIdsBtn" type="button" class="secondary" disabled>填入最近随机订单</button>
+                </div>
+            </div>
+
+            <div class="legend">
+                <span style="--line-color:#334155;">SHP 路网</span>
+                <span style="--line-color:#facc15;">路网站点</span>
+                <span style="--line-color:#2563eb;">后端原始 A* 路线</span>
+                <span style="--line-color:#a855f7;">后端高德纠偏路线</span>
+                <span style="--line-color:#f97316;">纠偏分段路线</span>
+                <span style="--line-color:#ef4444;">运营禁区</span>
+            </div>
         </div>
 
         <div id="operationAreaTab" class="tab-panel">
@@ -644,7 +664,8 @@
                 </div>
                 <div class="field">
                     <label for="stationBatchInput">批量 JSON</label>
-                    <textarea id="stationBatchInput" class="json-input" placeholder='[{"operation_area_id":10001,"station_name":"大学城北门","area":"大学城外环西路","station_direction":"东-西","lon":113.12345678,"lat":23.12345678}]'></textarea>
+                    <textarea id="stationBatchInput" class="json-input"
+                        placeholder='[{"operation_area_id":10001,"station_name":"大学城北门","area":"大学城外环西路","station_direction":"东-西","lon":113.12345678,"lat":23.12345678}]'></textarea>
                 </div>
                 <div class="compact-actions">
                     <button id="createStationBatchBtn" type="button">批量新增站点</button>
@@ -667,50 +688,50 @@
         </div>
 
         <div id="restrictionTab" class="tab-panel">
-        <div class="divider"></div>
-        <div class="section-title">运营禁区策略</div>
+            <div class="divider"></div>
+            <div class="section-title">运营禁区策略</div>
 
-        <div class="field">
-            <label for="restrictionAreaSelect">运营区域</label>
-            <select id="restrictionAreaSelect"></select>
-        </div>
-
-        <div class="field">
-            <label for="restrictionPolicySelect">策略</label>
-            <select id="restrictionPolicySelect"></select>
-        </div>
-
-        <div class="compact-actions">
-            <button id="newRestrictionPolicyBtn" type="button">新增禁区策略</button>
-            <button id="reloadRestrictionBtn" type="button" class="secondary">查询当前区策略</button>
-        </div>
-
-        <div class="two-col">
             <div class="field">
-                <label for="restrictionPolicyCodeInput">编号</label>
-                <input id="restrictionPolicyCodeInput" value="campus-block">
+                <label for="restrictionAreaSelect">运营区域</label>
+                <select id="restrictionAreaSelect"></select>
             </div>
+
             <div class="field">
-                <label for="restrictionPolicyNameInput">名称</label>
-                <input id="restrictionPolicyNameInput" value="校园施工禁区">
+                <label for="restrictionPolicySelect">策略</label>
+                <select id="restrictionPolicySelect"></select>
             </div>
-        </div>
 
-        <div class="field">
-            <label for="restrictionDescriptionInput">备注</label>
-            <textarea id="restrictionDescriptionInput"></textarea>
-        </div>
+            <div class="compact-actions">
+                <button id="newRestrictionPolicyBtn" type="button">新增禁区策略</button>
+                <button id="reloadRestrictionBtn" type="button" class="secondary">查询当前区策略</button>
+            </div>
 
-        <div class="compact-actions">
-            <button id="drawRestrictionBtn" type="button">开始画禁区</button>
-            <button id="closeRestrictionBtn" type="button" class="secondary">闭合当前禁区</button>
-            <button id="saveRestrictionBtn" type="button">保存策略</button>
-            <button id="activateRestrictionBtn" type="button" class="secondary">设为当前</button>
-            <button id="deleteRestrictionBtn" type="button" class="danger">删除策略</button>
-            <button id="clearRestrictionBtn" type="button" class="secondary">清空禁区图形</button>
-        </div>
+            <div class="two-col">
+                <div class="field">
+                    <label for="restrictionPolicyCodeInput">编号</label>
+                    <input id="restrictionPolicyCodeInput" value="campus-block">
+                </div>
+                <div class="field">
+                    <label for="restrictionPolicyNameInput">名称</label>
+                    <input id="restrictionPolicyNameInput" value="校园施工禁区">
+                </div>
+            </div>
 
-        <div class="hint">选择已有策略后可继续绘制并闭合新禁区，保存后会追加到该策略；新增策略会先清空当前表单。画禁区时请按边界顺时针或逆时针依次点击，避免对角线交叉。</div>
+            <div class="field">
+                <label for="restrictionDescriptionInput">备注</label>
+                <textarea id="restrictionDescriptionInput"></textarea>
+            </div>
+
+            <div class="compact-actions">
+                <button id="drawRestrictionBtn" type="button">开始画禁区</button>
+                <button id="closeRestrictionBtn" type="button" class="secondary">闭合当前禁区</button>
+                <button id="saveRestrictionBtn" type="button">保存策略</button>
+                <button id="activateRestrictionBtn" type="button" class="secondary">设为当前</button>
+                <button id="deleteRestrictionBtn" type="button" class="danger">删除策略</button>
+                <button id="clearRestrictionBtn" type="button" class="secondary">清空禁区图形</button>
+            </div>
+
+            <div class="hint">选择已有策略后可继续绘制并闭合新禁区，保存后会追加到该策略；新增策略会先清空当前表单。画禁区时请按边界顺时针或逆时针依次点击，避免对角线交叉。</div>
         </div>
 
         <div id="commuteTab" class="tab-panel">
@@ -754,7 +775,8 @@
                 </div>
                 <div class="field">
                     <label for="commuteStopsInput">站点经纬度 JSON</label>
-                    <textarea id="commuteStopsInput" class="json-input" placeholder='[{"lon":113.1,"lat":23.1},{"lon":113.2,"lat":23.2}]'></textarea>
+                    <textarea id="commuteStopsInput" class="json-input"
+                        placeholder='[{"lon":113.1,"lat":23.1},{"lon":113.2,"lat":23.2}]'></textarea>
                 </div>
                 <div class="field">
                     <label for="commutePoiSelect">运营区站点</label>
@@ -847,6 +869,10 @@
                     <div class="field">
                         <label for="commuteBoardingVehicleSelect">上下车车辆</label>
                         <select id="commuteBoardingVehicleSelect"></select>
+                    </div>
+                    <div class="field">
+                        <label for="commuteBoardingStepSelect">待确认订单</label>
+                        <select id="commuteBoardingStepSelect"></select>
                     </div>
                 </div>
                 <div class="compact-actions">
@@ -1166,11 +1192,13 @@
         const routeSegmentSelect = document.getElementById("routeSegmentSelect");
         const loadFleetBtn = document.getElementById("loadFleetBtn");
         const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
+        const loadRoadNetworkBtn = document.getElementById("loadRoadNetworkBtn");
         const updatePathBtn = document.getElementById("updatePathBtn");
         const pickRouteVehiclePositionBtn = document.getElementById("pickRouteVehiclePositionBtn");
         const replanAmapRouteBtn = document.getElementById("replanAmapRouteBtn");
         const clearBtn = document.getElementById("clearBtn");
         const boardingInfo = document.getElementById("boardingInfo");
+        const boardingStepSelect = document.getElementById("boardingStepSelect");
         const confirmPickupBtn = document.getElementById("confirmPickupBtn");
         const confirmDropoffBtn = document.getElementById("confirmDropoffBtn");
         const platformPendingInfo = document.getElementById("platformPendingInfo");
@@ -1278,6 +1306,7 @@
         const commutePassengerCountInput = document.getElementById("commutePassengerCountInput");
         const commutePassengerIdInput = document.getElementById("commutePassengerIdInput");
         const commuteBoardingVehicleSelect = document.getElementById("commuteBoardingVehicleSelect");
+        const commuteBoardingStepSelect = document.getElementById("commuteBoardingStepSelect");
         const pickCommuteOriginBtn = document.getElementById("pickCommuteOriginBtn");
         const pickCommuteDestinationBtn = document.getElementById("pickCommuteDestinationBtn");
         const createCommuteOrderBtn = document.getElementById("createCommuteOrderBtn");
@@ -1385,6 +1414,9 @@
         let markerPositionCounts = new Map();
         let routePoiLayers = [];
         let routePoiMarkerPositionCounts = new Map();
+        let shpRoadLayers = [];
+        let shpRoadNodeLayers = [];
+        let shpRoadNodeMarkerPositionCounts = new Map();
         let commutePoiLayers = [];
         let commutePoiMarkerPositionCounts = new Map();
         let commuteLineStopLayers = [];
@@ -1409,6 +1441,9 @@
         let stationPickMode = false;
         let dynamicOrderPickTarget = null;
         let routePoisLoadedAreaId = "";
+        let roadNetworkLoadedAreaId = "";
+        let shpRoadNetworkVisible = true;
+        let cachedRoadNetwork = null;
         let suppressDynamicOrderMapClickUntil = 0;
         let commutePointTarget = null;
         let commuteLines = [];
@@ -1424,6 +1459,7 @@
         function setBusy(isBusy) {
             loadFleetBtn.disabled = isBusy;
             refreshVehicleBtn.disabled = isBusy;
+            loadRoadNetworkBtn.disabled = isBusy;
             updatePathBtn.disabled = isBusy;
             pickRouteVehiclePositionBtn.disabled = isBusy;
             replanAmapRouteBtn.disabled = isBusy;
@@ -1442,6 +1478,7 @@
             resetManualPickupTimeBtn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
             routeSegmentSelect.disabled = isBusy || routeSegmentSelect.options.length <= 1;
+            boardingStepSelect.disabled = isBusy || !boardingStepSelect.value;
             platformPendingOrderSelect.disabled = isBusy || platformPendingOrderSelect.options.length === 0;
             refreshPlatformPendingBtn.disabled = isBusy;
             platformAckBtn.disabled = isBusy || !platformPendingOrderSelect.value;
@@ -1491,13 +1528,15 @@
             commutePassengerCountInput.disabled = isBusy;
             commutePassengerIdInput.disabled = isBusy;
             commuteBoardingVehicleSelect.disabled = isBusy;
+            commuteBoardingStepSelect.disabled = isBusy || !commuteBoardingStepSelect.value;
             pickCommuteOriginBtn.disabled = isBusy;
             pickCommuteDestinationBtn.disabled = isBusy;
             createCommuteOrderBtn.disabled = isBusy;
             queryCommuteOrderBtn.disabled = isBusy;
             cancelCommuteOrderBtn.disabled = isBusy;
-            commutePickupBtn.disabled = isBusy;
-            commuteDropoffBtn.disabled = isBusy;
+            const commuteStep = selectedCommuteBoardingStep(fleetById.get(commuteBoardingVehicleSelect.value));
+            commutePickupBtn.disabled = isBusy || !commuteStep || commuteStep.action !== "pickup";
+            commuteDropoffBtn.disabled = isBusy || !commuteStep || commuteStep.action !== "dropoff";
         }
 
         function setRouteGpsPickMode(enabled) {
@@ -1649,8 +1688,11 @@
             }
             cachedPois = null;
             routePoisLoadedAreaId = "";
+            cachedRoadNetwork = null;
+            roadNetworkLoadedAreaId = "";
             setDynamicOrderPickTarget(null);
             clearRoutePoiMarkers();
+            clearShpRoadNetworkLayers();
         }
 
         function areaQuery(prefix = "?") {
@@ -1759,6 +1801,28 @@
             routePoiMarkerPositionCounts = new Map();
         }
 
+        function clearShpRoadNetworkLayers() {
+            const targetLayers = [...shpRoadLayers, ...shpRoadNodeLayers];
+            if (targetLayers.length) {
+                map.remove(targetLayers);
+            }
+            shpRoadLayers = [];
+            shpRoadNodeLayers = [];
+            shpRoadNodeMarkerPositionCounts = new Map();
+            updateShpRoadNetworkButton();
+        }
+
+        function hasShpRoadNetworkLayers() {
+            return shpRoadLayers.length > 0 || shpRoadNodeLayers.length > 0;
+        }
+
+        function updateShpRoadNetworkButton() {
+            if (!loadRoadNetworkBtn) {
+                return;
+            }
+            loadRoadNetworkBtn.textContent = hasShpRoadNetworkLayers() ? "隐藏 SHP 路网" : "显示 SHP 路网";
+        }
+
         function clearOperationAreaMasks() {
             if (operationAreaMaskLayers.length) {
                 map.remove(operationAreaMaskLayers);
@@ -1782,7 +1846,7 @@
             commuteLineStopMarkerPositionCounts = new Map();
         }
 
-        function addPolyline(points, options) {
+        function addPolyline(points, options, targetLayers = layers) {
             const normalized = normalizePoints(points);
             if (normalized.length < 2) {
                 return null;
@@ -1792,7 +1856,7 @@
                 showDir: true,
                 ...options
             });
-            layers.push(polyline);
+            targetLayers.push(polyline);
             map.add(polyline);
             return polyline;
         }
@@ -2071,6 +2135,109 @@
             return addMarker(point, `S${index + 1}`, null, "stop-other");
         }
 
+        function roadNetworkEdgeEndpoint(edge, keys) {
+            for (const key of keys) {
+                const value = edge?.[key];
+                if (value !== undefined && value !== null && value !== "") {
+                    return String(value);
+                }
+            }
+            return "";
+        }
+
+        function roadNetworkNode(nodes, nodeId) {
+            if (!nodeId) {
+                return null;
+            }
+            return nodes[nodeId] || nodes[String(nodeId)] || null;
+        }
+
+        function drawShpRoadNetwork(data, options = {}) {
+            clearShpRoadNetworkLayers();
+            const nodes = data?.nodes || {};
+            const edges = Array.isArray(data?.edges) ? data.edges : [];
+            const poiIds = Array.isArray(data?.pois) ? data.pois.map(item => String(item)) : [];
+            const seenEdges = new Set();
+            let drawnEdges = 0;
+            let drawnStations = 0;
+
+            for (const edge of edges) {
+                const u = roadNetworkEdgeEndpoint(edge, ["u", "from", "source", "start", "start_node", "start_node_id"]);
+                const v = roadNetworkEdgeEndpoint(edge, ["v", "to", "target", "end", "end_node", "end_node_id"]);
+                if (!u || !v) {
+                    continue;
+                }
+                const edgeKey = [u, v].sort().join("::");
+                if (seenEdges.has(edgeKey)) {
+                    continue;
+                }
+                const start = normalizePoint(roadNetworkNode(nodes, u));
+                const end = normalizePoint(roadNetworkNode(nodes, v));
+                if (!start || !end) {
+                    continue;
+                }
+                seenEdges.add(edgeKey);
+                addPolyline([start, end], {
+                    showDir: false,
+                    strokeColor: "#334155",
+                    strokeOpacity: 0.32,
+                    strokeWeight: 2,
+                    strokeStyle: "solid",
+                    zIndex: 18
+                }, shpRoadLayers);
+                drawnEdges += 1;
+            }
+
+            for (const [index, poiId] of poiIds.entries()) {
+                const node = roadNetworkNode(nodes, poiId);
+                const point = normalizePoint(node);
+                if (!point) {
+                    continue;
+                }
+                addMarker(
+                    point,
+                    `R${drawnStations + 1}`,
+                    null,
+                    "road-network-station",
+                    shpRoadNodeLayers,
+                    shpRoadNodeMarkerPositionCounts,
+                    null,
+                    node?.name || node?.id || `路网站点${index + 1}`,
+                    { zIndex: 720 + drawnStations, topWhenClick: true }
+                );
+                drawnStations += 1;
+            }
+
+            if (options.fitView && hasShpRoadNetworkLayers()) {
+                map.setFitView([...shpRoadLayers, ...shpRoadNodeLayers], false, [60, 60, 60, 420], 17);
+            }
+            updateShpRoadNetworkButton();
+            return { edges: drawnEdges, stations: drawnStations };
+        }
+
+        async function loadShpRoadNetwork(message, options = {}) {
+            const operationAreaId = requireOperationAreaId();
+            const data = await apiJson(`/map/road-network?operation_area_id=${encodeURIComponent(operationAreaId)}`);
+            cachedRoadNetwork = data;
+            roadNetworkLoadedAreaId = String(operationAreaId);
+            shpRoadNetworkVisible = true;
+            const stats = drawShpRoadNetwork(data, { fitView: Boolean(options.fitView) });
+            if (message) {
+                setStatus(`${message}\nSHP 路网边：${stats.edges} 条，路网站点：${stats.stations} 个。`);
+            }
+            return data;
+        }
+
+        async function toggleShpRoadNetwork() {
+            if (hasShpRoadNetworkLayers()) {
+                shpRoadNetworkVisible = false;
+                clearShpRoadNetworkLayers();
+                setStatus("SHP 路网已隐藏。");
+                return null;
+            }
+            return loadShpRoadNetwork("SHP 路网已绘制。", { fitView: true });
+        }
+
         function fitVisible(points, customLayers) {
             const normalized = normalizePoints(points);
             const targetLayers = customLayers || layers;
@@ -2134,24 +2301,45 @@
 
         const BOARDING_DISTANCE_THRESHOLD_M = 30;
 
-        function currentBoardingStep(vehicle) {
+        function boardingStepTarget(vehicle, step) {
+            const segments = vehicle?.planned_route_segment_grasped_point || [];
+            const matchedSegment = segments.find(segment =>
+                step && segment.type === step.type && String(segment.request_id || "") === String(step.request_id || "")
+            );
+            return matchedSegment ? segmentTarget(matchedSegment) : normalizePoint(step?.target_node);
+        }
+
+        function boardingStepOptionLabel(step, index) {
+            const actionText = step.action === "pickup" ? "上车" : "下车";
+            const nameText = step.node_name ? ` - ${step.node_name}` : "";
+            return `${index + 1}. ${actionText} ${step.request_id || "-"}${nameText}`;
+        }
+
+        function vehicleBoardingSteps(vehicle) {
             const planned = vehicle?.planned_route || [];
-            if (!planned.length) {
+            return planned.filter(Boolean).map((step, index) => {
+                const target = boardingStepTarget(vehicle, step);
+                return {
+                    index,
+                    type: step.type,
+                    request_id: step.request_id,
+                    node_name: step.node_name || target?.name || "",
+                    action: step.type === "O" ? "pickup" : "dropoff",
+                    target
+                };
+            });
+        }
+
+        function selectedBoardingStep(vehicle) {
+            const steps = vehicleBoardingSteps(vehicle);
+            if (!steps.length) {
                 return null;
             }
-            const step = planned[0];
-            const segments = vehicle?.planned_route_segment_grasped_point || [];
-            const firstSegment = segments.find(segment =>
-                segment.type === step.type && String(segment.request_id || "") === String(step.request_id || "")
-            ) || segments[0];
-            const target = firstSegment ? segmentTarget(firstSegment) : normalizePoint(step.target_node);
-            return {
-                type: step.type,
-                request_id: step.request_id,
-                node_name: step.node_name || target?.name || "",
-                action: step.type === "O" ? "pickup" : "dropoff",
-                target
-            };
+            const selectedIndex = Number(boardingStepSelect.value);
+            if (Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < steps.length) {
+                return steps[selectedIndex];
+            }
+            return steps[0];
         }
 
         function updateBoardingPanel(vehicle) {
@@ -2159,8 +2347,32 @@
             confirmDropoffBtn.disabled = true;
             confirmPickupBtn.dataset.requestId = "";
             confirmDropoffBtn.dataset.requestId = "";
+            boardingStepSelect.innerHTML = "";
 
-            const step = currentBoardingStep(vehicle);
+            const steps = vehicleBoardingSteps(vehicle);
+            if (!steps.length) {
+                boardingStepSelect.disabled = true;
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = "无待确认订单";
+                boardingStepSelect.appendChild(option);
+                boardingInfo.textContent = "当前车辆没有待确认的上下客步骤。";
+                return;
+            }
+
+            const previousValue = boardingStepSelect.dataset.lastValue || boardingStepSelect.value;
+            steps.forEach((step, index) => {
+                const option = document.createElement("option");
+                option.value = String(index);
+                option.textContent = boardingStepOptionLabel(step, index);
+                boardingStepSelect.appendChild(option);
+            });
+            const values = Array.from(boardingStepSelect.options).map(option => option.value);
+            boardingStepSelect.value = values.includes(previousValue) ? previousValue : "0";
+            boardingStepSelect.dataset.lastValue = boardingStepSelect.value;
+            boardingStepSelect.disabled = false;
+
+            const step = selectedBoardingStep(vehicle);
             if (!step) {
                 boardingInfo.textContent = "当前车辆没有待确认的上下客步骤。";
                 return;
@@ -2170,13 +2382,13 @@
             const distance = distanceMeters(gps, step.target);
             const distanceText = distance === null ? "未知" : `${distance.toFixed(1)} 米`;
             const actionText = step.action === "pickup" ? "上车" : "下车";
-            const canConfirm = distance !== null && distance <= BOARDING_DISTANCE_THRESHOLD_M;
+            const canConfirm = true;
             boardingInfo.textContent = [
-                `下一步：${actionText}`,
+                `已选择：${step.index + 1}. ${actionText}`,
                 `订单：${step.request_id || "-"}`,
                 `目标：${step.node_name || "-"}`,
                 `距离：${distanceText}`,
-                `阈值：${BOARDING_DISTANCE_THRESHOLD_M} 米`
+                step.index === 0 ? "位置：队首步骤" : "位置：非队首步骤，后端会按需重规划"
             ].join("\n");
 
             if (step.action === "pickup") {
@@ -3169,6 +3381,50 @@
             if (Array.from(commuteBoardingVehicleSelect.options).some(option => option.value === boardingCurrent)) {
                 commuteBoardingVehicleSelect.value = boardingCurrent;
             }
+            renderCommuteBoardingStepOptions();
+        }
+
+        function selectedCommuteBoardingStep(vehicle) {
+            const steps = vehicleBoardingSteps(vehicle);
+            if (!steps.length) {
+                return null;
+            }
+            const selectedIndex = Number(commuteBoardingStepSelect.value);
+            if (Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < steps.length) {
+                return steps[selectedIndex];
+            }
+            return steps[0];
+        }
+
+        function renderCommuteBoardingStepOptions() {
+            const current = commuteBoardingStepSelect.value;
+            const vehicle = fleetById.get(commuteBoardingVehicleSelect.value);
+            const steps = vehicleBoardingSteps(vehicle);
+            commuteBoardingStepSelect.innerHTML = "";
+            if (!steps.length) {
+                const option = document.createElement("option");
+                option.value = "";
+                option.textContent = commuteBoardingVehicleSelect.value ? "该车辆暂无待确认订单" : "请先选择车辆";
+                commuteBoardingStepSelect.appendChild(option);
+                commuteBoardingStepSelect.disabled = true;
+                commutePickupBtn.disabled = true;
+                commuteDropoffBtn.disabled = true;
+                return;
+            }
+
+            steps.forEach((step, index) => {
+                const option = document.createElement("option");
+                option.value = String(index);
+                option.textContent = boardingStepOptionLabel(step, index);
+                commuteBoardingStepSelect.appendChild(option);
+            });
+            const values = Array.from(commuteBoardingStepSelect.options).map(option => option.value);
+            commuteBoardingStepSelect.value = values.includes(current) ? current : "0";
+            commuteBoardingStepSelect.disabled = false;
+
+            const step = selectedCommuteBoardingStep(vehicle);
+            commutePickupBtn.disabled = !step || step.action !== "pickup";
+            commuteDropoffBtn.disabled = !step || step.action !== "dropoff";
         }
 
         function loadCommuteLineIntoForm(line) {
@@ -3362,11 +3618,23 @@
             if (!vehicleId) {
                 throw new Error("请选择上下车车辆");
             }
+            let vehicle = fleetById.get(vehicleId);
+            if (!vehicle) {
+                vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
+                fleetById.set(vehicle.vehicle_id || vehicleId, vehicle);
+            }
+            const step = selectedCommuteBoardingStep(vehicle);
+            if (!step) {
+                throw new Error("当前快线车辆没有待确认订单");
+            }
+            if (step.action !== action) {
+                throw new Error(action === "pickup" ? "选中步骤不是上车" : "选中步骤不是下车");
+            }
             const result = await apiJson(`/fleet/${encodeURIComponent(vehicleId)}/boarding-events`, {
                 method: "POST",
                 body: {
                     action,
-                    request_id: selectedCommuteOrderRequestId() || null,
+                    request_id: step.request_id,
                     distance_threshold_m: 30
                 }
             });
@@ -3418,6 +3686,14 @@
                     option.value = vehicleId;
                     option.textContent = `${vehicleId} - ${vehicle.plate_no || vehicle.id || "未命名"} - ${vehicle.planned_route_grasp_status || "none"}`;
                     vehicleSelect.appendChild(option);
+                }
+                if (shpRoadNetworkVisible) {
+                    await loadShpRoadNetwork(null, { fitView: false }).catch(error => {
+                        cachedRoadNetwork = null;
+                        roadNetworkLoadedAreaId = "";
+                        clearShpRoadNetworkLayers();
+                        console.warn("SHP 路网绘制失败", error);
+                    });
                 }
                 if (!vehicleSelect.options.length) {
                     setStatus("车队为空。");
@@ -3613,12 +3889,12 @@
         async function confirmBoardingAction(action) {
             const vehicleId = selectedVehicleId();
             const current = fleetById.get(vehicleId) || await loadSelectedVehicle();
-            const step = currentBoardingStep(current);
+            const step = selectedBoardingStep(current);
             if (!step) {
                 throw new Error("当前车辆没有待确认的上下客步骤");
             }
             if (step.action !== action) {
-                throw new Error(action === "pickup" ? "当前步骤不是上车" : "当前步骤不是下车");
+                throw new Error(action === "pickup" ? "选中步骤不是上车" : "选中步骤不是下车");
             }
             const gps = normalizePoint(current.gps);
             const body = {
@@ -4188,7 +4464,7 @@
                 }
                 const data = await apiJson(`/operation-restrictions/policies?operation_area_id=${encodeURIComponent(areaId)}`);
                 restrictionPolicies = data.policies || [];
-            restrictionPolicySelect.innerHTML = "";
+                restrictionPolicySelect.innerHTML = "";
                 const emptyOption = document.createElement("option");
                 emptyOption.value = "";
                 emptyOption.textContent = restrictionPolicies.length ? "请选择策略或新增策略" : "暂无策略，请新增";
@@ -4860,6 +5136,16 @@
                 setBusy(false);
             }
         });
+        loadRoadNetworkBtn.addEventListener("click", async () => {
+            setBusy(true);
+            try {
+                await toggleShpRoadNetwork();
+            } catch (error) {
+                setStatus(`绘制 SHP 路网失败：${error.message}`);
+            } finally {
+                setBusy(false);
+            }
+        });
         updatePathBtn.addEventListener("click", async () => {
             setBusy(true);
             try {
@@ -4956,7 +5242,9 @@
         platformPendingOrderSelect.addEventListener("change", updatePlatformPendingControls);
         clearBtn.addEventListener("click", () => {
             clearMap();
-            setStatus("路线已清空，禁区图形保留。");
+            shpRoadNetworkVisible = false;
+            clearShpRoadNetworkLayers();
+            setStatus("路线和 SHP 路网已清空，禁区图形保留。");
         });
         randomOrder1Btn.addEventListener("click", () => createRandomOrders(1, { useManualPickupTime: true }));
         randomOrder10Btn.addEventListener("click", () => createRandomOrders(10));
@@ -5047,6 +5335,15 @@
             } finally {
                 setBusy(false);
             }
+        });
+        boardingStepSelect.addEventListener("change", () => {
+            boardingStepSelect.dataset.lastValue = boardingStepSelect.value;
+            const vehicle = fleetById.get(selectedVehicleId());
+            if (!vehicle) {
+                setStatus("请先选择车辆并加载路线。");
+                return;
+            }
+            updateBoardingPanel(vehicle);
         });
         routeSegmentSelect.addEventListener("change", () => {
             const vehicle = fleetById.get(selectedVehicleId());
@@ -5418,6 +5715,8 @@
                 setCommuteBusy(false);
             }
         });
+        commuteBoardingVehicleSelect.addEventListener("change", renderCommuteBoardingStepOptions);
+        commuteBoardingStepSelect.addEventListener("change", renderCommuteBoardingStepOptions);
         commutePickupBtn.addEventListener("click", async () => {
             setCommuteBusy(true);
             try {

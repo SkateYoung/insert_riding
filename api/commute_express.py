@@ -200,6 +200,112 @@ class CommuteExpressService:
             return getattr(order, "commute_destination_poi_id", None)
         return None
 
+    @classmethod
+    def _step_target_node(cls, step):
+        """读取快线服务步骤对应的目标节点。"""
+        if not isinstance(step, dict):
+            return None
+        order = step.get("order")
+        if order is None:
+            return None
+        if step.get("type") == "O":
+            return getattr(order, "o_node", None)
+        if step.get("type") == "D":
+            return getattr(order, "d_node", None)
+        return None
+
+    @staticmethod
+    def _boarding_action_step_type(action):
+        """把上下客动作转成服务步骤类型。"""
+        action = str(action or "").strip().lower()
+        if action == "pickup":
+            return "O"
+        if action == "dropoff":
+            return "D"
+        return None
+
+    @staticmethod
+    def _boarding_step_action(step_type):
+        """把服务步骤类型转成上下客动作。"""
+        return "pickup" if step_type == "O" else "dropoff"
+
+    @classmethod
+    def _find_boarding_step(cls, vehicle, action, request_id=None):
+        """按订单号和动作查找快线可确认步骤。"""
+        route = getattr(vehicle, "planned_route", None) or []
+        if not route:
+            raise CommuteExpressError("车辆当前没有待确认步骤", code="no_commute_step", status_code=409)
+
+        desired_type = cls._boarding_action_step_type(action)
+        if desired_type not in {"O", "D"}:
+            raise CommuteExpressError("action 必须是 pickup 或 dropoff", code="invalid_action")
+
+        if request_id in (None, ""):
+            step = route[0]
+            if step.get("type") != desired_type:
+                expected_action = cls._boarding_step_action(step.get("type"))
+                raise CommuteExpressError(
+                    f"当前步骤需要 {expected_action}，不能执行 {action}",
+                    code="invalid_step_action",
+                    status_code=409,
+                )
+            return 0, step
+
+        request_id_text = str(request_id)
+        wrong_type_step = None
+        for index, step in enumerate(route):
+            order = step.get("order") if isinstance(step, dict) else None
+            if order is None:
+                continue
+            if str(getattr(order, "request_id", "")) != request_id_text:
+                continue
+            if step.get("type") == desired_type:
+                return index, step
+            if wrong_type_step is None:
+                wrong_type_step = step
+
+        if wrong_type_step is not None:
+            expected_action = cls._boarding_step_action(wrong_type_step.get("type"))
+            raise CommuteExpressError(
+                f"该订单当前步骤需要 {expected_action}，不能执行 {action}",
+                code="invalid_step_action",
+                status_code=409,
+            )
+        raise CommuteExpressError("未找到可确认的上下客步骤", code="boarding_step_not_found", status_code=409)
+
+    @classmethod
+    def _step_station_keys(cls, step):
+        """生成快线服务步骤目标站点识别键。"""
+        keys = set()
+        poi_id = cls._step_target_poi_id(step)
+        if poi_id not in (None, ""):
+            keys.add(("poi_id", str(poi_id)))
+
+        target_node = cls._step_target_node(step)
+        if target_node is not None:
+            node_id = getattr(target_node, "id", None)
+            if node_id not in (None, ""):
+                keys.add(("node_id", str(node_id)))
+            for attr in ("poi_id", "poi_code", "station_id", "station_code"):
+                value = getattr(target_node, attr, None)
+                if value not in (None, ""):
+                    keys.add((attr, str(value)))
+            lon = getattr(target_node, "lon", None)
+            lat = getattr(target_node, "lat", None)
+            try:
+                if lon is not None and lat is not None:
+                    keys.add(("coord", round(float(lon), 8), round(float(lat), 8)))
+            except (TypeError, ValueError):
+                pass
+        return keys
+
+    @classmethod
+    def _steps_same_station(cls, left_step, right_step):
+        """判断两个快线服务步骤是否指向同一站点。"""
+        left_keys = cls._step_station_keys(left_step)
+        right_keys = cls._step_station_keys(right_step)
+        return bool(left_keys and right_keys and left_keys.intersection(right_keys))
+
     @staticmethod
     def _step_passenger_count(step):
         """读取快线服务步骤对应的乘客人数。"""
@@ -609,23 +715,50 @@ class CommuteExpressService:
         distance_threshold_m=30.0,
         city_map=None,
     ):
-        """确认快线车辆当前上下客步骤。
+        """确认快线车辆上下客步骤。
 
         distance_threshold_m 仅用于兼容旧请求体，当前不再按距离拦截确认。
         """
         action = str(action or "").strip().lower()
         if action not in {"pickup", "dropoff"}:
             raise CommuteExpressError("action 必须是 pickup 或 dropoff", code="invalid_action")
-        if not getattr(vehicle, "planned_route", None):
-            raise CommuteExpressError("车辆当前没有待确认步骤", code="no_commute_step", status_code=409)
-        step = vehicle.planned_route[0]
-        expected_action = "pickup" if step.get("type") == "O" else "dropoff"
-        if action != expected_action:
-            raise CommuteExpressError(f"当前步骤需要 {expected_action}", code="invalid_step_action", status_code=409)
+
+        step_index, step = cls._find_boarding_step(vehicle, action, request_id)
+        route = getattr(vehicle, "planned_route", None) or []
+        head_step = route[0] if route else None
+        was_head_step = step_index == 0
+        same_station_group = (
+            not was_head_step
+            and head_step is not None
+            and cls._steps_same_station(head_step, step)
+        )
+        expected_action = cls._boarding_step_action(step.get("type"))
         order = step.get("order")
-        if request_id not in (None, "") and str(request_id) != str(order.request_id):
-            raise CommuteExpressError("request_id 不是当前下一步订单", code="request_id_not_current", status_code=409)
-        target_node = order.o_node if step.get("type") == "O" else order.d_node
+        if order is None:
+            raise CommuteExpressError("路线步骤缺少订单对象", code="boarding_order_missing", status_code=409)
+        order_status = getattr(order, "status", None)
+        if expected_action == "pickup" and order_status == "matched":
+            raise CommuteExpressError(
+                "订单仍在等待司机端接收确认，不能执行上车确认",
+                code="driver_push_not_confirmed",
+                status_code=409,
+            )
+        if expected_action == "pickup" and order_status not in (None, "", "waiting_pickup"):
+            raise CommuteExpressError(
+                f"订单当前状态为 {order_status}，不能执行上车确认",
+                code="invalid_order_status",
+                status_code=409,
+            )
+        if expected_action == "dropoff" and order_status not in (None, "", "riding"):
+            raise CommuteExpressError(
+                f"订单当前状态为 {order_status}，不能执行下车确认",
+                code="invalid_order_status",
+                status_code=409,
+            )
+
+        target_node = cls._step_target_node(step)
+        if target_node is None:
+            raise CommuteExpressError("路线步骤缺少目标站点", code="boarding_target_missing", status_code=409)
         gps = getattr(vehicle, "gps", {}) or {}
         check_lon = gps.get("lon") if lon is None else lon
         check_lat = gps.get("lat") if lat is None else lat
@@ -638,7 +771,7 @@ class CommuteExpressService:
             raise CommuteExpressError("车辆当前位置必须是数字", code="vehicle_position_invalid")
         distance = AuxiliaryFunctions.haversine_distance(check_lon, check_lat, target_node.lon, target_node.lat)
 
-        vehicle.planned_route.pop(0)
+        vehicle.planned_route.pop(step_index)
         order_record = persistence.get_commute_order(order.request_id) or {"request_id": order.request_id}
         if action == "pickup":
             order.status = "riding"
@@ -658,12 +791,18 @@ class CommuteExpressService:
         vehicle.commute_route_version = cls._commute_route_version(vehicle)
         persistence.record_vehicle_runtime(vehicle)
         cls._submit_vehicle_commute_push(vehicle, "commute_boarding_updated", order.request_id)
+        replan_triggered = not was_head_step and not same_station_group
         return {
             "status": order_record["status"],
             "event": {
                 "action": action,
                 "request_id": order.request_id,
                 "distance_to_target": distance,
+                "confirmed_step_index": step_index,
+                "was_head_step": was_head_step,
+                "same_station_group": same_station_group,
+                "replan_triggered": replan_triggered,
+                "replan_reason": "commute_out_of_order_step" if replan_triggered else None,
                 "target_node": {
                     "id": target_node.id,
                     "poi_id": getattr(target_node, "poi_id", None),

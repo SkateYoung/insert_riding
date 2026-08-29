@@ -3157,6 +3157,7 @@ def confirm_vehicle_boarding_event(vehicle_id):
             lat=lat,
             distance_threshold_m=threshold,
             current_timestamp=occurred_at,
+            city_map=_city_for_vehicle(target_vehicle),
         )
         if not result.get("ok"):
             status_code = int(result.get("status_code") or 400)

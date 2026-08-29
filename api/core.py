@@ -4451,6 +4451,104 @@ class CoreDispatcher:
         )
 
     @staticmethod
+    def _boarding_action_step_type(action):
+        """把上下客动作转成路线步骤类型。"""
+        action = str(action or "").strip().lower()
+        if action == "pickup":
+            return "O"
+        if action == "dropoff":
+            return "D"
+        return None
+
+    @staticmethod
+    def _boarding_step_action(step_type):
+        """把路线步骤类型转成上下客动作。"""
+        return "pickup" if step_type == "O" else "dropoff"
+
+    @staticmethod
+    def _find_boarding_route_step(vehicle, action, request_id=None):
+        """按订单号和动作查找可确认的上下客步骤。"""
+        route = getattr(vehicle, "planned_route", None) or []
+        if not route:
+            return None, None, {"ok": False, "status_code": 409, "error": "车辆当前没有待确认的上下客步骤"}
+
+        desired_type = CoreDispatcher._boarding_action_step_type(action)
+        if desired_type not in {"O", "D"}:
+            return None, None, {"ok": False, "status_code": 400, "error": "action 必须是 pickup 或 dropoff"}
+
+        if request_id in (None, ""):
+            step = route[0]
+            if step.get("type") != desired_type:
+                expected_action = CoreDispatcher._boarding_step_action(step.get("type"))
+                return None, None, {
+                    "ok": False,
+                    "status_code": 409,
+                    "error": f"当前步骤需要 {expected_action}，不能执行 {action}",
+                    "code": "invalid_step_action",
+                }
+            return 0, step, None
+
+        request_id_text = str(request_id)
+        wrong_type_step = None
+        for index, step in enumerate(route):
+            order = step.get("order") if isinstance(step, dict) else None
+            if order is None:
+                continue
+            if str(getattr(order, "request_id", "")) != request_id_text:
+                continue
+            if step.get("type") == desired_type:
+                return index, step, None
+            if wrong_type_step is None:
+                wrong_type_step = step
+
+        if wrong_type_step is not None:
+            expected_action = CoreDispatcher._boarding_step_action(wrong_type_step.get("type"))
+            return None, None, {
+                "ok": False,
+                "status_code": 409,
+                "error": f"该订单当前步骤需要 {expected_action}，不能执行 {action}",
+                "code": "invalid_step_action",
+            }
+        return None, None, {
+            "ok": False,
+            "status_code": 409,
+            "error": "未找到可确认的上下客步骤",
+            "code": "boarding_step_not_found",
+        }
+
+    @staticmethod
+    def _route_step_station_keys(step):
+        """生成步骤目标站点识别键，用于判断多个步骤是否属于同站点。"""
+        target_node = CoreDispatcher._route_step_target_node(step)
+        if target_node is None:
+            return set()
+
+        keys = set()
+        node_id = getattr(target_node, "id", None)
+        if node_id not in (None, ""):
+            keys.add(("node_id", str(node_id)))
+        for attr in ("poi_id", "poi_code", "station_id", "station_code"):
+            value = getattr(target_node, attr, None)
+            if value not in (None, ""):
+                keys.add((attr, str(value)))
+
+        lon = getattr(target_node, "lon", None)
+        lat = getattr(target_node, "lat", None)
+        try:
+            if lon is not None and lat is not None:
+                keys.add(("coord", round(float(lon), 8), round(float(lat), 8)))
+        except (TypeError, ValueError):
+            pass
+        return keys
+
+    @staticmethod
+    def _route_steps_same_station(left_step, right_step):
+        """判断两个 O/D 步骤是否指向同一站点。"""
+        left_keys = CoreDispatcher._route_step_station_keys(left_step)
+        right_keys = CoreDispatcher._route_step_station_keys(right_step)
+        return bool(left_keys and right_keys and left_keys.intersection(right_keys))
+
+    @staticmethod
     def _reindex_route_segments(segments):
         """重排分段 index，保持快照中的顺序字段连续。"""
         for index, segment in enumerate(segments or []):
@@ -4459,17 +4557,30 @@ class CoreDispatcher:
         return segments
 
     @staticmethod
-    def _drop_completed_route_prefix(vehicle, step):
-        """上下客确认后移除已完成的首段路线快照。"""
+    def _drop_completed_route_segment(vehicle, step, prefix_only=False):
+        """上下客确认后移除对应的路线分段快照。"""
+        def _remove_segment(segments):
+            segments = copy.deepcopy(segments or [])
+            if not segments:
+                return segments, False
+            if prefix_only:
+                if CoreDispatcher._route_segment_matches_step(segments[0], step):
+                    return segments[1:], True
+                return segments, False
+            for index, segment in enumerate(segments):
+                if CoreDispatcher._route_segment_matches_step(segment, step):
+                    return segments[:index] + segments[index + 1:], True
+            return segments, False
+
         raw_segments = copy.deepcopy(getattr(vehicle, "planned_route_segment_raw_point", None) or [])
-        if raw_segments and CoreDispatcher._route_segment_matches_step(raw_segments[0], step):
-            raw_segments = raw_segments[1:]
+        raw_segments, raw_changed = _remove_segment(raw_segments)
+        if raw_changed:
             vehicle.planned_route_segment_raw_point = CoreDispatcher._reindex_route_segments(raw_segments)
             vehicle.planned_route_point = CoreDispatcher._combine_raw_segment_points(raw_segments)
 
         grasped_segments = copy.deepcopy(getattr(vehicle, "planned_route_segment_grasped_point", None) or [])
-        if grasped_segments and CoreDispatcher._route_segment_matches_step(grasped_segments[0], step):
-            grasped_segments = grasped_segments[1:]
+        grasped_segments, grasped_changed = _remove_segment(grasped_segments)
+        if grasped_changed:
             vehicle.planned_route_segment_grasped_point = CoreDispatcher._reindex_route_segments(grasped_segments)
             vehicle.planned_route_grasped_point = CoreDispatcher._combine_grasped_segments(grasped_segments)
 
@@ -4486,6 +4597,13 @@ class CoreDispatcher:
             vehicle.planned_route_grasp_error = None
             vehicle.planned_route_grasp_route_version = None
 
+        return raw_changed or grasped_changed
+
+    @staticmethod
+    def _drop_completed_route_prefix(vehicle, step):
+        """上下客确认后移除已完成的首段路线快照。"""
+        return CoreDispatcher._drop_completed_route_segment(vehicle, step, prefix_only=True)
+
     @staticmethod
     def confirm_vehicle_boarding_event(
         vehicle,
@@ -4495,43 +4613,46 @@ class CoreDispatcher:
         lat=None,
         distance_threshold_m=30.0,
         current_timestamp=None,
+        city_map=None,
     ):
-        """按司机端显式信号确认当前 O/D 上下客步骤。
+        """按司机端显式信号确认 O/D 上下客步骤。
 
         Args:
             vehicle (Vehicle): 需要推进订单状态的车辆。
             action (str): pickup 或 dropoff。
-            request_id (str | None): 可选订单号；为空时使用当前下一步。
+            request_id (str | None): 可选订单号；为空时使用当前下一步，非空时扫描剩余队列。
             lon (float | None): 可选确认位置经度；为空时使用车辆当前 GPS。
             lat (float | None): 可选确认位置纬度；为空时使用车辆当前 GPS。
             distance_threshold_m (float): 兼容旧请求字段，不再用于拦截上下客确认。
             current_timestamp (float | None): 事件业务时间。
+            city_map (CityGraph | None): 非队首非同站确认后重建动态路线使用的路网。
 
         Returns:
             dict: 包含 ok、event、planned_route 和错误信息的确认结果。
 
         Side Effects:
-            推进订单状态，移除当前 planned_route 首步，并同步缩短路线快照。
+            推进订单状态，移除对应 planned_route 步骤，并在必要时重建剩余路线。
         """
         action = str(action or "").strip().lower()
         if action not in {"pickup", "dropoff"}:
             return {"ok": False, "status_code": 400, "error": "action 必须是 pickup 或 dropoff"}
-        if not getattr(vehicle, "planned_route", None):
-            return {"ok": False, "status_code": 409, "error": "车辆当前没有待确认的上下客步骤"}
 
-        step = vehicle.planned_route[0]
-        expected_action = "pickup" if step.get("type") == "O" else "dropoff"
+        step_index, step, error = CoreDispatcher._find_boarding_route_step(vehicle, action, request_id)
+        if error:
+            return error
+
+        route = getattr(vehicle, "planned_route", None) or []
+        head_step = route[0] if route else None
+        was_head_step = step_index == 0
+        same_station_group = (
+            not was_head_step
+            and head_step is not None
+            and CoreDispatcher._route_steps_same_station(head_step, step)
+        )
+        expected_action = CoreDispatcher._boarding_step_action(step.get("type"))
         order = step.get("order")
         if order is None:
-            return {"ok": False, "status_code": 409, "error": "当前路线步骤缺少订单对象"}
-        if action != expected_action:
-            return {
-                "ok": False,
-                "status_code": 409,
-                "error": f"当前步骤需要 {expected_action}，不能执行 {action}",
-            }
-        if request_id is not None and str(request_id) != str(order.request_id):
-            return {"ok": False, "status_code": 409, "error": "request_id 不是当前下一步订单"}
+            return {"ok": False, "status_code": 409, "error": "路线步骤缺少订单对象"}
         order_status = getattr(order, "status", None)
         if expected_action == "pickup" and order_status == "matched":
             return {
@@ -4556,6 +4677,8 @@ class CoreDispatcher:
             }
 
         target_node = order.o_node if step.get("type") == "O" else order.d_node
+        if target_node is None:
+            return {"ok": False, "status_code": 409, "error": "路线步骤缺少目标站点", "code": "boarding_target_missing"}
         gps = getattr(vehicle, "gps", {}) or {}
         check_lon = gps.get("lon") if lon is None else lon
         check_lat = gps.get("lat") if lat is None else lat
@@ -4574,7 +4697,15 @@ class CoreDispatcher:
             target_node.lat,
         )
 
-        vehicle.planned_route.pop(0)
+        if not was_head_step and not same_station_group and city_map is None:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": "非队首非同站确认需要当前运营区路网，无法重建剩余路线",
+                "code": "operation_area_runtime_not_ready",
+            }
+
+        vehicle.planned_route.pop(step_index)
         event = CoreDispatcher._apply_reached_route_step(
             vehicle,
             step,
@@ -4583,9 +4714,35 @@ class CoreDispatcher:
         )
         event["distance_to_target"] = distance_to_target
         event["confirmed_position"] = {"lon": check_lon, "lat": check_lat}
-        CoreDispatcher._drop_completed_route_prefix(vehicle, step)
+        event["confirmed_step_index"] = step_index
+        event["was_head_step"] = was_head_step
+        event["same_station_group"] = same_station_group
+        event["replan_triggered"] = False
+        event["replan_reason"] = None
+
+        replan_result = None
+        if was_head_step:
+            CoreDispatcher._drop_completed_route_prefix(vehicle, step)
+        elif same_station_group:
+            CoreDispatcher._drop_completed_route_segment(vehicle, step, prefix_only=False)
+        else:
+            event["replan_triggered"] = True
+            event["replan_reason"] = "out_of_order_step"
+            replan_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                city_map,
+                submit_grasp=True,
+                fleet_push_event={
+                    "event_reason": "boarding_out_of_order_replanned",
+                    "request_id": getattr(order, "request_id", None),
+                },
+            )
+            if replan_result is None:
+                event["replan_error"] = "route_rebuild_failed"
+
         CoreDispatcher._start_rest_if_ready(vehicle)
-        persistence.record_vehicle_route(vehicle)
+        if replan_result is None:
+            persistence.record_vehicle_route(vehicle)
         persistence.record_vehicle_runtime(
             vehicle,
             report_time=current_timestamp if current_timestamp is not None else time.time(),
@@ -4595,6 +4752,9 @@ class CoreDispatcher:
             "event": event,
             "on_board_orders": [o.request_id for o in getattr(vehicle, "on_board_orders", []) or []],
             "planned_route": CoreDispatcher._remaining_route_steps_payload(vehicle),
+            "route_version": getattr(vehicle, "planned_route_grasp_route_version", None),
+            "route_grasp_status": getattr(vehicle, "planned_route_grasp_status", None),
+            "route_grasp_error": getattr(vehicle, "planned_route_grasp_error", None),
         }
 
     @staticmethod

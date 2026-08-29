@@ -10,6 +10,7 @@
 import copy
 import hashlib
 import json
+import math
 import os
 import queue
 import threading
@@ -26,6 +27,11 @@ try:
     from .models import SPEED_MPS
 except Exception:  # pragma: no cover - keeps module importable in isolation.
     SPEED_MPS = 16.6666666667
+
+try:
+    from .error_logger import log_exception
+except Exception:  # pragma: no cover - 日志模块不可用时不影响持久化模块导入。
+    log_exception = None
 
 
 DEFAULT_QUEUE_SIZE = 10000
@@ -87,6 +93,36 @@ def _now_dt():
     return datetime.now().replace(microsecond=0)
 
 
+def _persistence_log_context(task):
+    """提取持久化任务的关键字段，避免错误日志写入过大的路线 JSON。"""
+    task = task or {}
+    payload = task.get("payload") or {}
+    context = {
+        "op": task.get("op"),
+        "tenant_id": task.get("tenant_id"),
+        "queued_at": task.get("queued_at"),
+    }
+    for key in (
+        "request_id",
+        "vehicle_code",
+        "vehicle_id",
+        "driver_code",
+        "plate_no",
+        "operation_area_id",
+        "route_version",
+        "status",
+        "task_no",
+        "line_code",
+        "policy_code",
+        "policy_name",
+    ):
+        value = payload.get(key)
+        if value not in (None, ""):
+            context[key] = value
+    context["payload_keys"] = sorted(str(key) for key in payload.keys())
+    return context
+
+
 def _to_datetime(value):
     """把时间戳或 datetime 转换为 MySQL datetime 可写入值。"""
     if value is None:
@@ -94,7 +130,10 @@ def _to_datetime(value):
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(float(value)).replace(microsecond=0)
+        numeric_value = float(value)
+        if not math.isfinite(numeric_value):
+            return None
+        return datetime.fromtimestamp(numeric_value).replace(microsecond=0)
     return value
 
 
@@ -4028,6 +4067,16 @@ class MySqlPersistence:
                 self.last_error = None
             except Exception as exc:  # pragma: no cover - exercised by integration.
                 self.last_error = str(exc)
+                if log_exception is not None:
+                    try:
+                        log_exception(
+                            "api.persistence.worker_sql_error",
+                            exc,
+                            context=_persistence_log_context(task),
+                            message=f"SQL write failed: {task.get('op')}",
+                        )
+                    except Exception:
+                        pass
                 self._rollback()
                 self._close_connection()
             finally:
