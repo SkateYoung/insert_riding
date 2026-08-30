@@ -129,6 +129,9 @@ runtime_logs/error_YYYYMMDD.txt
 | 系统 | GET | `/status` | 获取系统全量状态 |
 | 地图 | GET | `/pois` | 获取所有合法上下客 POI |
 | 地图 | GET | `/map/road-network` | 按运营区获取路网节点和边 |
+| 站点 | POST | `/admin/stations` | 新增单个或多个站点 |
+| 站点 | PUT | `/admin/stations` | 修改单个或多个站点状态 |
+| 站点 | DELETE | `/admin/stations` | 删除单个或多个站点 |
 | 运营区域 | GET | `/admin/shp-files` | 查询 shp 目录下可用 SHP 文件路径 |
 | 运营区域 | GET | `/admin/operation-areas` | 查询运营区列表 |
 | 运营区域 | POST | `/admin/operation-areas` | 新增运营区 |
@@ -245,7 +248,7 @@ runtime_logs/error_YYYYMMDD.txt
     "planned_route_grasp_error": null,
     "planned_route_grasp_route_version": "巴士-绿色01|IDLE:113.404991_23.055733:None",
     "planned_route_grasp_status": "ready",
-    "planned_route_grasped_point": [		# 用于高德导航的路径点（只需要读lat和lon就可以了）
+    "planned_route_grasped_point": [
         {
             "distance_to_gps": 0.13862600199786357,
             "id": "vehicle_gps",
@@ -262,6 +265,36 @@ runtime_logs/error_YYYYMMDD.txt
     "planned_route_segment_grasped_point": [     # 根据车辆OD队列分割的高德导航路径点（只需要看points、request_id、target_node三个参数）
        {
             "aStarDistanceM": 2475.389976505058,
+             "amap_request_points": [
+            {
+              "id": "113.350207_23.105126",
+              "lat": 23.105125701753117,
+              "lon": 113.35020701130445,
+              "name": "普通路点 113.350207_23.105126",
+              "zone": 3
+            },
+            {
+              "areas": "芳园路",
+              "id": 921,
+              "lat": 23.103578,
+              "latitude": 23.103578,
+              "lon": 113.349113,
+              "longitude": 113.349113,
+              "name": "唯品会大厦对面",
+              "operation_area_code": "PZ",
+              "operation_area_id": 666666,
+              "poi_code": "station_666666_113_34911300_23_10357800",
+              "poi_id": 921,
+              "poi_name": "唯品会大厦对面",
+              "snapped_lat": 23.103574146469935,
+              "snapped_lon": 113.34911305408924,
+              "snapped_node_id": "113.349113_23.103574",
+              "source": "order_original_station",
+              "station_direction": "西-东",
+              "station_id": null,
+              "station_name": "唯品会大厦对面"
+            }
+          ],
             "distance": 2475.389976505058,
             "endNodeId": "113.409132_23.060574",
             "endStep": {
@@ -275,7 +308,7 @@ runtime_logs/error_YYYYMMDD.txt
                 "request_points": 94,
                 "trimmed_from_previous": true
             },
-            "index": 0,
+            "index": 0,			# 订单顺序
             "points": [				# 用于高德导航的路径点
                 {
                     "lat": 23.058379932233322,
@@ -285,48 +318,38 @@ runtime_logs/error_YYYYMMDD.txt
             "request_id": "REQ-1781761465166-1-68790",  # 订单id号
             "source": "driving_plan_trimmed",
             "startNodeId": "113.400616_23.058379|113.400616_23.058379@0.000000",
-            "target_node": {		# 目标点信息（O点或D点）
-                "id": "113.409132_23.060574",
-                "lat": 23.060573669207415,
-                "lon": 113.40913197660784,
-                "name": "大学城南门",
+		   "snapped_target_node": {			# OSM目标点信息（O点或D点）
+                "id": "113.349113_23.103574",
+                "lat": 23.103574146469935,
+                "lon": 113.34911305408924,
+                "name": "唯品会大厦对面",
                 "zone": 3
             },
+			"target_node": {		# 高德目标点信息（O点或D点）
+                "areas": "芳园路",
+                "id": 921,
+                "lat": 23.103578,
+                "latitude": 23.103578,
+                "lon": 113.349113,
+                "longitude": 113.349113,
+                "name": "唯品会大厦对面",
+                "operation_area_code": "PZ",
+                "operation_area_id": 666666,
+                "poi_code": "station_666666_113_34911300_23_10357800",
+                "poi_id": 921,
+                "poi_name": "唯品会大厦对面",
+                "snapped_lat": 23.103574146469935,
+                "snapped_lon": 113.34911305408924,
+                "snapped_node_id": "113.349113_23.103574",
+                "source": "order_original_station",
+                "station_direction": "西-东",
+                "station_id": null,
+                "station_name": "唯品会大厦对面"
+          },
             "type": "O"			# 目标类型（O点或D点）
         },
        {
-            "aStarDistanceM": 1918.2684276721493,
-            "distance": 1918.2684276721493,
-            "endNodeId": "113.409085_23.054287",
-            "endStep": {
-                "orderId": "REQ-1781761465166-1-68790",
-                "type": "D"
-            },
-            "grasp": {
-                "distance_m": 1902.0,
-                "error": null,
-                "ok": true,
-                "request_points": 62,
-                "trimmed_from_previous": true
-            },
-            "index": 1,
-            "points": [
-                {
-                    "lat": 23.060531993113823,
-                    "lon": 113.40909251228433
-                } ...
-            ],
-            "request_id": "REQ-1781761465166-1-68790",
-            "source": "driving_plan_trimmed",
-            "startNodeId": "113.409132_23.060574",
-            "target_node": {
-                "id": "113.409085_23.054287",
-                "lat": 23.054286591851778,
-                "lon": 113.40908505442682,
-                "name": "体育馆南门",
-                "zone": 3
-            },
-            "type": "D"
+		...
         }
     ],
     "plate_no": "粤A00001",       # 车牌号
@@ -601,6 +624,253 @@ ETA 状态：
 | `pending` | 已派车但 ETA 尚未刷新 | 展示“计算中” |
 | `completed` | 已完成 | 展示实际完成时间 |
 | `cancelled` | 已取消 | 展示取消状态 |
+
+### 3.5  由算法推至平台接口`/bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation`的车辆导航信息
+
+```json
+{
+  "endpoint": "vehicle_navigation",
+  "event_reason": "order_assigned",		# 推送导航事件
+  "event_type": "fleet_route_changed",	# 推送类型
+  "fleet_present": false,
+  "fleet_size": 0,
+  "path_vehicle_id": "72057594546116666",	# 车辆ID
+  "payload": {
+    "confirmation_request_id": "demo-1788003652997-1-15421",
+    "driver_push_confirmation_required": true,
+    "driver_push_route_version": "grasp:v1:501f47cd3a22e4e7c6705e956bca9f36",
+    "event_reason": "order_assigned",
+    "event_type": "fleet_route_changed",
+    "pushed_at": "2026-08-29 19:40:54",
+    "request_id": "demo-1788003652997-1-15421",		# 订单ID号
+    "route_version": "grasp:v1:501f47cd3a22e4e7c6705e956bca9f36",
+    "vehicle": {		# 车辆信息
+      "commute_line_code": null,
+      "commute_route_version": null,
+      "current_driver_code": null,
+      "driver_id": "driver:72057594546116666",
+      "driver_no": "",
+      "gps": {			# 车辆GPS
+        "lat": 23.105125701753117,
+        "lon": 113.35020701130445
+      },
+      "id": "72057594546116666",
+      "idle_forecast": null,
+      "idle_target": null,
+      "idle_target_eta_error": null,
+      "idle_target_eta_seconds": null,
+      "idle_target_eta_status": null,
+      "idle_target_eta_time": null,
+      "is_rest_requested": false,
+      "is_resting": false,
+      "last_node": "113.349743_23.105179",
+      "next_node": "113.350207_23.105126",
+      "on_board_count": 0,
+      "on_board_orders": [],	# 当前已上车的订单
+      "operation_area_id": 666666,
+      "operation_mode": "dynamic_bus",	# 车辆运营模式
+      "operation_restriction_policy_signature": "restriction-20260828083027:d94c11ce21ed1a46",
+      "operation_status": "operating",	# 车辆状态
+      "planned_route": [   # 不用看这个
+        {
+          "line_code": null,
+          "order_source": null,
+          "request_id": "demo-1788003652997-1-15421",
+          "target_node": {
+            "id": "113.349113_23.103574",
+            "lat": 23.103574146469935,
+            "lon": 113.34911305408924,
+            "name": "唯品会大厦对面",
+            "poi_code": "station_666666_113_34911300_23_10357800",
+            "poi_id": null,
+            "zone": 3
+          },
+          "target_poi_id": null,
+          "type": "O"
+        },
+        {
+          "line_code": null,
+          "order_source": null,
+          "request_id": "demo-1788003652997-1-15421",
+          "target_node": {
+            "id": "113.342294_23.103548",
+            "lat": 23.103548494412475,
+            "lon": 113.34229365307644,
+            "name": "宝地广场对面",
+            "poi_code": "station_666666_113_34231700_23_10355000",
+            "poi_id": null,
+            "zone": 2
+          },
+          "target_poi_id": null,
+          "type": "D"
+        }
+      ],
+      "planned_route_grasp_error": null,	# 纠偏错误信息
+      "planned_route_grasp_route_version": "grasp:v1:501f47cd3a22e4e7c6705e956bca9f36",
+      "planned_route_grasp_status": "ready",
+      "planned_route_grasped_point": [		# 不用看这个
+        {
+          "distance_to_gps": 0.020662676998528893,
+          "id": "vehicle_gps",
+          "is_grasp_projection": true,
+          "lat": 23.105125886635037,
+          "lon": 113.35020703162114
+        },
+        {
+          "lat": 23.105116,
+          "lon": 113.350297
+        },
+        {
+          "lat": 23.105116,
+          "lon": 113.350297
+        },
+        ...
+      ],
+      "planned_route_point": [		# 不用看这个
+        {
+          "id": "113.350207_23.105126",
+          "lat": 23.105125701753117,
+          "lon": 113.35020701130445,
+          "name": "普通路点 113.350207_23.105126",
+          "zone": 3
+        },
+        {
+          "id": "113.350401_23.105101",
+          "lat": 23.105100634171293,
+          "lon": 113.35040063851352,
+          "name": "普通路点 113.350401_23.105101",
+          "zone": 3
+        },
+        ...
+      ],
+      "planned_route_segment_grasped_point": [	# 根据车辆OD队列分割的高德导航路径点（只需要看points、request_id、target_node三个参数）
+        {
+          "aStarDistanceM": 501.4519344640945,
+          "amap_request_points": [
+            {
+              "id": "113.350207_23.105126",
+              "lat": 23.105125701753117,
+              "lon": 113.35020701130445,
+              "name": "普通路点 113.350207_23.105126",
+              "zone": 3
+            },
+            {
+              "areas": "芳园路",
+              "id": 921,
+              "lat": 23.103578,
+              "latitude": 23.103578,
+              "lon": 113.349113,
+              "longitude": 113.349113,
+              "name": "唯品会大厦对面",
+              "operation_area_code": "PZ",
+              "operation_area_id": 666666,
+              "poi_code": "station_666666_113_34911300_23_10357800",
+              "poi_id": 921,
+              "poi_name": "唯品会大厦对面",
+              "snapped_lat": 23.103574146469935,
+              "snapped_lon": 113.34911305408924,
+              "snapped_node_id": "113.349113_23.103574",
+              "source": "order_original_station",
+              "station_direction": "西-东",
+              "station_id": null,
+              "station_name": "唯品会大厦对面"
+            }
+          ],
+          "distance": 501.4519344640945,
+          "distance_m": 508.7042842027451,
+          "duration_sec": 165,
+          "endNodeId": "113.349113_23.103574",
+          "endStep": {
+            "orderId": "demo-1788003652997-1-15421",
+            "type": "O"
+          },
+          "grasp": {
+            "cached": false,
+            "distance_m": 508.7042842027451,
+            "duration_sec": 165,
+            "error": null,
+            "ok": true,
+            "provider": "amap_driving",
+            "request_point_source": "order_original_coord",
+            "request_points": 2,
+            "strategy": "2",
+            "traffic_status": "畅通",
+            "trimmed_from_previous": true,
+            "waypoint_count": 0
+          },
+          "index": 0,
+          "points": [
+            {
+              "distance_to_gps": 0.020662676998528893,
+              "id": "vehicle_gps",
+              "is_grasp_projection": true,
+              "lat": 23.105125886635037,
+              "lon": 113.35020703162114
+            },
+            {
+              "lat": 23.105116,
+              "lon": 113.350297
+            },
+            {
+              "lat": 23.105116,
+              "lon": 113.350297
+            },
+            ...
+          ],
+          "request_id": "demo-1788003652997-1-15421",
+          "snapped_target_node": {
+            "id": "113.349113_23.103574",
+            "lat": 23.103574146469935,
+            "lon": 113.34911305408924,
+            "name": "唯品会大厦对面",
+            "zone": 3
+          },
+          "source": "driving_plan_trimmed",
+          "startNodeId": "113.350207_23.105126",
+          "target_node": {
+            "areas": "芳园路",
+            "id": 921,
+            "lat": 23.103578,
+            "latitude": 23.103578,
+            "lon": 113.349113,
+            "longitude": 113.349113,
+            "name": "唯品会大厦对面",
+            "operation_area_code": "PZ",
+            "operation_area_id": 666666,
+            "poi_code": "station_666666_113_34911300_23_10357800",
+            "poi_id": 921,
+            "poi_name": "唯品会大厦对面",
+            "snapped_lat": 23.103574146469935,
+            "snapped_lon": 113.34911305408924,
+            "snapped_node_id": "113.349113_23.103574",
+            "source": "order_original_station",
+            "station_direction": "西-东",
+            "station_id": null,
+            "station_name": "唯品会大厦对面"
+          },
+          "traffic_status": "畅通",
+          "type": "O"
+        },
+		...
+      ],
+      "plate_no": "粤A00006",
+      "progress": 0.193197,
+      "rest_status": "operating",
+      "vehicle_code": null,
+      "vehicle_id": "72057594546116666"
+    },
+    "vehicle_id": "72057594546116666"
+  },
+  "received_at": "2026-08-29 19:40:54",
+  "remote_addr": "127.0.0.1",
+  "request_id": "demo-1788003652997-1-15421",
+  "route_version": "grasp:v1:501f47cd3a22e4e7c6705e956bca9f36",
+  "vehicle_id": "72057594546116666",
+  "vehicle_present": true
+}
+```
+
+
 
 ## 4. 接口详情
 
@@ -2292,7 +2562,59 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | 409 | 坐标或站点编号冲突 |
 | 503 | 数据库不可用 |
 
-### 4.13.3 DELETE `/admin/stations`
+### 4.13.3 PUT `/admin/stations`
+
+按经纬度修改单个或多个站点状态。该接口只更新 `map_poi.status`，不修改站点名称、道路、方向或经纬度；已经软删除的站点不会通过该接口恢复。修改成功后，如果对应运营区已经加载到运行态，会立即重新读取数据库站点并刷新该运营区 POI。
+
+请求体支持单条：
+
+```json
+{
+  "operation_area_id": 10001,
+  "lon": 113.12345678,
+  "lat": 23.12345678,
+  "status": "disabled"
+}
+```
+
+也支持批量：
+
+```json
+{
+  "stations": [
+    {
+      "operation_area_id": 10001,
+      "lon": 113.12345678,
+      "lat": 23.12345678,
+      "status": "enabled"
+    }
+  ]
+}
+```
+
+说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `lon`/`lng`/`longitude` | number | 是 | 经度 |
+| `lat`/`latitude` | number | 是 | 纬度 |
+| `status` | string | 是 | 站点状态，只支持 `enabled` 或 `disabled` |
+| `operation_area_id` | integer | 否 | 坐标匹配多个站点时用于消除歧义 |
+
+响应结构与新增/删除站点一致，包含 `total`、`success_count`、`failure_count`、`results` 和 `runtime_refresh`。单条结果中的 `station.status` 为更新后的状态。
+
+状态码：
+
+| 状态码 | 场景 |
+| --- | --- |
+| 200 | 全部更新成功 |
+| 207 | 批量中部分成功、部分失败 |
+| 400 | 请求体格式、状态或经纬度非法 |
+| 404 | 数据库中不存在该坐标站点 |
+| 409 | 同一坐标匹配多个站点，需要补充 `operation_area_id` |
+| 503 | 数据库不可用 |
+
+### 4.13.4 DELETE `/admin/stations`
 
 按经纬度删除单个或多个站点。删除采用软删除：`deleted=1`，`status='disabled'`。后端不做最近点匹配，只按数据库中规范化到 8 位小数后的经纬度精确匹配。
 
@@ -2350,6 +2672,8 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `station_name_required` | 缺少站点名称 |
 | `station_area_required` | 缺少站点所属道路或区域名称 |
 | `station_direction_required` | 缺少站点方向 |
+| `station_status_required` | 修改站点状态时缺少 `status` |
+| `station_status_invalid` | 站点状态不是 `enabled` 或 `disabled` |
 | `station_lon_required` / `station_lat_required` | 缺少经纬度字段 |
 | `station_lon_invalid` / `station_lat_invalid` | 经纬度不是数字 |
 | `station_coordinate_out_of_range` | 经纬度超出合法范围 |
@@ -2359,6 +2683,7 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 | `station_coordinate_ambiguous` | 同一坐标匹配多个站点 |
 | `database_unavailable` | 数据库不可用 |
 | `station_create_failed` | 新增站点发生未分类异常 |
+| `station_status_update_failed` | 修改站点状态发生未分类异常 |
 | `station_delete_failed` | 删除站点发生未分类异常 |
 
 ### 4.14 GET `/operation-restrictions/policies`

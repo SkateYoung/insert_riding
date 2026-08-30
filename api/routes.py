@@ -528,6 +528,32 @@ def _normalize_station_delete_payload(item):
     }
 
 
+def _normalize_station_status_payload(item):
+    """规范化站点状态更新请求项。"""
+    lon = _station_coordinate(item, ("lon", "lng", "longitude"), "station_lon_required", "station_lon_invalid")
+    lat = _station_coordinate(item, ("lat", "latitude"), "station_lat_required", "station_lat_invalid")
+    _validate_station_coordinate_range(lon, lat)
+    raw_status = item.get("status")
+    if raw_status in (None, ""):
+        raise StationRequestError("缺少站点状态", "station_status_required", field="status")
+    status = str(raw_status).strip().lower()
+    if status not in {"enabled", "disabled"}:
+        raise StationRequestError(
+            "站点状态只支持 enabled 或 disabled",
+            "station_status_invalid",
+            field="status",
+        )
+    operation_area_id = None
+    if item.get("operation_area_id") not in (None, ""):
+        operation_area_id = _station_required_int(item, "operation_area_id")
+    return {
+        "lon": lon,
+        "lat": lat,
+        "operation_area_id": operation_area_id,
+        "status": status,
+    }
+
+
 def _station_exception_result(index, exc, fallback_code="station_operation_failed"):
     """把单条站点操作异常转换为批量结果项。"""
     if isinstance(exc, StationRequestError):
@@ -1671,6 +1697,8 @@ def _create_single_order_for_batch(data):
             req_time=time_snapshot["timestamp"],
             origin_node=origin_node,
             destination_node=destination_node,
+            origin_station_snapshot=origin_station,
+            destination_station_snapshot=destination_station,
         )
         CoreDispatcher.pool_and_route_planning(state.fleet_for_operation_area(operation_area_id), order, city_map)
         pool_size = len(CoreDispatcher.order_pool)
@@ -1849,6 +1877,8 @@ def create_order():
             req_time=time_snapshot["timestamp"],
             origin_node=origin_node,
             destination_node=destination_node,
+            origin_station_snapshot=origin_station,
+            destination_station_snapshot=destination_station,
         )
         CoreDispatcher.pool_and_route_planning(state.fleet_for_operation_area(operation_area_id), order, city_map)
         pool_size = len(CoreDispatcher.order_pool)
@@ -2127,6 +2157,55 @@ def admin_create_stations():
     with state.state_lock:
         runtime_refresh = _refresh_station_runtime_areas(affected_area_ids)
     status_code = _station_batch_status(results, 201)
+    return jsonify({
+        "total": len(results),
+        "success_count": sum(1 for item in results if item.get("success")),
+        "failure_count": sum(1 for item in results if not item.get("success")),
+        "results": results,
+        "runtime_refresh": runtime_refresh,
+    }), status_code
+
+
+@bp.route("/admin/stations", methods=["PUT"])
+def admin_update_station_status():
+    """按经纬度更新单个或多个站点状态。"""
+    data = request.get_json(silent=True)
+    try:
+        items = _station_request_items(data)
+    except StationRequestError as exc:
+        return _station_error_response(exc.code, str(exc), status=exc.status, field=exc.field)
+
+    results = []
+    affected_area_ids = set()
+    for index, item in enumerate(items):
+        try:
+            payload = _normalize_station_status_payload(item)
+            station = persistence.update_station_status_by_coordinate(
+                payload["lon"],
+                payload["lat"],
+                payload["status"],
+                operation_area_id=payload.get("operation_area_id"),
+            )
+            if station is None:
+                raise StationRequestError(
+                    "数据库中不存在该经纬度站点",
+                    "station_not_found_by_coordinate",
+                    status=404,
+                    field="lon,lat",
+                )
+            affected_area_ids.add(station.get("operation_area_id"))
+            results.append({
+                "index": index,
+                "success": True,
+                "status": 200,
+                "station": station,
+            })
+        except Exception as exc:
+            results.append(_station_exception_result(index, exc, fallback_code="station_status_update_failed"))
+
+    with state.state_lock:
+        runtime_refresh = _refresh_station_runtime_areas(affected_area_ids)
+    status_code = _station_batch_status(results, 200)
     return jsonify({
         "total": len(results),
         "success_count": sum(1 for item in results if item.get("success")),

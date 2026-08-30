@@ -2470,12 +2470,56 @@ class CoreDispatcher:
     @staticmethod
     def _order_original_path_point(order, step_type, fallback_node=None):
         """生成订单原始 O/D 坐标点，供高德驾车规划请求使用。"""
+        snapshot = (
+            getattr(order, "origin_station_snapshot", None)
+            if step_type == "O"
+            else getattr(order, "destination_station_snapshot", None)
+        )
         if step_type == "O":
             lon = getattr(order, "o_lon", None)
             lat = getattr(order, "o_lat", None)
         else:
             lon = getattr(order, "d_lon", None)
             lat = getattr(order, "d_lat", None)
+
+        if isinstance(snapshot, dict):
+            raw_lon = snapshot.get("lon", snapshot.get("longitude", lon))
+            raw_lat = snapshot.get("lat", snapshot.get("latitude", lat))
+            try:
+                raw_lon = float(raw_lon)
+                raw_lat = float(raw_lat)
+            except (TypeError, ValueError):
+                raw_lon = None
+                raw_lat = None
+            if raw_lon is not None and raw_lat is not None:
+                point = {
+                    "id": snapshot.get("id") or snapshot.get("poi_id"),
+                    "poi_id": snapshot.get("poi_id") or snapshot.get("id"),
+                    "poi_code": snapshot.get("poi_code"),
+                    "station_id": snapshot.get("station_id"),
+                    "name": (
+                        snapshot.get("name")
+                        or snapshot.get("poi_name")
+                        or snapshot.get("station_name")
+                        or getattr(fallback_node, "name", None)
+                    ),
+                    "poi_name": snapshot.get("poi_name"),
+                    "station_name": snapshot.get("station_name"),
+                    "lon": raw_lon,
+                    "lat": raw_lat,
+                    "longitude": raw_lon,
+                    "latitude": raw_lat,
+                    "areas": snapshot.get("areas"),
+                    "station_direction": snapshot.get("station_direction"),
+                    "operation_area_id": snapshot.get("operation_area_id", getattr(order, "operation_area_id", None)),
+                    "operation_area_code": snapshot.get("operation_area_code", getattr(order, "operation_area_code", None)),
+                    "source": snapshot.get("source") or "order_original_station",
+                }
+                if fallback_node is not None:
+                    point["snapped_node_id"] = fallback_node.id
+                    point["snapped_lon"] = fallback_node.lon
+                    point["snapped_lat"] = fallback_node.lat
+                return point
 
         if lon is None or lat is None:
             return CoreDispatcher._node_to_path_point(fallback_node) if fallback_node is not None else None
@@ -3331,15 +3375,18 @@ class CoreDispatcher:
             else:
                 path_points.extend(segment_points)
 
+            snapped_target_node = CoreDispatcher._node_to_path_point(target["node"])
+            display_target_node = copy.deepcopy(target.get("amap_target_point") or snapped_target_node)
             route_segments.append({
                 "type": target["type"],
                 "request_id": target["request_id"],
-                "target_node": CoreDispatcher._node_to_path_point(target["node"]),
+                "target_node": display_target_node,
+                "snapped_target_node": snapped_target_node,
                 "distance": dist,
                 "path": segment_points,
                 "amap_request_points": [
                     copy.deepcopy(current_amap_point),
-                    copy.deepcopy(target.get("amap_target_point") or CoreDispatcher._node_to_path_point(target["node"])),
+                    copy.deepcopy(display_target_node),
                 ],
             })
             total_distance += dist
@@ -3401,6 +3448,7 @@ class CoreDispatcher:
                     "orderId": str(request_id) if request_id is not None else None,
                 },
                 "target_node": copy.deepcopy(segment.get("target_node")),
+                "snapped_target_node": copy.deepcopy(segment.get("snapped_target_node")),
                 "distance": segment.get("distance"),
                 "aStarDistanceM": segment.get("distance"),
                 "points": points,

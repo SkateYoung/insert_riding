@@ -1,0 +1,133 @@
+========================================================================================
+time: 2026-08-30 12:28:04
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1788064082.8957236, "request_id": "demo-manual-1788064079567-4125", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:7d4781d9856653c8620bab39b18bf477", "status": "success", "task_no": "dispatch:demo-manual-1788064079567-4125:grasp:v1:7d4781d9856653c8620bab39b18bf477:1788064082895", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4080, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4172, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4413, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4128, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-08-30 12:52:55
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1788064079567-4125/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546145555\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546145555:demo-manual-1788064079567-4125:grasp:v1:7d4781d9856653c8620bab39b18bf477\", \"occurred_at\": \"2026-08-30 12:52:55\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1788064079567-4125\"}\n"}
+
+========================================================================================
+time: 2026-08-30 12:53:05
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1788064079567-4125/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546145555\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546145555:demo-manual-1788064079567-4125:grasp:v1:7d4781d9856653c8620bab39b18bf477\", \"occurred_at\": \"2026-08-30 12:53:05\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1788064079567-4125\"}\n"}
+
+========================================================================================
+time: 2026-08-30 12:53:06
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1788064079567-4125/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546145555\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546145555:demo-manual-1788064079567-4125:grasp:v1:7d4781d9856653c8620bab39b18bf477\", \"occurred_at\": \"2026-08-30 12:53:06\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1788064079567-4125\"}\n"}
+
+========================================================================================
+time: 2026-08-30 12:53:36
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1788065616.0148442, "request_id": "demo-manual-1788065612495-3181", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:16e5f0ce38f9151112e26ff252e13752", "status": "success", "task_no": "dispatch:demo-manual-1788065612495-3181:grasp:v1:16e5f0ce38f9151112e26ff252e13752:1788065616014", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4080, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4172, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4413, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4128, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-08-30 15:56:33
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/orders/demo-manual-1788065612495-3181/driver-push-confirmation", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "python-requests/2.34.2", "request_body": "{\"vehicle_id\": \"72057594546145555\", \"received\": true, \"reason\": \"driver_app_ack\", \"platform_message_id\": \"72057594546145555:demo-manual-1788065612495-3181:grasp:v1:16e5f0ce38f9151112e26ff252e13752\", \"occurred_at\": \"2026-08-30 15:56:33\"}", "status_code": 409, "response_body": "{\"error\":\"stale_confirmation\",\"message\":\"\\u8ba2\\u5355\\u4e0d\\u5728\\u5f53\\u524d\\u5f85\\u786e\\u8ba4\\u8f66\\u8f86\\u8def\\u7ebf\\u4e2d\\uff0c\\u53ef\\u80fd\\u5df2\\u8d85\\u65f6\\u9000\\u56de\\u3001\\u53d6\\u6d88\\u6216\\u6539\\u6d3e\\u3002\",\"request_id\":\"demo-manual-1788065612495-3181\"}\n"}
+
+========================================================================================
+time: 2026-08-30 15:56:47
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1788076607.4600897, "request_id": "demo-manual-1788076606555-6709", "vehicle_code": "72057594546112333", "route_version": "grasp:v1:1a634cfe29671ebea3ad3822f27dd1e7", "status": "success", "task_no": "dispatch:demo-manual-1788076606555-6709:grasp:v1:1a634cfe29671ebea3ad3822f27dd1e7:1788076607460", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4224, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4465, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4180, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+

@@ -378,6 +378,8 @@ class Order:
         req_time=None,
         origin_node=None,
         destination_node=None,
+        origin_station_snapshot=None,
+        destination_station_snapshot=None,
     ):
         """乘客订单实例化构造器。
         
@@ -419,6 +421,73 @@ class Order:
         self.operation_area_id = operation_area_id
         self.operation_area_code = str(operation_area_code or "").strip()
         self.req_time = float(req_time if req_time is not None else business_timestamp(request_time))
+
+        def station_snapshot(record, lon, lat, fallback_name):
+            """生成对外路线返回使用的原始站点快照。"""
+            if isinstance(record, dict):
+                raw_lon = record.get("lon", record.get("longitude", lon))
+                raw_lat = record.get("lat", record.get("latitude", lat))
+                try:
+                    raw_lon = float(raw_lon)
+                    raw_lat = float(raw_lat)
+                except (TypeError, ValueError):
+                    raw_lon = float(lon)
+                    raw_lat = float(lat)
+                name = (
+                    record.get("poi_name")
+                    or record.get("station_name")
+                    or record.get("name")
+                    or fallback_name
+                )
+                return {
+                    "id": record.get("id") or record.get("poi_id"),
+                    "poi_id": record.get("poi_id") or record.get("id"),
+                    "poi_code": record.get("poi_code"),
+                    "station_id": record.get("station_id"),
+                    "name": name,
+                    "poi_name": record.get("poi_name") or name,
+                    "station_name": record.get("station_name") or name,
+                    "lon": raw_lon,
+                    "lat": raw_lat,
+                    "longitude": raw_lon,
+                    "latitude": raw_lat,
+                    "areas": record.get("areas"),
+                    "station_direction": record.get("station_direction"),
+                    "operation_area_id": record.get("operation_area_id", operation_area_id),
+                    "operation_area_code": record.get("operation_area_code", operation_area_code),
+                    "source": "order_original_station",
+                }
+            return {
+                "id": None,
+                "poi_id": None,
+                "poi_code": None,
+                "station_id": None,
+                "name": fallback_name,
+                "poi_name": fallback_name,
+                "station_name": fallback_name,
+                "lon": float(lon),
+                "lat": float(lat),
+                "longitude": float(lon),
+                "latitude": float(lat),
+                "areas": None,
+                "station_direction": None,
+                "operation_area_id": operation_area_id,
+                "operation_area_code": operation_area_code,
+                "source": "order_original_coord",
+            }
+
+        self.origin_station_snapshot = station_snapshot(
+            origin_station_snapshot,
+            self.o_lon,
+            self.o_lat,
+            "上车点",
+        )
+        self.destination_station_snapshot = station_snapshot(
+            destination_station_snapshot,
+            self.d_lon,
+            self.d_lat,
+            "下车点",
+        )
         
         def exact_poi(lon, lat, field_name):
             """仅接受与当前运行态 POI 坐标精确一致的站点。"""

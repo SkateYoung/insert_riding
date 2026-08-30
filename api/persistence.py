@@ -207,10 +207,25 @@ def _point_from_mapping(point):
         return None
     return {
         "id": point.get("id"),
+        "poi_id": point.get("poi_id"),
+        "poi_code": point.get("poi_code"),
+        "station_id": point.get("station_id"),
         "lon": point.get("lon"),
         "lat": point.get("lat"),
+        "longitude": point.get("longitude"),
+        "latitude": point.get("latitude"),
         "name": point.get("name"),
+        "poi_name": point.get("poi_name"),
+        "station_name": point.get("station_name"),
+        "areas": point.get("areas"),
+        "station_direction": point.get("station_direction"),
+        "operation_area_id": point.get("operation_area_id"),
+        "operation_area_code": point.get("operation_area_code"),
         "zone": point.get("zone"),
+        "source": point.get("source"),
+        "snapped_node_id": point.get("snapped_node_id"),
+        "snapped_lon": point.get("snapped_lon"),
+        "snapped_lat": point.get("snapped_lat"),
     }
 
 
@@ -416,6 +431,7 @@ def _route_segments_from_vehicle(vehicle):
             "type": raw.get("type"),
             "request_id": raw.get("request_id"),
             "target_node": raw.get("target_node"),
+            "snapped_target_node": raw.get("snapped_target_node"),
             "distance": raw.get("distance", raw.get("aStarDistanceM")),
             "raw_points": raw.get("points") or raw.get("path") or [],
             "grasped_points": (grasped or {}).get("points") or (grasped or {}).get("path") or [],
@@ -2656,6 +2672,58 @@ class MySqlPersistence:
             if connection is not None:
                 connection.close()
 
+    def update_station_status_by_coordinate(self, lon, lat, status, operation_area_id=None):
+        """按经纬度更新单个站点状态。"""
+        if not self.enabled or pymysql is None:
+            raise PersistenceUnavailable("database_unavailable")
+        status_value = str(status or "").strip().lower()
+        if status_value not in {"enabled", "disabled"}:
+            raise ValueError("station_status_invalid")
+        lon_value = self._station_decimal_coordinate(lon)
+        lat_value = self._station_decimal_coordinate(lat)
+        area_id = _int_or_none(operation_area_id)
+        connection = None
+        try:
+            connection = self._sync_connection(autocommit=False)
+            with connection.cursor() as cursor:
+                where_sql = "tenant_id=%s AND longitude=%s AND latitude=%s AND deleted=0"
+                params = [self.tenant_id, lon_value, lat_value]
+                if area_id is not None:
+                    where_sql += " AND operation_area_id=%s"
+                    params.append(area_id)
+                cursor.execute(f"""
+                    SELECT *
+                    FROM map_poi
+                    WHERE {where_sql}
+                    ORDER BY id ASC
+                """, tuple(params))
+                matches = cursor.fetchall()
+                if not matches:
+                    return None
+                if len(matches) > 1:
+                    raise PersistenceConflict(
+                        "同一坐标匹配到多个站点",
+                        code="station_coordinate_ambiguous",
+                        field="lon,lat",
+                    )
+                station_id = matches[0]["id"]
+                cursor.execute("""
+                    UPDATE map_poi
+                    SET status=%s, updated_at=CURRENT_TIMESTAMP(3)
+                    WHERE id=%s AND tenant_id=%s AND deleted=0
+                """, (status_value, station_id, self.tenant_id))
+                cursor.execute("SELECT * FROM map_poi WHERE id=%s AND tenant_id=%s", (station_id, self.tenant_id))
+                result = self._station_from_row(cursor.fetchone())
+            connection.commit()
+            return result
+        except Exception:
+            if connection is not None:
+                connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                connection.close()
+
     @staticmethod
     def _commute_line_from_row(row):
         """把通勤快线线路记录转换成接口可返回的字典。"""
@@ -4850,6 +4918,16 @@ def delete_station_by_coordinate(lon, lat, operation_area_id=None):
     )
 
 
+def update_station_status_by_coordinate(lon, lat, status, operation_area_id=None):
+    """按经纬度更新单个站点状态。"""
+    return _manager.update_station_status_by_coordinate(
+        lon,
+        lat,
+        status,
+        operation_area_id=operation_area_id,
+    )
+
+
 def list_commute_lines(include_deleted=False):
     """查询通勤快线线路列表。"""
     return _manager.list_commute_lines(include_deleted=include_deleted)
@@ -5428,7 +5506,7 @@ def record_vehicle_route(vehicle, path_result=None):
             "segment_index": segment.get("index", 0),
             "segment_type": segment.get("type") or "OD",
             "request_id": request_id,
-            "target_poi_code": target.get("id") if target else None,
+            "target_poi_code": (target.get("poi_code") or target.get("id")) if target else None,
             "start_node_code": raw_points[0].get("id") if raw_points else None,
             "end_node_code": raw_points[-1].get("id") if raw_points else None,
             "raw_points": raw_points,
