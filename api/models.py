@@ -659,8 +659,10 @@ class Vehicle:
         self.idle_target_eta_time = None
         self.idle_target_eta_status = None
         self.idle_target_eta_error = None
-        # 车辆最新 GPS，经纬度来自前端模拟或实时定位接口。
+        # 车辆最新 GPS，经纬度来自实时定位接口。
         self.gps = {"lon": None, "lat": None}
+        # 算法内部路网位置，保存 GPS 在高德路线或 SHP/OSM 路网上的投影结果。
+        self.projected_gps = {"lon": None, "lat": None}
         # 空车停靠目标和预测解释信息；它们不是订单任务，可被新订单直接覆盖。
         self.idle_target = None
         self.idle_forecast = None

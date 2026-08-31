@@ -374,7 +374,7 @@
                 <button id="loadFleetBtn" type="button">加载车队</button>
                 <button id="refreshVehicleBtn" type="button" class="secondary">刷新车辆</button>
                 <button id="loadRoadNetworkBtn" type="button" class="secondary">显示 SHP 路网</button>
-                <button id="updatePathBtn" type="button">上报/吸附车辆位置</button>
+                <button id="updatePathBtn" type="button">上报车辆 GPS</button>
                 <button id="pickRouteVehiclePositionBtn" type="button" class="secondary">鼠标 GPS 上报模式</button>
                 <button id="replanAmapRouteBtn" type="button">优先重规划高德路径</button>
                 <button id="clearBtn" type="button" class="secondary">清空地图</button>
@@ -1410,6 +1410,7 @@
         map.addControl(new AMap.ToolBar({ position: "RB" }));
 
         const fleetById = new Map();
+        const vehicleGpsDisplayOverrides = new Map();
         let layers = [];
         let markerPositionCounts = new Map();
         let routePoiLayers = [];
@@ -2403,6 +2404,7 @@
         function drawVehicle(vehicle, options = {}) {
             clearMap();
 
+            const displayVehicleId = vehicle.vehicle_id || vehicle.id || "";
             const vehicleRawPoints = normalizePoints(vehicle.planned_route_point || []);
             const rawPoints = vehicleRawPoints.length ? vehicleRawPoints : normalizePoints(options.rawPoints || []);
             const graspedPoints = normalizePoints(vehicle.planned_route_grasped_point || []);
@@ -2456,7 +2458,10 @@
                 }
             }
 
-            const gps = normalizePoint(vehicle.gps);
+            const overrideGps = displayVehicleId
+                ? normalizePoint(vehicleGpsDisplayOverrides.get(String(displayVehicleId)))
+                : null;
+            const gps = normalizePoint(options.displayGps || overrideGps || vehicle.gps);
             if (gps) {
                 addMarker(gps, "车", null, "vehicle");
             }
@@ -2479,7 +2484,6 @@
                 const requestPoints = segment.grasp?.request_points;
                 return `${index + 1}. ${segment.type || "-"} ${segment.request_id || ""} ${source} ${count}点${requestPoints ? ` 输入${requestPoints}点` : ""}`;
             });
-            const displayVehicleId = vehicle.vehicle_id || vehicle.id || "";
             const displayMode = isSingleSegmentView
                 ? `单段路线：${segmentLabel(selectedSegment, selectedSegmentIndex)}`
                 : `全部路线：${segments.length}段`;
@@ -3818,7 +3822,7 @@
             return data;
         }
 
-        async function submitVehiclePosition(point, messagePrefix = "车辆位置已上报并吸附到道路") {
+        async function submitVehiclePosition(point, messagePrefix = "车辆 GPS 已上报", options = {}) {
             const vehicleId = selectedVehicleId();
             if (!vehicleId) {
                 throw new Error("未选择车辆");
@@ -3834,14 +3838,23 @@
                 body: JSON.stringify({ lon: gps.lon, lat: gps.lat })
             });
             const vehicle = await fetchJson(`${apiBase()}/fleet/${encodeURIComponent(vehicleId)}`);
-            fleetById.set(vehicle.vehicle_id, vehicle);
+            const reported = normalizePoint(data.reported_gps || data.raw_gps || data.gps) || gps;
             const snapped = normalizePoint(data.snap?.point || data.snapped_point || data.gps);
+            const runtimeVehicleId = vehicle.vehicle_id || vehicleId;
+            if (options.displayRawGps) {
+                vehicleGpsDisplayOverrides.set(String(runtimeVehicleId), reported);
+            } else {
+                vehicleGpsDisplayOverrides.delete(String(runtimeVehicleId));
+            }
+            fleetById.set(runtimeVehicleId, vehicle);
             drawVehicle(vehicle, {
                 preserveView: true,
+                displayGps: options.displayRawGps ? reported : null,
                 message: [
                     messagePrefix,
-                    snapped ? `吸附坐标：${snapped.lon.toFixed(6)}, ${snapped.lat.toFixed(6)}` : null,
-                    data.snap?.distance_to_gps != null ? `吸附距离：${Number(data.snap.distance_to_gps).toFixed(1)} 米` : null
+                    reported ? `原始 GPS：${reported.lon.toFixed(6)}, ${reported.lat.toFixed(6)}` : null,
+                    snapped ? `OSM 吸附：${snapped.lon.toFixed(6)}, ${snapped.lat.toFixed(6)}` : null,
+                    "OSM 算路使用吸附点，高德规划使用原始上报 GPS"
                 ].filter(Boolean).join("\n")
             });
             return vehicle;
@@ -5038,7 +5051,7 @@
                 const point = pointFromLngLat(event.lnglat);
                 setBusy(true);
                 try {
-                    await submitVehiclePosition(point, "地图点击坐标已同步上报为车辆 GPS");
+                    await submitVehiclePosition(point, "地图点击坐标已同步上报为车辆 GPS", { displayRawGps: true });
                 } catch (error) {
                     setStatus(`同步上报车辆 GPS 失败：${error.message}`);
                 } finally {
@@ -5104,7 +5117,7 @@
                     vehiclePositionTarget = null;
                     setBusy(true);
                     try {
-                        await submitVehiclePosition(point, "地图点击位置已吸附为车辆当前位置");
+                        await submitVehiclePosition(point, "地图点击位置已作为车辆 GPS 上报");
                     } catch (error) {
                         setStatus(`设置车辆位置失败：${error.message}`);
                     } finally {
@@ -5163,7 +5176,7 @@
             setDynamicOrderPickTarget(null);
             vehiclePositionTarget = null;
             setStatus(routeGpsPickMode
-                ? "鼠标 GPS 上报模式已开启：每次点击地图都会同步上报车辆 GPS，并由后端吸附到道路。"
+                ? "鼠标 GPS 上报模式已开启：每次点击地图都会同步上报车辆 GPS，车辆图标显示鼠标原始坐标。"
                 : "鼠标 GPS 上报模式已关闭。"
             );
         });

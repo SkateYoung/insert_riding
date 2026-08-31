@@ -149,6 +149,7 @@ def vehicle_snapshot(vehicle):
         "commute_line_code": getattr(vehicle, "commute_line_code", None),
         "commute_route_version": getattr(vehicle, "commute_route_version", None),
         "gps": copy.deepcopy(getattr(vehicle, "gps", {}) or {}),
+        "projected_gps": copy.deepcopy(getattr(vehicle, "projected_gps", {}) or {}),
         "last_node": getattr(vehicle, "last_node", None),
         "next_node": getattr(vehicle, "next_node", None),
         "progress": getattr(vehicle, "progress", None),

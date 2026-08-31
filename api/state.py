@@ -811,6 +811,20 @@ def _vehicle_from_db_record(record, city_map, current_timestamp, operation_area_
         vehicle.progress = float(record.get("edge_progress") or 0.0)
     except (TypeError, ValueError):
         vehicle.progress = 0.0
+    projected_lon = (last_node or node).lon + ((next_node or node).lon - (last_node or node).lon) * vehicle.progress
+    projected_lat = (last_node or node).lat + ((next_node or node).lat - (last_node or node).lat) * vehicle.progress
+    vehicle.projected_gps = {
+        "id": f"{(last_node or node).id}|{(next_node or node).id}@{vehicle.progress:.6f}",
+        "lon": projected_lon,
+        "lat": projected_lat,
+        "name": "车辆路网投影位置",
+        "zone": getattr(next_node or node, "zone", None),
+        "edge_u": (last_node or node).id,
+        "edge_v": (next_node or node).id,
+        "progress": vehicle.progress,
+        "is_projection": True,
+        "source": "runtime_restore",
+    }
     vehicle.operation_mode = record.get("operation_mode") or "dynamic_bus"
     CoreDispatcher.apply_vehicle_operation_status(vehicle, operation_status)
     return vehicle

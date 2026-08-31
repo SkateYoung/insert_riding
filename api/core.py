@@ -51,7 +51,7 @@ class CoreDispatcher:
         "MILEAGE_UTIL_PENALTY_BASE": 0.1,
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
-        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 80.0,
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 10.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
@@ -3508,6 +3508,187 @@ class CoreDispatcher:
         return distance
 
     @staticmethod
+    def _vehicle_current_route_start_point(vehicle, city_map, start_node):
+        """读取车辆当前路网位置，缺失时退回本次 A* 起点节点。"""
+        projected_gps = getattr(vehicle, "projected_gps", None) or {}
+        try:
+            projected_lon = float(projected_gps.get("lon"))
+            projected_lat = float(projected_gps.get("lat"))
+        except (TypeError, ValueError):
+            projected_lon = None
+            projected_lat = None
+        if (
+            projected_lon is not None
+            and projected_lat is not None
+            and math.isfinite(projected_lon)
+            and math.isfinite(projected_lat)
+        ):
+            point = copy.deepcopy(projected_gps)
+            point.update({
+                "id": point.get("id") or f"vehicle:{CoreDispatcher._vehicle_identity(vehicle)}:projected_gps",
+                "lon": projected_lon,
+                "lat": projected_lat,
+                "name": point.get("name") or "车辆路网投影位置",
+                "zone": point.get("zone", getattr(start_node, "zone", None)),
+                "edge_u": point.get("edge_u", getattr(vehicle, "last_node", None)),
+                "edge_v": point.get("edge_v", getattr(vehicle, "next_node", None)),
+                "progress": point.get("progress", getattr(vehicle, "progress", 0.0)),
+                "is_projection": True,
+                "source": point.get("source") or "vehicle_projected_gps",
+            })
+            return point, True
+
+        last_node = city_map.nodes_map.get(getattr(vehicle, "last_node", None))
+        next_node = city_map.nodes_map.get(getattr(vehicle, "next_node", None))
+        if last_node is not None and next_node is not None:
+            try:
+                progress = max(0.0, min(1.0, float(getattr(vehicle, "progress", 0.0) or 0.0)))
+            except (TypeError, ValueError):
+                progress = 0.0
+            lon = last_node.lon + (next_node.lon - last_node.lon) * progress
+            lat = last_node.lat + (next_node.lat - last_node.lat) * progress
+            point = {
+                "id": f"{last_node.id}|{next_node.id}@{progress:.6f}",
+                "lon": lon,
+                "lat": lat,
+                "name": "车辆当前位置",
+                "zone": getattr(next_node, "zone", None),
+                "edge_u": last_node.id,
+                "edge_v": next_node.id,
+                "progress": progress,
+                "is_projection": True,
+                "source": "vehicle_current_route_position",
+            }
+            return point, True
+
+        gps = getattr(vehicle, "gps", {}) or {}
+        try:
+            lon = float(gps.get("lon"))
+            lat = float(gps.get("lat"))
+        except (TypeError, ValueError):
+            return CoreDispatcher._node_to_path_point(start_node), False
+        if not (math.isfinite(lon) and math.isfinite(lat)):
+            return CoreDispatcher._node_to_path_point(start_node), False
+        point = {
+            "id": f"vehicle:{CoreDispatcher._vehicle_identity(vehicle)}:gps",
+            "lon": lon,
+            "lat": lat,
+            "name": "车辆当前位置",
+            "zone": getattr(start_node, "zone", None),
+            "edge_u": getattr(vehicle, "last_node", None),
+            "edge_v": getattr(vehicle, "next_node", None),
+            "progress": getattr(vehicle, "progress", 0.0),
+            "is_projection": False,
+            "source": "vehicle_raw_gps",
+        }
+        return point, True
+
+    @staticmethod
+    def _vehicle_amap_route_start_point(vehicle, fallback_point):
+        """读取车辆原始上报 GPS，作为高德规划第一段起点。"""
+        raw_gps = getattr(vehicle, "gps", None) or {}
+        try:
+            lon = float(raw_gps.get("lon"))
+            lat = float(raw_gps.get("lat"))
+        except (TypeError, ValueError):
+            return copy.deepcopy(fallback_point)
+        if not (math.isfinite(lon) and math.isfinite(lat)):
+            return copy.deepcopy(fallback_point)
+        point = copy.deepcopy(fallback_point) if isinstance(fallback_point, dict) else {}
+        point.update({
+            "id": f"vehicle:{CoreDispatcher._vehicle_identity(vehicle)}:raw_gps",
+            "lon": lon,
+            "lat": lat,
+            "name": "车辆原始 GPS",
+            "is_projection": False,
+            "source": "vehicle_raw_gps",
+        })
+        return point
+
+    @staticmethod
+    def _vehicle_raw_gps_route_start_point(vehicle):
+        """读取车辆原始 GPS，作为优先重规划的车辆真实起点。"""
+        candidates = [("vehicle_raw_gps", getattr(vehicle, "gps", None))]
+        for source, gps in candidates:
+            if not isinstance(gps, dict):
+                continue
+            try:
+                lon = float(gps.get("lon"))
+                lat = float(gps.get("lat"))
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(lon) and math.isfinite(lat)):
+                continue
+            return {
+                "id": f"vehicle:{CoreDispatcher._vehicle_identity(vehicle)}:raw_gps",
+                "lon": lon,
+                "lat": lat,
+                "name": "车辆原始 GPS",
+                "is_projection": False,
+                "source": source,
+            }
+        return None
+
+    @staticmethod
+    def _prepend_current_position_to_route_result(result, current_point, amap_start_point=None):
+        """把车辆路网位置补到路线首位，并用原始 GPS 作为高德起点。"""
+        if not isinstance(result, dict) or not isinstance(current_point, dict):
+            return 0.0
+
+        amap_start_point = copy.deepcopy(amap_start_point or current_point)
+        path = result.get("path") or []
+        prefix_distance = 0.0
+        if path:
+            try:
+                same_start = CoreDispatcher._point_distance_m(current_point, path[0]) <= 2.0
+            except (TypeError, ValueError, KeyError):
+                same_start = False
+            if same_start:
+                path[0] = copy.deepcopy(current_point)
+            else:
+                prefix_distance = CoreDispatcher._point_distance_m(current_point, path[0])
+                path = [copy.deepcopy(current_point)] + path
+        else:
+            path = [copy.deepcopy(current_point)]
+        result["path"] = path
+        result["planned_route_point"] = path
+
+        segments = result.get("segments") or []
+        if segments:
+            first_segment = segments[0]
+            first_path = first_segment.get("path") or []
+            if first_path:
+                try:
+                    same_segment_start = CoreDispatcher._point_distance_m(current_point, first_path[0]) <= 2.0
+                except (TypeError, ValueError, KeyError):
+                    same_segment_start = False
+                if same_segment_start:
+                    first_path[0] = copy.deepcopy(current_point)
+                else:
+                    first_path = [copy.deepcopy(current_point)] + first_path
+            else:
+                first_path = [copy.deepcopy(current_point)]
+            first_segment["path"] = first_path
+            first_segment["startNodeId"] = current_point.get("id")
+            if prefix_distance > 0:
+                first_segment["distance"] = float(first_segment.get("distance") or 0.0) + prefix_distance
+            amap_request_points = first_segment.get("amap_request_points")
+            if isinstance(amap_request_points, list) and len(amap_request_points) >= 2:
+                amap_request_points[0] = copy.deepcopy(amap_start_point)
+                first_segment["amap_request_points"] = amap_request_points
+            elif first_path:
+                target_point = first_segment.get("target_node") or first_path[-1]
+                if isinstance(target_point, dict):
+                    first_segment["amap_request_points"] = [
+                        copy.deepcopy(amap_start_point),
+                        copy.deepcopy(target_point),
+                    ]
+
+        if prefix_distance > 0:
+            result["total_distance"] = float(result.get("total_distance") or 0.0) + prefix_distance
+        return prefix_distance
+
+    @staticmethod
     def _path_point_id(point):
         """读取轨迹点或节点字典中的稳定 ID。"""
         if not isinstance(point, dict):
@@ -4007,6 +4188,8 @@ class CoreDispatcher:
         start_node=None,
         submit_grasp=True,
         fleet_push_event=None,
+        current_point_override=None,
+        amap_start_point_override=None,
     ):
         """刷新车辆当前 GPS 和前端展示所需路径元数据。
 
@@ -4016,17 +4199,19 @@ class CoreDispatcher:
             start_node (Node | None): 指定刷新起点；为空时使用车辆 next_node/last_node。
             submit_grasp (bool): 是否在路线更新后立即提交异步高德驾车规划。
             fleet_push_event (dict | None): 需要在高德 ready 后推送的业务事件。
+            current_point_override (dict | None): 指定前端展示和高德分段起点的车辆当前位置。
+            amap_start_point_override (dict | None): 指定高德规划请求的第一段起点。
         Returns:
             dict | None: 最新轨迹结果；起点无效或路径不可达时返回 None。
 
         Side Effects:
-            更新 vehicle.gps 和 vehicle.planned_route_point。
+            保留车辆当前路网 GPS，更新 vehicle.planned_route_point。
             车辆已有真实订单时会清理 idle_target/idle_forecast。
         """
         if start_node is None:
             start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
         if start_node is None:
-            vehicle.gps = {"lon": None, "lat": None}
+            vehicle.projected_gps = {"lon": None, "lat": None}
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
             return None
@@ -4034,7 +4219,19 @@ class CoreDispatcher:
         if vehicle.planned_route:
             CoreDispatcher._clear_idle_parking(vehicle)
 
-        vehicle.gps = {"lon": start_node.lon, "lat": start_node.lat}
+        if isinstance(current_point_override, dict):
+            current_point = copy.deepcopy(current_point_override)
+            has_current_position = True
+        else:
+            current_point, has_current_position = CoreDispatcher._vehicle_current_route_start_point(
+                vehicle,
+                city_map,
+                start_node,
+            )
+        if isinstance(amap_start_point_override, dict):
+            amap_start_point = copy.deepcopy(amap_start_point_override)
+        else:
+            amap_start_point = CoreDispatcher._vehicle_amap_route_start_point(vehicle, current_point)
         restriction_policy = CoreDispatcher.current_operation_restriction_policy(
             getattr(vehicle, "operation_area_id", None)
         )
@@ -4057,6 +4254,35 @@ class CoreDispatcher:
             CoreDispatcher._clear_route_grasp_state(vehicle)
             return None
 
+        if has_current_position:
+            if current_point.get("is_projection"):
+                vehicle.projected_gps = copy.deepcopy(current_point)
+            else:
+                projected_point = CoreDispatcher._node_to_path_point(start_node)
+                projected_point.update({
+                    "edge_u": start_node.id,
+                    "edge_v": start_node.id,
+                    "progress": 0.0,
+                    "is_projection": True,
+                    "source": "route_start_node",
+                    "distance_to_gps": CoreDispatcher._point_distance_m(current_point, projected_point),
+                })
+                vehicle.projected_gps = projected_point
+            CoreDispatcher._prepend_current_position_to_route_result(
+                result,
+                current_point,
+                amap_start_point=amap_start_point,
+            )
+        else:
+            projected_point = CoreDispatcher._node_to_path_point(start_node)
+            projected_point.update({
+                "edge_u": start_node.id,
+                "edge_v": start_node.id,
+                "progress": 0.0,
+                "is_projection": True,
+                "source": "route_start_node",
+            })
+            vehicle.projected_gps = projected_point
         vehicle.operation_restriction_policy = copy.deepcopy(restriction_policy) if restriction_policy else None
         vehicle.operation_restriction_policy_signature = restriction_signature(restriction_policy)
         vehicle.planned_route_point = result["path"]
@@ -4093,6 +4319,23 @@ class CoreDispatcher:
             "is_grasp_projection": projection.get("snap_source") == "amap_grasped_route",
         }
 
+    @staticmethod
+    def _projection_to_projected_gps(projection):
+        """将道路或高德路线投影结果转成车辆内部 projected_gps。"""
+        point = CoreDispatcher._projection_to_path_point(projection)
+        point.update({
+            "edge_u": projection.get("edge_u"),
+            "edge_v": projection.get("edge_v"),
+            "progress": projection.get("progress", 0.0),
+            "route_progress": projection.get("route_progress"),
+            "distance_to_gps": projection.get("distance_to_gps"),
+            "snap_source": projection.get("snap_source"),
+            "request_id": projection.get("request_id"),
+            "segment_type": projection.get("segment_type"),
+            "source": "vehicle_projected_gps",
+        })
+        return point
+
     # ============================================================
     # 功能八：GPS 实时路径更新与上下客状态同步
     # 相关方法：sync_vehicle_route_progress、_apply_reached_route_step、
@@ -4113,13 +4356,20 @@ class CoreDispatcher:
             list[dict]: 本次触发的 pickup/dropoff 变更列表。
 
         Side Effects:
-            更新 vehicle.last_node、vehicle.next_node、vehicle.progress、vehicle.gps。
+            更新 vehicle.last_node、vehicle.next_node、vehicle.progress 和 projected_gps。
             可能修改 vehicle.on_board_orders、vehicle.planned_route 和 completed_orders_pool。
         """
         vehicle.last_node = current_node.id
         vehicle.next_node = current_node.id
         vehicle.progress = 0.0
-        vehicle.gps = {"lon": current_node.lon, "lat": current_node.lat}
+        vehicle.projected_gps = {
+            **CoreDispatcher._node_to_path_point(current_node),
+            "edge_u": current_node.id,
+            "edge_v": current_node.id,
+            "progress": 0.0,
+            "is_projection": True,
+            "source": "route_node_progress",
+        }
         event_time = float(current_timestamp if current_timestamp is not None else time.time())
 
         changed_steps = []
@@ -4404,6 +4654,7 @@ class CoreDispatcher:
         }
         return {
             "gps": copy.deepcopy(getattr(vehicle, "gps", {}) or {}),
+            "projected_gps": copy.deepcopy(getattr(vehicle, "projected_gps", {}) or {}),
             "reported_gps": {"lon": reported_lon, "lat": reported_lat},
             "path": route_points,
             "total_distance": CoreDispatcher._path_distance_m(route_points),
@@ -4431,8 +4682,10 @@ class CoreDispatcher:
                 吸附失败时返回 None。
 
         Side Effects:
-            更新 vehicle.gps、last_node、next_node、progress，并写入运行态和轨迹。
+            更新 vehicle.gps、projected_gps、last_node、next_node、progress，并写入运行态和轨迹。
         """
+        report_timestamp = current_timestamp if current_timestamp is not None else time.time()
+        vehicle.gps = {"lon": float(lon), "lat": float(lat)}
         projection = CoreDispatcher._vehicle_grasped_route_projection(vehicle, lon, lat)
         if projection is not None:
             projection["route_progress"] = projection.get("progress")
@@ -4452,7 +4705,7 @@ class CoreDispatcher:
         if projection is None:
             return None
 
-        vehicle.gps = {"lon": projection["lon"], "lat": projection["lat"]}
+        vehicle.projected_gps = CoreDispatcher._projection_to_projected_gps(projection)
         if projection.get("edge_u") is not None:
             vehicle.last_node = projection["edge_u"]
         if projection.get("edge_v") is not None:
@@ -4481,7 +4734,7 @@ class CoreDispatcher:
         persistence.record_path_update(
             vehicle,
             result,
-            report_time=current_timestamp if current_timestamp is not None else time.time(),
+            report_time=report_timestamp,
         )
         return result
 
@@ -4819,61 +5072,80 @@ class CoreDispatcher:
         Side Effects:
             根据车辆当前位置重建本地 A* 分段，并把车辆路线规划状态置为 pending。
         """
-        gps = getattr(vehicle, "gps", {}) or {}
-        lon = gps.get("lon")
-        lat = gps.get("lat")
-        if lon is None or lat is None:
+        raw_start_point = CoreDispatcher._vehicle_raw_gps_route_start_point(vehicle)
+        if raw_start_point is None:
             node = city_map.nodes_map.get(getattr(vehicle, "next_node", None))
             if node is None:
                 node = city_map.nodes_map.get(getattr(vehicle, "last_node", None))
             if node is None:
                 return {"ok": False, "status_code": 409, "error": "车辆当前位置为空，无法重规划"}
-            lon = node.lon
-            lat = node.lat
+            raw_start_point = CoreDispatcher._node_to_path_point(node)
+            raw_start_point.update({
+                "id": f"vehicle:{CoreDispatcher._vehicle_identity(vehicle)}:fallback_node",
+                "name": "车辆当前位置",
+                "is_projection": False,
+                "source": "fallback_route_node",
+            })
 
-        projection = CoreDispatcher._nearest_road_projection(city_map, float(lon), float(lat), vehicle)
-        if projection is None:
-            return {"ok": False, "status_code": 409, "error": "车辆当前位置无法吸附到路网"}
+        start_node, start_node_distance = CoreDispatcher._nearest_graph_node(
+            city_map,
+            float(raw_start_point["lon"]),
+            float(raw_start_point["lat"]),
+        )
+        if start_node is None:
+            return {"ok": False, "status_code": 409, "error": "车辆当前位置附近没有可用路网节点，无法重规划"}
+
+        raw_start_point["zone"] = getattr(start_node, "zone", raw_start_point.get("zone"))
+        raw_start_point["nearest_node_id"] = start_node.id
+        raw_start_point["distance_to_nearest_node"] = start_node_distance
+        vehicle.gps = {"lon": raw_start_point["lon"], "lat": raw_start_point["lat"]}
+        vehicle.last_node = start_node.id
+        vehicle.next_node = start_node.id
+        vehicle.progress = 0.0
+        projected_start_point = CoreDispatcher._node_to_path_point(start_node)
+        projected_start_point.update({
+            "edge_u": start_node.id,
+            "edge_v": start_node.id,
+            "progress": 0.0,
+            "is_projection": True,
+            "source": "nearest_node_from_raw_gps",
+            "distance_to_gps": start_node_distance,
+        })
+        vehicle.projected_gps = projected_start_point
 
         result = CoreDispatcher.refresh_vehicle_route_metadata(
             vehicle,
             city_map,
-            projection["next_node"],
+            start_node,
             submit_grasp=False,
+            current_point_override=raw_start_point,
+            amap_start_point_override=raw_start_point,
         )
         if result is None:
             return {"ok": False, "status_code": 409, "error": "当前订单计划中存在不可达路段"}
 
-        vehicle.gps = {"lon": projection["lon"], "lat": projection["lat"]}
-        vehicle.last_node = projection["edge_u"]
-        vehicle.next_node = projection["edge_v"]
-        vehicle.progress = projection["progress"]
-
-        projection_point = CoreDispatcher._projection_to_path_point(projection)
-        result["path"] = [projection_point] + result.get("path", [])
-        if result.get("segments"):
-            first_segment = result["segments"][0]
-            first_path = first_segment.get("path") or []
-            first_segment["path"] = [projection_point] + first_path
-            first_segment["startNodeId"] = projection_point["id"]
-        result["planned_route_point"] = result["path"]
+        vehicle.projected_gps = copy.deepcopy(projected_start_point)
+        snapped_node_point = CoreDispatcher._node_to_path_point(start_node)
         result["gps"] = copy.deepcopy(vehicle.gps)
+        result["projected_gps"] = copy.deepcopy(getattr(vehicle, "projected_gps", {}) or {})
         result["reported_gps"] = copy.deepcopy(vehicle.gps)
         result["snapped_point"] = {
-            "id": projection_point["id"],
-            "lon": projection["lon"],
-            "lat": projection["lat"],
-            "name": projection_point["name"],
-            "zone": projection_point["zone"],
+            "id": snapped_node_point["id"],
+            "lon": snapped_node_point["lon"],
+            "lat": snapped_node_point["lat"],
+            "name": snapped_node_point["name"],
+            "zone": snapped_node_point["zone"],
             "edge": {
-                "u": projection["edge_u"],
-                "v": projection["edge_v"],
+                "u": start_node.id,
+                "v": start_node.id,
             },
-            "progress": projection["progress"],
-            "distance_to_gps": projection["distance_to_gps"],
-            "next_node": CoreDispatcher._node_to_path_point(projection["next_node"]),
-            "snap_source": projection["snap_source"],
+            "progress": 0.0,
+            "distance_to_gps": start_node_distance,
+            "next_node": snapped_node_point,
+            "snap_source": "nearest_node_from_raw_gps",
+            "raw_gps": copy.deepcopy(raw_start_point),
         }
+        result["snapped_node"] = result["snapped_point"]
         result["changed_steps"] = []
         result["on_board_orders"] = [o.request_id for o in getattr(vehicle, "on_board_orders", []) or []]
         result["planned_route"] = CoreDispatcher._remaining_route_steps_payload(vehicle)
@@ -4918,7 +5190,7 @@ class CoreDispatcher:
                 吸附失败或路径不可达时返回 None。
 
         Side Effects:
-            更新 vehicle.gps、last_node、next_node、progress 和 planned_route_point。
+            更新 vehicle.gps、projected_gps、last_node、next_node、progress 和 planned_route_point。
             可能触发 pickup/dropoff，从而修改 on_board_orders、planned_route 和 completed_orders_pool。
         """
         # GPS 先吸附到路网边线，避免原始坐标偏移导致车辆脱离道路。
@@ -4927,6 +5199,8 @@ class CoreDispatcher:
             return None
 
         next_node = projection["next_node"]
+        vehicle.gps = {"lon": float(lon), "lat": float(lat)}
+        vehicle.projected_gps = CoreDispatcher._projection_to_projected_gps(projection)
         # 只在真实 GPS 靠近当前下一步接送点时触发一次上下客，避免 GPS 跳跃导致批量完成订单。
         changed_steps = CoreDispatcher._sync_nearby_route_target(
             vehicle,
@@ -4945,7 +5219,6 @@ class CoreDispatcher:
         if result is None:
             return None
 
-        vehicle.gps = {"lon": lon, "lat": lat}
         vehicle.last_node = projection["edge_u"]
         vehicle.next_node = projection["edge_v"]
         vehicle.progress = projection["progress"]

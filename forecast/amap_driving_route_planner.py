@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - depends on deployment environment.
     certifi = None
 
 
-DEFAULT_DRIVING_STRATEGY = "2"
+DEFAULT_DRIVING_STRATEGY = "44"
 DEFAULT_DRIVING_REQUEST_INTERVAL_MS = 500
 DEFAULT_DRIVING_QPS_RETRY_DELAYS_MS = (1500, 3000, 6000)
 DEFAULT_DRIVING_GET_URL_LIMIT = 1900

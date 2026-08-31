@@ -167,6 +167,7 @@ def _vehicle_to_dict(v):
         "on_board_count": sum(o.passenger_count for o in v.on_board_orders),
         "on_board_orders": [o.request_id for o in v.on_board_orders],
         "gps": v.gps,
+        "projected_gps": getattr(v, "projected_gps", None),
         "idle_target": v.idle_target,
         "idle_forecast": v.idle_forecast,
         "idle_target_eta_seconds": getattr(v, "idle_target_eta_seconds", None),
@@ -281,6 +282,7 @@ def _path_result_to_response(vehicle, path_result):
             "vehicle_id": vehicle.vehicle_id,
         },
         "gps": path_result.get("gps"),
+        "projected_gps": path_result.get("projected_gps"),
         "reported_gps": path_result.get("reported_gps"),
         "snap": {
             "point": snap_point,
@@ -1386,6 +1388,14 @@ def _apply_vehicle_record_to_runtime(vehicle_record):
     existing.last_node = node.id
     existing.next_node = node.id
     existing.progress = float(vehicle_record.get("edge_progress") or 0.0)
+    existing.projected_gps = {
+        **CoreDispatcher._node_to_path_point(node),
+        "edge_u": node.id,
+        "edge_v": node.id,
+        "progress": existing.progress,
+        "is_projection": True,
+        "source": "runtime_vehicle_node",
+    }
     existing.time = state.now_timestamp()
     _set_runtime_vehicle_status(existing, operation_status)
     CoreDispatcher.refresh_vehicle_route_metadata(existing, city_map)
@@ -3139,6 +3149,7 @@ def update_vehicle_path(vehicle_id):
         if CoreDispatcher._is_commute_vehicle(target_vehicle):
             report_time = state.now_timestamp()
             target_vehicle.gps = {"lon": lon, "lat": lat}
+            target_vehicle.projected_gps = {"lon": None, "lat": None}
             target_vehicle.time = report_time
             persistence.record_vehicle_runtime(target_vehicle, report_time=report_time)
             persistence.record_location(
@@ -3154,6 +3165,7 @@ def update_vehicle_path(vehicle_id):
                 "mode": "commute_express",
                 "vehicle_id": str(getattr(target_vehicle, "vehicle_id", None) or getattr(target_vehicle, "id", "")),
                 "gps": target_vehicle.gps,
+                "projected_gps": getattr(target_vehicle, "projected_gps", None),
                 "raw_gps": {"lon": lon, "lat": lat},
                 "events": [],
                 "vehicle": _vehicle_to_dict(target_vehicle),
