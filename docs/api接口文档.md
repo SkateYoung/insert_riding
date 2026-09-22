@@ -373,12 +373,12 @@ runtime_logs/error_YYYYMMDD.txt
 
 由 `/fleet/<vehicle_id>/path` 返回。
 
-> 该接口只用于车辆 GPS 上报、位置吸附、运行态与 GPS 轨迹落库；不会自动触发上车/下车，不会重建 A* 路线，也不会触发高德驾车重规划。若车辆已有高德规划路线，后端优先把 GPS 投影到高德规划路线；没有高德路线时才退回路网/A* 路线吸附。
+> 该接口只用于车辆 GPS 上报、位置吸附、运行态与 GPS 轨迹落库；不会自动触发上车/下车，不会重建 A* 路线，也不会触发高德驾车重规划。后端始终保留原始上报 GPS，并使用该原始 GPS 在当前运营区 OSM/SHP 路网中投影到最近路网边。
 
 ```json
 {
     "events": [],   # /path 不再触发上下客事件，因此通常为空数组
-    "gps": {    # 后端吸附后的车辆位置，前端车辆图标应使用该坐标
+    "gps": {    # 前端/平台原始上报的车辆 GPS 坐标
         "lat": 23.058200500000055,
         "lon": 113.3998150000001
     },
@@ -528,7 +528,7 @@ runtime_logs/error_YYYYMMDD.txt
             "zone": 3
         },
         "progress": 0.8592765969912309,
-        "source": "amap_grasped_route",  # 优先为高德规划路线吸附；无高德路线时可能为 planned_route/road_network
+        "source": "road_network",  # 按原始 GPS 投影到当前运营区 OSM/SHP 路网最近边
         "raw_point": {
             "lat": 23.058260000000000,
             "lon": 113.3999000000000
@@ -595,6 +595,16 @@ runtime_logs/error_YYYYMMDD.txt
     "estimated_dropoff_time": 1780801500,                 # 车辆的预计送时间戳
     "estimated_dropoff_time_text": "2026-06-07 12:25:00",	# 订单的预计送达时间文本
     "estimated_dropoff_eta_seconds": 1500,
+    "distance": {                                         # 订单实时剩余距离
+      "status": "ready",
+      "source": "grasped_segments",
+      "remaining_pickup_distance_m": 120.0,               # 车辆到订单 O 点的剩余接驾距离
+      "remaining_pickup_distance_km": 0.12,
+      "remaining_dropoff_distance_m": 340.0,              # O 点之后到 D 点的剩余送达距离；已上车时表示车辆当前位置到 D 点
+      "remaining_dropoff_distance_km": 0.34,
+      "remaining_total_to_dropoff_distance_m": 460.0,     # 车辆当前位置经订单 O 点到 D 点的总剩余距离
+      "remaining_total_to_dropoff_distance_km": 0.46
+    },
     "error": null
   }
 }
@@ -604,9 +614,9 @@ runtime_logs/error_YYYYMMDD.txt
 
 | `status` | 含义 |
 | --- | --- |
-| `matching` | 订单仍在待匹配池，暂未派车 |
+| `pooling` | 订单仍在待匹配池，暂未派车 |
 | `matched` | 算法端已匹配车辆，等待平台确认司机端收到派单 |
-| `waiting` | 已派车，等待上车 |
+| `waiting_pickup` | 已派车，等待上车 |
 | `riding` | 乘客已上车，前往目的地 |
 | `completed` | 已完成 |
 | `cancelled` | 已取消 |
@@ -1248,7 +1258,8 @@ GET 响应示例：
     "LOAD_RATE_PENALTY_BASE": 20.0,
     "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
     "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0,
-    "PLANNED_ROUTE_INSERTION_PENALTY": 30.0
+    "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+    "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 600.0
   },
   "defaults": {},
   "descriptions": {},
@@ -1286,7 +1297,8 @@ POST/PUT 请求体示例：
   "OLD_DELAY_COST_PER_MIN": 8,
   "IN_CAR_COST_PER_MIN": 5,
   "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120,
-  "PLANNED_ROUTE_INSERTION_PENALTY": 40
+  "PLANNED_ROUTE_INSERTION_PENALTY": 40,
+  "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 900
 }
 ```
 
@@ -1308,6 +1320,7 @@ POST/PUT 请求体示例：
 | `SOCIAL_DISTANCE_COST_PER_KM` | number | 否 | 每公里社会里程成本 |
 | `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
 | `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 已有任务车辆插单惩罚；调大后更倾向于把订单分给空车，调小后更容易给顺路忙车插单 |
+| `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` | number | 否 | 空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择 |
 
 说明：
 
@@ -1315,7 +1328,8 @@ POST/PUT 请求体示例：
 - 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
 - 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
-- 当存在可行空车时，订单只在空车候选中择优；无可行空车时才会评估已有任务车辆插单，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
+- 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
+- 顺路优先会先看新订单 O/D 与车辆已有订单是否同起点、同终点或同路线站点，再在同级顺路候选中比较成本。
 
 成功响应：
 
@@ -1419,6 +1433,8 @@ POST/PUT 请求体示例：
 - 如果 `status=matched`，展示“已匹配车辆，等待司机端接收”。
 - 如果 `eta.status=loading/pending`，展示“ETA 计算中”。
 - 如果 `eta.status=ready/partial`，展示预计到达和预计送达时间。
+- `eta.distance` 表示按车辆当前剩余路线分段累计得到的实时距离；优先使用高德驾车规划分段 `planned_route_segment_grasped_point`，没有高德分段时退回 A* 原始分段。
+- 未上车时 `remaining_pickup_distance_m` 为车辆到 O 点距离，`remaining_dropoff_distance_m` 为 O 点后到 D 点距离；已上车时接驾距离为 `0`，送达距离为车辆当前位置到 D 点距离。
 - 如果 `status=completed/cancelled`，停止轮询。
 
 ### 4.7 POST `/orders/<request_id>/cancel`
@@ -2151,15 +2167,15 @@ POST /bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation
 
 ### 4.9 POST `/fleet/<vehicle_id>/path`
 
-车辆 GPS 上报接口。后端根据车辆当前高德规划路线或路网对 GPS 坐标做吸附，更新车辆 `gps`、`last_node`、`next_node`、`progress`，并写入运行态和 GPS 历史轨迹。
+车辆 GPS 上报接口。后端保留原始 GPS 到 `vehicle.gps`，并按该原始 GPS 在当前运营区 OSM/SHP 路网中投影到最近路网边，更新车辆 `projected_gps`、`last_node`、`next_node`、`progress`，并写入运行态和 GPS 历史轨迹。
 
 该接口只处理GPS信息更新：
 
 - 不自动触发上车/下车，响应中的 `events` 通常为空数组。
 - 不重建 A* 后续路线。
 - 不触发高德驾车路线重规划。
-- 有 `planned_route_segment_grasped_point` / `planned_route_grasped_point` 时，优先吸附到高德规划路线，`snap.source` / `snapped_point.snap_source` 为 `amap_grasped_route`。
-- 前端车辆图标应使用响应中的 `gps` 或 `snap.point`，`reported_gps` 仅表示原始上报坐标。
+- `snap.source` / `snapped_point.snap_source` 通常为 `road_network`，表示按原始 GPS 投影到 OSM/SHP 路网最近边。
+- 前端车辆图标如需展示车辆真实位置应使用响应中的 `gps`；算法内部算路位置使用 `projected_gps` 或 `snap.point`。
 
 请求体：
 

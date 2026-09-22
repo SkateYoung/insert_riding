@@ -422,6 +422,10 @@ class EtaBackgroundTest(unittest.TestCase):
             {"type": "O", "order": order},
             {"type": "D", "order": order},
         ]
+        self.vehicle.planned_route_segment_grasped_point = [
+            {"type": "O", "request_id": str(order.request_id), "distance_m": 120.0},
+            {"type": "D", "request_id": str(order.request_id), "distance_m": 340.0},
+        ]
 
         app = Flask(__name__)
         app.register_blueprint(api_routes)
@@ -435,6 +439,10 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(data["eta"]["status"], "ready")
         self.assertEqual(data["eta"]["estimated_arrival_time"], 1060.0)
         self.assertEqual(data["eta"]["estimated_dropoff_time"], 1360.0)
+        self.assertEqual(data["eta"]["distance"]["status"], "ready")
+        self.assertEqual(data["eta"]["distance"]["remaining_pickup_distance_m"], 120.0)
+        self.assertEqual(data["eta"]["distance"]["remaining_dropoff_distance_m"], 340.0)
+        self.assertEqual(data["eta"]["distance"]["remaining_total_to_dropoff_distance_m"], 460.0)
 
     def test_amap_eta_correct_accepts_string_route_version(self):
         previous = os.environ.get("AMAP_DISABLE")
@@ -797,7 +805,7 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(self.vehicle.planned_route_grasp_status, "ready")
         self.assertEqual(len(records), 1)
 
-    def test_position_update_snaps_to_amap_grasped_route_first(self):
+    def test_position_update_projects_raw_gps_to_nearest_road_network_edge(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [{"type": "O", "order": order}]
         mark_vehicle_grasp_ready(self.vehicle, self.city)
@@ -833,9 +841,10 @@ class EtaBackgroundTest(unittest.TestCase):
             persistence.record_path_update = original_record_path_update
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["snapped_point"]["snap_source"], "amap_grasped_route")
+        self.assertEqual(result["snapped_point"]["snap_source"], "road_network")
         self.assertAlmostEqual(self.vehicle.gps["lon"], self.city.a.lon + 0.0105, places=6)
         self.assertAlmostEqual(self.vehicle.gps["lat"], self.city.a.lat + 0.0005, places=6)
+        self.assertEqual(self.vehicle.projected_gps["snap_source"], "road_network")
         self.assertGreater(self.vehicle.gps["lon"], self.city.a.lon + 0.005)
         self.assertEqual(len(records), 1)
 

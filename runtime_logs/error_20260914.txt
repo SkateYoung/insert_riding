@@ -1,0 +1,47 @@
+========================================================================================
+time: 2026-09-14 15:05:59
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1789014067293-9\",\"distance_threshold_m\":30,\"lon\":113.346205,\"lat\":23.105816}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-09-14 15:06:00
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/fleet/72057594546145555/boarding-events", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36", "request_body": "{\"action\":\"pickup\",\"request_id\":\"demo-manual-1789014067293-9\",\"distance_threshold_m\":30,\"lon\":113.346205,\"lat\":23.105816}", "status_code": 409, "response_body": "{\"code\":\"driver_push_not_confirmed\",\"error\":\"\\u8ba2\\u5355\\u4ecd\\u5728\\u7b49\\u5f85\\u53f8\\u673a\\u7aef\\u63a5\\u6536\\u786e\\u8ba4\\uff0c\\u4e0d\\u80fd\\u6267\\u884c\\u4e0a\\u8f66\\u786e\\u8ba4\"}\n"}
+
+========================================================================================
+time: 2026-09-14 15:10:11
+level: ERROR
+source: api.state.init_system.load_operation_area
+message: Shape: Polyline or shape type: POLYLINE requires non-empty points or non-empty lines. Got: points=None and lines=None
+context: {"operation_area_id": 222222, "operation_area_code": "BY_TEST", "shp_path": "shp/baiyun_shp_0812/baiyun_0812.shp"}
+exception: ShapefileException('Shape: Polyline or shape type: POLYLINE requires non-empty points or non-empty lines. Got: points=None and lines=None')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\state.py", line 952, in init_system
+    area_city = CityGraph(area_shp_path, shp_encoding=_operation_area_shp_encoding(area))
+  File "d:\Bus_Project\insert_riding\api\models.py", line 172, in __init__
+    shape_records, detected_encoding, encoding_candidates = self._read_shape_records_with_encoding(
+  File "d:\Bus_Project\insert_riding\api\models.py", line 149, in _read_shape_records_with_encoding
+    return sf.shapeRecords(), encoding, candidates
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 3745, in shapeRecords
+    return ShapeRecords(self.iterShapeRecords(fields=fields, bbox=bbox))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 3761, in iterShapeRecords
+    for shape, record in zip(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 3704, in iterShapes
+    yield from self.shp_reader.iterShapes(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 3136, in iterShapes
+    shape = self._shape(shape_len_B=shape_len_B, oid=i, bbox=bbox)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 3080, in _shape
+    shape = ShapeClass.from_byte_stream(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 1303, in from_byte_stream
+    return ShapeClass(**kwargs)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 1492, in __init__
+    Shape.__init__(
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\shapefile.py", line 820, in __init__
+    raise ShapefileException(
+shapefile.ShapefileException: Shape: Polyline or shape type: POLYLINE requires non-empty points or non-empty lines. Got: points=None and lines=None
+

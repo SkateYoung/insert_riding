@@ -432,18 +432,7 @@
                         <input id="dynamicDestinationLatInput" type="number" step="0.00000001">
                     </div>
                 </div>
-                <div class="compact-actions">
-                    <button id="reloadDynamicPoisBtn" type="button" class="secondary">显示运营区站点</button>
-                    <button id="createDynamicOrderBtn" type="button">发起动态订单</button>
-                    <button id="pickDynamicOriginBtn" type="button" class="secondary">点选起点站</button>
-                    <button id="pickDynamicDestinationBtn" type="button" class="secondary">点选终点站</button>
-                </div>
-                <div id="dynamicOrderInfo" class="hint">选择运营区域后显示站点，点击“点选起点站/终点站”再点击地图站点图标即可填入精确坐标；下方乘客与时间窗也会用于动态订单。
-                </div>
-            </div>
-
-            <div class="tool-block">
-                <div class="section-title">乘客与时间窗 / 模拟随机订单</div>
+                <div class="section-title">乘客与时间窗</div>
                 <div class="form-grid">
                     <div class="field">
                         <label for="manualPickupEarliestInput">最早上车时间</label>
@@ -470,6 +459,19 @@
                         <button id="resetManualPickupTimeBtn" type="button" class="secondary">重置时间窗</button>
                     </div>
                 </div>
+                <div class="compact-actions">
+                    <button id="reloadDynamicPoisBtn" type="button" class="secondary">显示运营区站点</button>
+                    <button id="createDynamicOrderBtn" type="button">发起动态订单</button>
+                    <button id="pickDynamicOriginBtn" type="button" class="secondary">点选起点站</button>
+                    <button id="pickDynamicDestinationBtn" type="button" class="secondary">点选终点站</button>
+                </div>
+                <div id="dynamicOrderInfo" class="hint">选择运营区域后显示站点，点击“点选起点站/终点站”再点击地图站点图标即可填入精确坐标；下方乘客与时间窗也会用于动态订单。
+                </div>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">模拟随机订单 / 批量取消</div>
+                <div class="hint">随机订单会复用上方乘客人数、手机号、乘客ID和时间窗配置；批量随机时未指定的字段会自动生成。</div>
                 <div class="quick-actions">
                     <button id="randomOrder1Btn" type="button">发起 1 单</button>
                     <button id="randomOrder10Btn" type="button">批量发起 10 单</button>

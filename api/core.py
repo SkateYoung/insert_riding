@@ -46,13 +46,14 @@ class CoreDispatcher:
         "WAIT_COST_PER_MIN": 5.0,
         "IN_CAR_COST_PER_MIN": 5.0,
         "LATE_ARRIVAL_COST_PER_MIN": 0.0,
-        "OLD_DELAY_COST_PER_MIN": 15.0,
+        "OLD_DELAY_COST_PER_MIN": 10.0,
         "SEVERE_OLD_DELAY_PENALTY": 30.0,
-        "MILEAGE_UTIL_PENALTY_BASE": 0.1,
+        "MILEAGE_UTIL_PENALTY_BASE": 10.0,
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
-        "PLANNED_ROUTE_INSERTION_PENALTY": 10.0,
+        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
         "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
@@ -69,6 +70,7 @@ class CoreDispatcher:
         "SOCIAL_DISTANCE_COST_PER_KM": "每公里道路资源/碳排放代理成本。",
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": "非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受此阈值限制。",
         "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": "空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择。",
     }
     route_cost_config = copy.deepcopy(ROUTE_COST_CONFIG_DEFAULTS)
     route_cost_config_lock = threading.RLock()
@@ -98,7 +100,7 @@ class CoreDispatcher:
 
     # 车辆接近当前队首上下客点时锁定队首，避免插单/取消重排打断司机端正在执行的动作。
     ROUTE_HEAD_LOCK_DISTANCE_M = 100.0
-    ROUTE_HEAD_LOCK_ETA_SECONDS = 60.0
+    ROUTE_HEAD_LOCK_ETA_SECONDS = 30
 
     # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
@@ -805,7 +807,7 @@ class CoreDispatcher:
         }
 
     @staticmethod
-    def _try_insert_order(vehicle, new_order, city_map):
+    def _try_insert_order(vehicle, new_order, city_map, return_details=False):
         """【组客内循环】：针对单车的贪婪性全路径缝隙插入探测寻优。
         
         该方法会尝试将新订单的 O 点和 D 点插入到现有计划路径的所有可能位置，并使用 evaluate_route 评估最优选。
@@ -815,14 +817,20 @@ class CoreDispatcher:
             new_order (Order): 需要尝试插入的新订单。
             city_map (CityGraph): 路网拓扑地图实例。
             
+            return_details (bool): 是否返回最优路线对应的成本明细。
+
         Returns:
-            tuple: (最优路径 list|None, 最优成本 float)
+            tuple: 默认返回 (最优路径 list|None, 最优成本 float)；
+                return_details=True 时返回 (最优路径, 最优成本, 成本明细)。
         """
         if not CoreDispatcher._vehicle_has_capacity_for_order(vehicle, new_order):
+            if return_details:
+                return None, float('inf'), {}
             return None, float('inf')
 
         best_route = None
         best_cost = float('inf')
+        best_details = {}
         route = list(getattr(vehicle, "planned_route", []) or [])
         n = len(route)
         head_protection = CoreDispatcher.route_head_protection_info(vehicle, city_map)
@@ -848,10 +856,25 @@ class CoreDispatcher:
             for j in range(i + 1, n + 2):
                 test_route = temp_route[:j] + [d_step] + temp_route[j:]
                 
-                is_feasible, cost, _ = CoreDispatcher.evaluate_route(test_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone, original_etas=orig_etas)
+                eval_result = CoreDispatcher.evaluate_route(
+                    test_route,
+                    v_state,
+                    vehicle.on_board_orders,
+                    city_map,
+                    vehicle.capacity,
+                    v_zone=vehicle.op_zone,
+                    original_etas=orig_etas,
+                    return_details=True,
+                )
+                if len(eval_result) == 4:
+                    is_feasible, cost, _, details = eval_result
+                else:
+                    is_feasible, cost, _ = eval_result
+                    details = {}
                 if is_feasible and cost < best_cost:
                     best_cost = cost
                     best_route = test_route
+                    best_details = details
                     
         # ====== 2-Opt 突变反转寻优阶段 ======
         if best_route:
@@ -889,17 +912,34 @@ class CoreDispatcher:
                             continue
                             
                         # 评估新路径
-                        is_feasible, cost, _ = CoreDispatcher.evaluate_route(mut_route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone, original_etas=orig_etas)
+                        eval_result = CoreDispatcher.evaluate_route(
+                            mut_route,
+                            v_state,
+                            vehicle.on_board_orders,
+                            city_map,
+                            vehicle.capacity,
+                            v_zone=vehicle.op_zone,
+                            original_etas=orig_etas,
+                            return_details=True,
+                        )
+                        if len(eval_result) == 4:
+                            is_feasible, cost, _, details = eval_result
+                        else:
+                            is_feasible, cost, _ = eval_result
+                            details = {}
                         
                         # 若成本存在优化，立刻吸纳新的序列
                         if is_feasible and cost < (best_cost - 0.001):
                             best_cost = cost
                             best_route = mut_route
+                            best_details = details
                             improved = True
                             break
                     if improved:
                         break
                         
+        if return_details:
+            return best_route, best_cost, best_details
         return best_route, best_cost
 
     # ============================================================
@@ -956,15 +996,151 @@ class CoreDispatcher:
         )
 
     @staticmethod
+    def _order_stop_identity_layers(order, step_type):
+        """提取订单站点身份层级，用于判断新单是否与车辆既有路线顺路。"""
+        if order is None:
+            return []
+
+        step_type = str(step_type or "").upper()
+        if step_type == "O":
+            snapshot = getattr(order, "origin_station_snapshot", None)
+            node = getattr(order, "o_node", None)
+            lon = getattr(order, "o_lon", None)
+            lat = getattr(order, "o_lat", None)
+        else:
+            snapshot = getattr(order, "destination_station_snapshot", None)
+            node = getattr(order, "d_node", None)
+            lon = getattr(order, "d_lon", None)
+            lat = getattr(order, "d_lat", None)
+
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        layers = []
+
+        poi_tokens = set()
+        for key in ("poi_id", "id", "poi_code", "station_id"):
+            value = snapshot.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                poi_tokens.add(f"{key}:{text}")
+        layers.append(poi_tokens)
+
+        node_tokens = set()
+        node_id = getattr(node, "id", None)
+        if node_id is not None:
+            node_text = str(node_id).strip()
+            if node_text:
+                node_tokens.add(f"node:{node_text}")
+        layers.append(node_tokens)
+
+        coord_tokens = set()
+        coord_lon = snapshot.get("lon", snapshot.get("longitude", lon))
+        coord_lat = snapshot.get("lat", snapshot.get("latitude", lat))
+        if coord_lon is None and node is not None:
+            coord_lon = getattr(node, "lon", None)
+        if coord_lat is None and node is not None:
+            coord_lat = getattr(node, "lat", None)
+        try:
+            coord_lon = float(coord_lon)
+            coord_lat = float(coord_lat)
+        except (TypeError, ValueError):
+            coord_lon = None
+            coord_lat = None
+        if (
+            coord_lon is not None
+            and coord_lat is not None
+            and math.isfinite(coord_lon)
+            and math.isfinite(coord_lat)
+        ):
+            coord_tokens.add(f"coord:{coord_lon:.8f},{coord_lat:.8f}")
+        layers.append(coord_tokens)
+        return layers
+
+    @staticmethod
+    def _route_stops_match(left_order, left_type, right_order, right_type):
+        """按站点快照、路网节点、经纬度三层规则判断两个路线步骤是否同站。"""
+        left_layers = CoreDispatcher._order_stop_identity_layers(left_order, left_type)
+        right_layers = CoreDispatcher._order_stop_identity_layers(right_order, right_type)
+        for left_tokens, right_tokens in zip(left_layers, right_layers):
+            if left_tokens and right_tokens and left_tokens.intersection(right_tokens):
+                return True
+        return False
+
+    @staticmethod
+    def _vehicle_route_alignment_score(order, vehicle):
+        """评估新订单与车辆既有服务路线的顺路程度，分数越高越顺路。"""
+        existing_orders = []
+        seen_request_ids = set()
+        for existing_order in getattr(vehicle, "on_board_orders", []) or []:
+            request_id = getattr(existing_order, "request_id", None)
+            if request_id in seen_request_ids:
+                continue
+            seen_request_ids.add(request_id)
+            existing_orders.append(existing_order)
+        for step in getattr(vehicle, "planned_route", []) or []:
+            existing_order = step.get("order") if isinstance(step, dict) else None
+            request_id = getattr(existing_order, "request_id", None)
+            if existing_order is None or request_id in seen_request_ids:
+                continue
+            seen_request_ids.add(request_id)
+            existing_orders.append(existing_order)
+
+        best_score = 0
+        for existing_order in existing_orders:
+            same_origin = CoreDispatcher._route_stops_match(order, "O", existing_order, "O")
+            same_destination = CoreDispatcher._route_stops_match(order, "D", existing_order, "D")
+            if same_origin and same_destination:
+                return 3
+            if same_origin or same_destination:
+                best_score = max(best_score, 2)
+
+        if best_score >= 2:
+            return best_score
+
+        for step in getattr(vehicle, "planned_route", []) or []:
+            if not isinstance(step, dict):
+                continue
+            step_type = str(step.get("type") or "").upper()
+            if step_type not in {"O", "D"}:
+                continue
+            existing_order = step.get("order")
+            if (
+                CoreDispatcher._route_stops_match(order, "O", existing_order, step_type)
+                or CoreDispatcher._route_stops_match(order, "D", existing_order, step_type)
+            ):
+                return 1
+        return best_score
+
+    @staticmethod
+    def _candidate_pickup_wait_seconds(order, route_details, current_timestamp):
+        """读取候选路线中当前订单的预计等车时间，供空车/顺路平衡规则使用。"""
+        metrics = route_details.get("metrics") if isinstance(route_details, dict) else {}
+        pickup_times = metrics.get("pickup_times") if isinstance(metrics, dict) else {}
+        try:
+            pickup_time = float(pickup_times.get(order.request_id))
+        except (TypeError, ValueError):
+            return float("inf")
+        if not math.isfinite(pickup_time):
+            return float("inf")
+        try:
+            now_ts = float(current_timestamp)
+        except (TypeError, ValueError):
+            now_ts = time.time()
+        wait_start_time = max(now_ts, CoreDispatcher._order_pickup_earliest_timestamp(order))
+        return max(0.0, pickup_time - wait_start_time)
+
+    @staticmethod
     def _best_vehicle_candidate_for_order(order, fleet, city_map, current_timestamp, route_cost_config=None):
-        """为单个订单选择候选车辆，存在可行空车时只在空车中择优。
+        """为单个订单选择候选车辆，在空车等待可接受时优先空车，否则优先顺路车。
 
         返回值包含最优车辆、最优路线、最优成本和次优成本。次优成本只在同一候选层
-        内比较，避免空车优先规则被忙车候选的成本干扰。
+        内比较，避免空车/顺路分层规则被其他候选的成本干扰。
         """
         route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot()
         busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
         planned_route_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
+        idle_first_wait_threshold = route_cost_config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"]
         idle_candidates = []
         busy_candidates = []
 
@@ -977,11 +1153,21 @@ class CoreDispatcher:
                 continue
 
             original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(vehicle, city_map)
-            route, absolute_cost = CoreDispatcher._try_insert_order(vehicle, order, city_map)
+            insert_result = CoreDispatcher._try_insert_order(vehicle, order, city_map, return_details=True)
+            if len(insert_result) == 3:
+                route, absolute_cost, route_details = insert_result
+            else:
+                route, absolute_cost = insert_result
+                route_details = {}
             if route is None or absolute_cost == float("inf"):
                 continue
 
             is_idle = CoreDispatcher._vehicle_is_idle_for_matching(vehicle)
+            pickup_wait_seconds = CoreDispatcher._candidate_pickup_wait_seconds(
+                order,
+                route_details,
+                current_timestamp,
+            )
             if is_idle:
                 cost = absolute_cost - original_cost
                 idle_candidates.append({
@@ -989,6 +1175,8 @@ class CoreDispatcher:
                     "route": route,
                     "cost": cost,
                     "absolute_cost": absolute_cost,
+                    "estimated_pickup_wait_seconds": pickup_wait_seconds,
+                    "route_alignment_score": 0,
                     "is_idle": True,
                 })
                 continue
@@ -996,19 +1184,40 @@ class CoreDispatcher:
             if absolute_cost > busy_vehicle_max_absolute_cost:
                 continue
             cost = absolute_cost - original_cost + planned_route_insertion_penalty
+            alignment_score = CoreDispatcher._vehicle_route_alignment_score(order, vehicle)
             busy_candidates.append({
                 "vehicle": vehicle,
                 "route": route,
                 "cost": cost,
                 "absolute_cost": absolute_cost,
+                "estimated_pickup_wait_seconds": pickup_wait_seconds,
+                "route_alignment_score": alignment_score,
                 "is_idle": False,
             })
 
-        candidates = idle_candidates if idle_candidates else busy_candidates
+        idle_candidates.sort(key=lambda item: item["cost"])
+        best_idle = idle_candidates[0] if idle_candidates else None
+        if best_idle and best_idle["estimated_pickup_wait_seconds"] <= idle_first_wait_threshold:
+            candidates = idle_candidates
+            selection_policy = "idle_wait_within_threshold"
+            sort_key = lambda item: item["cost"]
+        else:
+            route_aligned_busy_candidates = [
+                item for item in busy_candidates
+                if item.get("route_alignment_score", 0) > 0
+            ]
+            if route_aligned_busy_candidates:
+                candidates = route_aligned_busy_candidates
+                selection_policy = "route_aligned_busy"
+                sort_key = lambda item: (-item.get("route_alignment_score", 0), item["cost"])
+            else:
+                candidates = idle_candidates + busy_candidates
+                selection_policy = "lowest_cost"
+                sort_key = lambda item: item["cost"]
         if not candidates:
             return None
 
-        candidates.sort(key=lambda item: item["cost"])
+        candidates.sort(key=sort_key)
         best = candidates[0]
         second_cost = candidates[1]["cost"] if len(candidates) > 1 else float("inf")
         return {
@@ -1016,8 +1225,11 @@ class CoreDispatcher:
             "route": best["route"],
             "cost": best["cost"],
             "second_cost": second_cost,
-            "candidate_class": "idle" if idle_candidates else "busy",
+            "candidate_class": "idle" if best.get("is_idle") else "busy",
             "absolute_cost": best["absolute_cost"],
+            "estimated_pickup_wait_seconds": best.get("estimated_pickup_wait_seconds"),
+            "route_alignment_score": best.get("route_alignment_score", 0),
+            "selection_policy": selection_policy,
         }
 
     @staticmethod
@@ -1042,12 +1254,18 @@ class CoreDispatcher:
 
     @staticmethod
     def _vehicle_has_capacity_for_order(vehicle, order):
-        """判断车辆剩余承诺容量是否足够接收新订单。"""
-        return (
-            CoreDispatcher._vehicle_committed_passenger_count(vehicle)
-            + order.passenger_count
-            <= vehicle.capacity
-        )
+        """判断车辆是否具备接收该订单的基础容量。
+
+        真正的容量约束需要按照 O/D 顺序逐段推演。例如车辆已载 A-B 订单时，
+        B-C 新订单可以在 B 点下客后再上客，不能用“当前车上人数 + 已计划接客人数”
+        直接相加做硬过滤；分段超载由 evaluate_route() 统一判断。
+        """
+        try:
+            capacity = int(getattr(vehicle, "capacity", 0) or 0)
+            passenger_count = int(getattr(order, "passenger_count", 1) or 1)
+        except (TypeError, ValueError):
+            return False
+        return capacity > 0 and passenger_count <= capacity
 
     @staticmethod
     def _driver_push_failure_mode(reason):
@@ -2337,74 +2555,11 @@ class CoreDispatcher:
             city_map (CityGraph): 路网对象。
             lon (float): 车辆 GPS 经度。
             lat (float): 车辆 GPS 纬度。
-            vehicle (Vehicle | None): 当前车辆。传入车辆时优先约束在车辆规划轨迹附近。
+            vehicle (Vehicle | None): 兼容旧调用签名；当前不再用旧路线约束投影。
 
         Returns:
             dict | None: 最近路段投影信息；没有可用边时返回 None。
         """
-        if vehicle is not None and vehicle.planned_route_point:
-            route_points = vehicle.planned_route_point
-            best_projection = None
-            max_lookahead_distance = 500.0
-
-            # 先检查当前所在路段，避免 GPS 轻微偏移时被吸到相邻或对向道路。
-            current_projection = CoreDispatcher._projection_result(
-                city_map,
-                lon,
-                lat,
-                vehicle.last_node,
-                vehicle.next_node,
-                "planned_route",
-            )
-            if (
-                current_projection is not None
-                and current_projection["progress"] + 0.02 >= vehicle.progress
-            ):
-                best_projection = current_projection
-
-            start_index = None
-            for i, point in enumerate(route_points):
-                if point["id"] == vehicle.next_node:
-                    start_index = i
-                    break
-            if start_index is None:
-                start_index = 0
-
-            lookahead_distance = 0.0
-            for i in range(start_index, len(route_points) - 1):
-                u_id = route_points[i]["id"]
-                v_id = route_points[i + 1]["id"]
-                projection = CoreDispatcher._projection_result(
-                    city_map,
-                    lon,
-                    lat,
-                    u_id,
-                    v_id,
-                    "planned_route",
-                )
-                if projection is not None and (
-                    best_projection is None
-                    or projection["distance_to_gps"] < best_projection["distance_to_gps"]
-                ):
-                    best_projection = projection
-
-                # 只向前搜索有限距离，避免车辆被吸回已走过很远的历史路段。
-                u_node = city_map.nodes_map.get(u_id)
-                v_node = city_map.nodes_map.get(v_id)
-                if u_node is None or v_node is None:
-                    continue
-                lookahead_distance += AuxiliaryFunctions.haversine_distance(
-                    u_node.lon,
-                    u_node.lat,
-                    v_node.lon,
-                    v_node.lat,
-                )
-                if lookahead_distance >= max_lookahead_distance:
-                    break
-
-            if best_projection is not None:
-                return best_projection
-
         best_projection = None
         for edge in city_map.edges:
             projection = CoreDispatcher._projection_result(
@@ -4686,22 +4841,7 @@ class CoreDispatcher:
         """
         report_timestamp = current_timestamp if current_timestamp is not None else time.time()
         vehicle.gps = {"lon": float(lon), "lat": float(lat)}
-        projection = CoreDispatcher._vehicle_grasped_route_projection(vehicle, lon, lat)
-        if projection is not None:
-            projection["route_progress"] = projection.get("progress")
-            road_projection = CoreDispatcher._nearest_road_projection(
-                city_map,
-                projection["lon"],
-                projection["lat"],
-                None,
-            )
-            if road_projection is not None:
-                projection["edge_u"] = road_projection["edge_u"]
-                projection["edge_v"] = road_projection["edge_v"]
-                projection["progress"] = road_projection["progress"]
-                projection["next_node"] = road_projection["next_node"]
-        else:
-            projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, vehicle)
+        projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, None)
         if projection is None:
             return None
 
@@ -5193,8 +5333,8 @@ class CoreDispatcher:
             更新 vehicle.gps、projected_gps、last_node、next_node、progress 和 planned_route_point。
             可能触发 pickup/dropoff，从而修改 on_board_orders、planned_route 和 completed_orders_pool。
         """
-        # GPS 先吸附到路网边线，避免原始坐标偏移导致车辆脱离道路。
-        projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, vehicle)
+        # GPS 先按原始上报坐标吸附到全路网最近边，避免被旧路线约束到上一次位置。
+        projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, None)
         if projection is None:
             return None
 

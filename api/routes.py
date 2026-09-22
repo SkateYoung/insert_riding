@@ -331,6 +331,138 @@ def _order_node_to_dict(node):
     }
 
 
+def _route_segment_distance_m(segment):
+    """读取路线分段距离；缺失时用分段点列兜底计算。"""
+    if not isinstance(segment, dict):
+        return None
+    for key in ("distance_m", "distance", "aStarDistanceM"):
+        value = segment.get(key)
+        try:
+            distance = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(distance):
+            return max(0.0, distance)
+    points = segment.get("points") or segment.get("path") or []
+    if len(points) >= 2:
+        try:
+            return CoreDispatcher._path_distance_m(points)
+        except (TypeError, ValueError, KeyError):
+            return None
+    return None
+
+
+def _rounded_distance_km(distance_m):
+    """把米制距离转成公里展示值。"""
+    if distance_m is None:
+        return None
+    try:
+        return round(float(distance_m) / 1000.0, 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_live_distance_response(order, order_status, vehicle):
+    """根据车辆当前剩余分段路线计算订单实时接驾和送达距离。"""
+    empty_distance = {
+        "remaining_pickup_distance_m": None,
+        "remaining_pickup_distance_km": None,
+        "remaining_dropoff_distance_m": None,
+        "remaining_dropoff_distance_km": None,
+        "remaining_total_to_dropoff_distance_m": None,
+        "remaining_total_to_dropoff_distance_km": None,
+    }
+    if order_status == "completed":
+        return {
+            "status": "completed",
+            "source": "completed",
+            "remaining_pickup_distance_m": 0.0,
+            "remaining_pickup_distance_km": 0.0,
+            "remaining_dropoff_distance_m": 0.0,
+            "remaining_dropoff_distance_km": 0.0,
+            "remaining_total_to_dropoff_distance_m": 0.0,
+            "remaining_total_to_dropoff_distance_km": 0.0,
+        }
+    if order_status == "cancelled":
+        return {"status": "cancelled", "source": "cancelled", **empty_distance}
+    if vehicle is None:
+        return {"status": "not_assigned", "source": "not_assigned", **empty_distance}
+
+    source = "grasped_segments"
+    segments = getattr(vehicle, "planned_route_segment_grasped_point", None) or []
+    if not segments:
+        source = "raw_segments"
+        segments = getattr(vehicle, "planned_route_segment_raw_point", None) or []
+
+    order_id = str(getattr(order, "request_id", ""))
+    od_segments = []
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        step_type = str(segment.get("type") or "").upper()
+        if step_type not in {"O", "D"}:
+            continue
+        od_segments.append({
+            "type": step_type,
+            "request_id": str(segment.get("request_id")) if segment.get("request_id") is not None else None,
+            "distance_m": _route_segment_distance_m(segment),
+        })
+    if not od_segments:
+        return {"status": "not_available", "source": source, **empty_distance}
+
+    pickup_index = None
+    dropoff_index = None
+    for index, segment in enumerate(od_segments):
+        if segment["request_id"] != order_id:
+            continue
+        if segment["type"] == "O" and pickup_index is None:
+            pickup_index = index
+        elif segment["type"] == "D" and dropoff_index is None:
+            dropoff_index = index
+
+    def sum_distance(start_index, end_index):
+        if start_index is None or end_index is None or start_index > end_index:
+            return None
+        total = 0.0
+        for segment in od_segments[start_index:end_index + 1]:
+            distance_m = segment.get("distance_m")
+            if distance_m is None:
+                return None
+            total += distance_m
+        return round(total, 2)
+
+    pickup_done = order_status == "riding" or pickup_index is None
+    pickup_distance_m = 0.0 if pickup_done else sum_distance(0, pickup_index)
+    if dropoff_index is None:
+        dropoff_distance_m = None
+        total_to_dropoff_m = None
+    elif pickup_done:
+        dropoff_distance_m = sum_distance(0, dropoff_index)
+        total_to_dropoff_m = dropoff_distance_m
+    else:
+        dropoff_distance_m = sum_distance(pickup_index + 1, dropoff_index)
+        total_to_dropoff_m = sum_distance(0, dropoff_index)
+
+    status = "ready"
+    if (
+        (not pickup_done and pickup_distance_m is None)
+        or dropoff_distance_m is None
+        or total_to_dropoff_m is None
+    ):
+        status = "partial"
+
+    return {
+        "status": status,
+        "source": source,
+        "remaining_pickup_distance_m": pickup_distance_m,
+        "remaining_pickup_distance_km": _rounded_distance_km(pickup_distance_m),
+        "remaining_dropoff_distance_m": dropoff_distance_m,
+        "remaining_dropoff_distance_km": _rounded_distance_km(dropoff_distance_m),
+        "remaining_total_to_dropoff_distance_m": total_to_dropoff_m,
+        "remaining_total_to_dropoff_distance_km": _rounded_distance_km(total_to_dropoff_m),
+    }
+
+
 def _restriction_policy_response(policy):
     """把禁区策略统一转换成接口响应结构。"""
     return policy_to_response(policy)
@@ -1505,6 +1637,7 @@ def _order_eta_response(order, order_status, vehicle):
             eta_status = order_status
         else:
             eta_status = "pending"
+    live_distance = _order_live_distance_response(order, order_status, vehicle)
 
     return {
         "request_id": str(order.request_id),
@@ -1531,6 +1664,7 @@ def _order_eta_response(order, order_status, vehicle):
             "estimated_dropoff_time": estimated_dropoff_time,
             "estimated_dropoff_time_text": _format_optional_timestamp(estimated_dropoff_time),
             "estimated_dropoff_eta_seconds": getattr(order, "estimated_dropoff_eta_seconds", None),
+            "distance": live_distance,
             "error": getattr(order, "eta_error", None),
         },
     }

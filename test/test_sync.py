@@ -275,6 +275,131 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             ["OLD", "OLD"],
         )
 
+    def test_idle_candidate_wins_when_pickup_wait_within_threshold(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("IDLE", "O_NEW"): 1.0,
+            ("BUSY", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        CoreDispatcher.configure_route_cost(
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+            PLANNED_ROUTE_INSERTION_PENALTY=0.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
+        )
+
+        def fake_insert(vehicle, order, city_map, return_details=False):
+            wait_seconds = 480.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
+            absolute_cost = 100.0 if vehicle.vehicle_id == "IDLE_V" else 10.0
+            details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
+            route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+            return route, absolute_cost, details
+
+        with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [busy_vehicle, idle_vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], idle_vehicle)
+        self.assertEqual(candidate["candidate_class"], "idle")
+        self.assertEqual(candidate["selection_policy"], "idle_wait_within_threshold")
+
+    def test_route_aligned_busy_candidate_wins_when_idle_wait_exceeds_threshold(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("IDLE", "O_NEW"): 1.0,
+            ("BUSY", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        CoreDispatcher.configure_route_cost(
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+            PLANNED_ROUTE_INSERTION_PENALTY=0.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
+        )
+
+        def fake_insert(vehicle, order, city_map, return_details=False):
+            wait_seconds = 900.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
+            absolute_cost = 1.0 if vehicle.vehicle_id == "IDLE_V" else 100.0
+            details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
+            route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+            return route, absolute_cost, details
+
+        with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], busy_vehicle)
+        self.assertEqual(candidate["candidate_class"], "busy")
+        self.assertEqual(candidate["selection_policy"], "route_aligned_busy")
+        self.assertGreater(candidate["route_alignment_score"], 0)
+
+    def test_lowest_cost_wins_when_idle_wait_exceeds_threshold_without_alignment(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("IDLE", "O_NEW"): 1.0,
+            ("BUSY", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+            ("O_OLD", "D_OLD"): 1.0,
+        })
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        old_order = _fake_order(city, "OLD", "O_OLD", "D_OLD", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        CoreDispatcher.configure_route_cost(
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+            PLANNED_ROUTE_INSERTION_PENALTY=0.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
+        )
+
+        def fake_insert(vehicle, order, city_map, return_details=False):
+            wait_seconds = 900.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
+            absolute_cost = 100.0 if vehicle.vehicle_id == "IDLE_V" else 10.0
+            details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
+            route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+            return route, absolute_cost, details
+
+        with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], busy_vehicle)
+        self.assertEqual(candidate["selection_policy"], "lowest_cost")
+        self.assertEqual(candidate["route_alignment_score"], 0)
+
     def test_area_cycle_spreads_batch_orders_to_remaining_idle_vehicles(self):
         base_ts = 1_000_000.0
         node_ids = ["V1", "V2", "O1", "D1", "O2", "D2"]
@@ -332,6 +457,46 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["candidate_class"], "busy")
         self.assertEqual(candidate["cost"], 55.0)
+
+    def test_capacity_filter_allows_pickup_after_prior_dropoff(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): _seconds_distance(60),
+            ("B", "C"): _seconds_distance(60),
+        })
+        vehicle = _fake_vehicle("V1", "A", base_ts)
+        vehicle.capacity = 1
+        old_order = _fake_order(city, "OLD", "A", "B", base_ts, 0, 3600)
+        old_order.status = "riding"
+        new_order = _fake_order(city, "NEW", "B", "C", base_ts, 0, 3600)
+        vehicle.on_board_orders = [old_order]
+        vehicle.planned_route = [{"type": "D", "order": old_order}]
+
+        self.assertTrue(CoreDispatcher._vehicle_has_capacity_for_order(vehicle, new_order))
+        route, cost = CoreDispatcher._try_insert_order(vehicle, new_order, city)
+
+        self.assertIsNotNone(route)
+        self.assertLess(cost, float("inf"))
+        self.assertEqual(
+            [(step["type"], step["order"].request_id) for step in route],
+            [("D", "OLD"), ("O", "NEW"), ("D", "NEW")],
+        )
+
+    def test_capacity_filter_rejects_single_order_larger_than_vehicle_capacity(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): _seconds_distance(60),
+        })
+        vehicle = _fake_vehicle("V1", "A", base_ts)
+        vehicle.capacity = 1
+        order = _fake_order(city, "TOO_BIG", "A", "B", base_ts, 0, 3600)
+        order.passenger_count = 2
+
+        self.assertFalse(CoreDispatcher._vehicle_has_capacity_for_order(vehicle, order))
+        route, cost = CoreDispatcher._try_insert_order(vehicle, order, city)
+
+        self.assertIsNone(route)
+        self.assertEqual(cost, float("inf"))
 
     def test_locked_route_head_prevents_new_order_from_becoming_first_step(self):
         base_ts = 1_000_000.0
@@ -403,6 +568,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             OLD_DELAY_COST_PER_MIN=9.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=120.0,
             PLANNED_ROUTE_INSERTION_PENALTY=35.0,
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=900.0,
         )
 
         config = result["config"]
@@ -410,6 +576,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(config["OLD_DELAY_COST_PER_MIN"], 9.0)
         self.assertEqual(config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"], 120.0)
         self.assertEqual(config["PLANNED_ROUTE_INSERTION_PENALTY"], 35.0)
+        self.assertEqual(config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"], 900.0)
         self.assertEqual(config["IN_CAR_COST_PER_MIN"], self._route_cost_config["IN_CAR_COST_PER_MIN"])
         self.assertAlmostEqual(
             result["weight_total"],
