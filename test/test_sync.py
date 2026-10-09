@@ -109,6 +109,7 @@ def _fake_order(city, request_id, origin_id, dest_id, base_ts, earliest_offset, 
         max_arrival_time=latest_ts + 3600.0,
         actual_pick_time=None,
         status="pooled",
+        operation_area_id=19,
     )
 
 
@@ -128,6 +129,7 @@ def _fake_vehicle(vehicle_id, node_id, base_ts):
         is_rest_requested=False,
         is_resting=False,
         rest_status="operating",
+        operation_area_id=19,
     )
 
 
@@ -141,12 +143,13 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
     def setUp(self):
         CoreDispatcher.order_pool.clear()
         self._matching_window_config = CoreDispatcher.matching_window_config()
-        self._route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+        CoreDispatcher.clear_route_cost_config()
+        self._route_cost_config = CoreDispatcher.route_cost_config_snapshot(19)
 
     def tearDown(self):
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.configure_matching_window(**self._matching_window_config)
-        CoreDispatcher.configure_route_cost(**self._route_cost_config)
+        CoreDispatcher.clear_route_cost_config()
 
     def _run_one_pool_loop(self, fleet, city):
         with mock.patch("api.core.time.sleep", side_effect=_StopPoolLoop), \
@@ -157,7 +160,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             with self.assertRaises(_StopPoolLoop):
                 CoreDispatcher.process_pool_matching(fleet, city)
 
-    def _run_area_cycle(self, fleet, city, operation_area_id=None):
+    def _run_area_cycle(self, fleet, city, operation_area_id=19):
         with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
                 mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={}), \
                 mock.patch("api.core.persistence.record_order_matched_pending"):
@@ -231,7 +234,11 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
                 mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={"path": [], "segments": []}) as refreshed, \
                 mock.patch("api.core.persistence.record_order_matched_pending"):
-            assigned = CoreDispatcher._process_pool_matching_area_cycle([vehicle], city)
+            assigned = CoreDispatcher._process_pool_matching_area_cycle(
+                [vehicle],
+                city,
+                operation_area_id=19,
+            )
 
         self.assertEqual(assigned, 2)
         self.assertEqual(CoreDispatcher.order_pool, [])
@@ -264,6 +271,10 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         ]
         new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
         CoreDispatcher.order_pool.append(new_order)
+        CoreDispatcher.configure_route_cost(
+            19,
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+        )
 
         assigned = self._run_area_cycle([busy_vehicle, idle_vehicle], city)
 
@@ -291,12 +302,13 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         ]
         new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
         CoreDispatcher.configure_route_cost(
+            19,
             IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
             PLANNED_ROUTE_INSERTION_PENALTY=0.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
         )
 
-        def fake_insert(vehicle, order, city_map, return_details=False):
+        def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
             wait_seconds = 480.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
             absolute_cost = 100.0 if vehicle.vehicle_id == "IDLE_V" else 10.0
             details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
@@ -332,12 +344,13 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         ]
         new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
         CoreDispatcher.configure_route_cost(
+            19,
             IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
             PLANNED_ROUTE_INSERTION_PENALTY=0.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
         )
 
-        def fake_insert(vehicle, order, city_map, return_details=False):
+        def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
             wait_seconds = 900.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
             absolute_cost = 1.0 if vehicle.vehicle_id == "IDLE_V" else 100.0
             details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
@@ -375,12 +388,13 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         ]
         new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
         CoreDispatcher.configure_route_cost(
+            19,
             IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
             PLANNED_ROUTE_INSERTION_PENALTY=0.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
         )
 
-        def fake_insert(vehicle, order, city_map, return_details=False):
+        def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
             wait_seconds = 900.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
             absolute_cost = 100.0 if vehicle.vehicle_id == "IDLE_V" else 10.0
             details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
@@ -419,6 +433,10 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         order_a = _fake_order(city, "SPREAD_A", "O1", "D1", base_ts, 0, 3600)
         order_b = _fake_order(city, "SPREAD_B", "O2", "D2", base_ts, 0, 3600)
         CoreDispatcher.order_pool.extend([order_a, order_b])
+        CoreDispatcher.configure_route_cost(
+            19,
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+        )
 
         assigned = self._run_area_cycle([vehicle_a, vehicle_b], city)
 
@@ -443,7 +461,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
         vehicle.planned_route = [{"type": "O", "order": old_order}]
         new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
-        CoreDispatcher.configure_route_cost(PLANNED_ROUTE_INSERTION_PENALTY=25.0)
+        CoreDispatcher.configure_route_cost(19, PLANNED_ROUTE_INSERTION_PENALTY=25.0)
 
         with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=10.0), \
                 mock.patch.object(CoreDispatcher, "_try_insert_order", return_value=([{"type": "O", "order": new_order}], 40.0)):
@@ -564,6 +582,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
 
     def test_route_cost_config_can_update_partial_values(self):
         result = CoreDispatcher.configure_route_cost(
+            19,
             W_PASSENGER=0.8,
             OLD_DELAY_COST_PER_MIN=9.0,
             BUSY_VEHICLE_MAX_ABSOLUTE_COST=120.0,
@@ -578,6 +597,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(config["PLANNED_ROUTE_INSERTION_PENALTY"], 35.0)
         self.assertEqual(config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"], 900.0)
         self.assertEqual(config["IN_CAR_COST_PER_MIN"], self._route_cost_config["IN_CAR_COST_PER_MIN"])
+        self.assertEqual(result["operation_area_id"], 19)
         self.assertAlmostEqual(
             result["weight_total"],
             config["W_PASSENGER"] + config["W_ENTERPRISE"] + config["W_SOCIAL"] + config["W_FAIRNESS"],
@@ -586,11 +606,26 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
 
     def test_route_cost_config_rejects_invalid_values(self):
         with self.assertRaises(ValueError):
-            CoreDispatcher.configure_route_cost(UNKNOWN_PARAM=1.0)
+            CoreDispatcher.configure_route_cost(19, UNKNOWN_PARAM=1.0)
         with self.assertRaises(ValueError):
-            CoreDispatcher.configure_route_cost(W_PASSENGER=-1.0)
+            CoreDispatcher.configure_route_cost(19, W_PASSENGER=-1.0)
         with self.assertRaises(ValueError):
-            CoreDispatcher.configure_route_cost(W_PASSENGER=float("inf"))
+            CoreDispatcher.configure_route_cost(19, W_PASSENGER=float("inf"))
+
+    def test_route_cost_config_is_isolated_by_operation_area(self):
+        CoreDispatcher.configure_route_cost(19, WAIT_COST_PER_MIN=12.0)
+        CoreDispatcher.configure_route_cost(25, WAIT_COST_PER_MIN=3.0)
+
+        area_19 = CoreDispatcher.route_cost_config_snapshot(19)
+        area_25 = CoreDispatcher.route_cost_config_snapshot(25)
+        area_30 = CoreDispatcher.route_cost_config_snapshot(30)
+
+        self.assertEqual(area_19["WAIT_COST_PER_MIN"], 12.0)
+        self.assertEqual(area_25["WAIT_COST_PER_MIN"], 3.0)
+        self.assertEqual(
+            area_30["WAIT_COST_PER_MIN"],
+            CoreDispatcher.ROUTE_COST_CONFIG_DEFAULTS["WAIT_COST_PER_MIN"],
+        )
 
     def test_evaluate_route_uses_runtime_route_cost_config(self):
         base_ts = 1_000_000.0
@@ -604,6 +639,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             "last_node": "V",
             "next_node": "V",
             "progress": 0.0,
+            "operation_area_id": 19,
         }
         route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
 
@@ -615,7 +651,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             capacity=4,
             return_details=True,
         )
-        CoreDispatcher.configure_route_cost(IN_CAR_COST_PER_MIN=30.0)
+        CoreDispatcher.configure_route_cost(19, IN_CAR_COST_PER_MIN=30.0)
         _, _, _, after_details = CoreDispatcher.evaluate_route(
             route,
             vehicle_state,

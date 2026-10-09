@@ -72,7 +72,46 @@ class CoreDispatcher:
         "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": "空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择。",
     }
-    route_cost_config = copy.deepcopy(ROUTE_COST_CONFIG_DEFAULTS)
+    # 按运营区配置代码默认值时只需填写与公共默认值不同的参数。
+    # 示例：19: {"WAIT_COST_PER_MIN": 8.0, "IN_CAR_COST_PER_MIN": 10.0}
+    ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
+        # 琶洲运营区
+        666666:{        
+        "W_PASSENGER": 0.50,
+        "W_ENTERPRISE": 0.30,
+        "W_SOCIAL": 0.20,
+        "W_FAIRNESS": 0.05,
+        "WAIT_COST_PER_MIN": 5.0,
+        "IN_CAR_COST_PER_MIN": 5.0,
+        "LATE_ARRIVAL_COST_PER_MIN": 0.0,
+        "OLD_DELAY_COST_PER_MIN": 10.0,
+        "SEVERE_OLD_DELAY_PENALTY": 30.0,
+        "MILEAGE_UTIL_PENALTY_BASE": 10.0,
+        "LOAD_RATE_PENALTY_BASE": 1.0,
+        "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
+        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0},
+        # 白云运营区
+        222222:{        
+        "W_PASSENGER": 0.50,
+        "W_ENTERPRISE": 0.30,
+        "W_SOCIAL": 0.20,
+        "W_FAIRNESS": 0.05,
+        "WAIT_COST_PER_MIN": 5.0,
+        "IN_CAR_COST_PER_MIN": 5.0,
+        "LATE_ARRIVAL_COST_PER_MIN": 0.0,
+        "OLD_DELAY_COST_PER_MIN": 10.0,
+        "SEVERE_OLD_DELAY_PENALTY": 30.0,
+        "MILEAGE_UTIL_PENALTY_BASE": 10.0,
+        "LOAD_RATE_PENALTY_BASE": 1.0,
+        "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 450.0,
+        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0}
+    }
+    # 各运营区维护独立的运行时成本配置；未配置区域按默认值初始化。
+    route_cost_configs_by_area = {}
     route_cost_config_lock = threading.RLock()
     
     # [新增] 存放已完成、已结束（或已取消）订单的归档池，内部存储 Order 对象
@@ -274,27 +313,65 @@ class CoreDispatcher:
         return cls.matching_window_config()
 
     @classmethod
-    def route_cost_config_snapshot(cls):
-        """返回路线成本函数运行时配置快照。"""
-        with cls.route_cost_config_lock:
-            return copy.deepcopy(cls.route_cost_config)
+    def route_cost_config_defaults_for_area(cls, operation_area_id=None):
+        """合并公共默认值与指定运营区的代码默认覆盖项。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        defaults = copy.deepcopy(cls.ROUTE_COST_CONFIG_DEFAULTS)
+        if area_id is None:
+            return defaults
+
+        area_overrides = cls.ROUTE_COST_CONFIG_BY_AREA_DEFAULTS.get(area_id, {})
+        unknown_fields = [key for key in area_overrides if key not in cls.ROUTE_COST_CONFIG_DEFAULTS]
+        if unknown_fields:
+            raise ValueError(
+                f"运营区 {area_id} 存在不支持的路线成本参数: {', '.join(sorted(unknown_fields))}"
+            )
+        for key, value in area_overrides.items():
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"运营区 {area_id} 的 {key} 必须是数字") from exc
+            if not math.isfinite(parsed) or parsed < 0:
+                raise ValueError(f"运营区 {area_id} 的 {key} 必须是大于或等于 0 的有限数字")
+            defaults[key] = parsed
+        return defaults
 
     @classmethod
-    def route_cost_config_response(cls):
-        """返回路线成本配置接口响应结构。"""
-        config = cls.route_cost_config_snapshot()
+    def route_cost_config_snapshot(cls, operation_area_id=None):
+        """返回指定运营区的路线成本函数运行时配置快照。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        with cls.route_cost_config_lock:
+            if area_id is None:
+                return cls.route_cost_config_defaults_for_area()
+            config = cls.route_cost_configs_by_area.setdefault(
+                area_id,
+                cls.route_cost_config_defaults_for_area(area_id),
+            )
+            return copy.deepcopy(config)
+
+    @classmethod
+    def route_cost_config_response(cls, operation_area_id):
+        """返回指定运营区路线成本配置的接口响应结构。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id 必须是有效整数")
+        config = cls.route_cost_config_snapshot(area_id)
         weight_total = sum(float(config.get(key) or 0.0) for key in ("W_PASSENGER", "W_ENTERPRISE", "W_SOCIAL", "W_FAIRNESS"))
         return {
+            "operation_area_id": area_id,
             "config": config,
-            "defaults": copy.deepcopy(cls.ROUTE_COST_CONFIG_DEFAULTS),
+            "defaults": cls.route_cost_config_defaults_for_area(area_id),
             "descriptions": copy.deepcopy(cls.ROUTE_COST_CONFIG_DESCRIPTIONS),
             "weight_total": weight_total,
             "runtime_only": True,
-        }
+    }
 
     @classmethod
-    def configure_route_cost(cls, **updates):
-        """运行时更新路线成本函数配置。"""
+    def configure_route_cost(cls, operation_area_id, **updates):
+        """运行时更新指定运营区的路线成本函数配置。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        if area_id is None:
+            raise ValueError("operation_area_id 必须是有效整数")
         unknown_fields = [key for key in updates if key not in cls.ROUTE_COST_CONFIG_DEFAULTS]
         if unknown_fields:
             raise ValueError(f"不支持的路线成本参数: {', '.join(sorted(unknown_fields))}")
@@ -314,10 +391,25 @@ class CoreDispatcher:
             normalized[key] = parsed
 
         with cls.route_cost_config_lock:
-            next_config = copy.deepcopy(cls.route_cost_config)
+            next_config = copy.deepcopy(
+                cls.route_cost_configs_by_area.get(
+                    area_id,
+                    cls.route_cost_config_defaults_for_area(area_id),
+                )
+            )
             next_config.update(normalized)
-            cls.route_cost_config = next_config
-        return cls.route_cost_config_response()
+            cls.route_cost_configs_by_area[area_id] = next_config
+        return cls.route_cost_config_response(area_id)
+
+    @classmethod
+    def clear_route_cost_config(cls, operation_area_id=None):
+        """清理指定运营区配置；未传运营区时清理全部运行时配置。"""
+        area_id = cls._coerce_operation_area_id(operation_area_id)
+        with cls.route_cost_config_lock:
+            if area_id is None:
+                cls.route_cost_configs_by_area.clear()
+            else:
+                cls.route_cost_configs_by_area.pop(area_id, None)
 
     @staticmethod
     def _mark_fleet_push_pending(vehicle, event=None):
@@ -465,7 +557,17 @@ class CoreDispatcher:
     # ============================================================
 
     @staticmethod
-    def evaluate_route(route, vehicle_state, on_board_orders, city_map, capacity=10, v_zone=None, original_etas=None, return_details=False):
+    def evaluate_route(
+        route,
+        vehicle_state,
+        on_board_orders,
+        city_map,
+        capacity=10,
+        v_zone=None,
+        original_etas=None,
+        return_details=False,
+        route_cost_config=None,
+    ):
         """核心评级器：沙盘量化时间线成本（Cost）以评估未来路线质量分数。
         
         该算法引入了由于车辆绕路等问题产生的物理油耗距离分数、乘客空等惩罚分，
@@ -571,7 +673,7 @@ class CoreDispatcher:
         # ===== 综合多目标成本函数架构 =====
         
         # 1. 权重定义：从运行时配置读取快照，避免平台更新时单次评估前后参数不一致。
-        route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+        route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot(operation_area_id)
         W_PASSENGER = route_cost_config["W_PASSENGER"]  # 乘客体验 (候车时间、绕行系数、时间窗满意度)
         W_ENTERPRISE = route_cost_config["W_ENTERPRISE"] # 企业效益 (满载率、单车收入、里程利用率)
         W_SOCIAL = route_cost_config["W_SOCIAL"]     # 社会效益 (区域覆盖率、碳排放、道路资源占用)
@@ -807,7 +909,7 @@ class CoreDispatcher:
         }
 
     @staticmethod
-    def _try_insert_order(vehicle, new_order, city_map, return_details=False):
+    def _try_insert_order(vehicle, new_order, city_map, return_details=False, route_cost_config=None):
         """【组客内循环】：针对单车的贪婪性全路径缝隙插入探测寻优。
         
         该方法会尝试将新订单的 O 点和 D 点插入到现有计划路径的所有可能位置，并使用 evaluate_route 评估最优选。
@@ -849,7 +951,15 @@ class CoreDispatcher:
         # 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
         orig_etas = None
         if vehicle.on_board_orders and route:
-            _, _, orig_etas = CoreDispatcher.evaluate_route(route, v_state, vehicle.on_board_orders, city_map, vehicle.capacity, v_zone=vehicle.op_zone)
+            _, _, orig_etas = CoreDispatcher.evaluate_route(
+                route,
+                v_state,
+                vehicle.on_board_orders,
+                city_map,
+                vehicle.capacity,
+                v_zone=vehicle.op_zone,
+                route_cost_config=route_cost_config,
+            )
         
         for i in range(min_origin_index, n + 1):
             temp_route = route[:i] + [o_step] + route[i:]
@@ -865,6 +975,7 @@ class CoreDispatcher:
                     v_zone=vehicle.op_zone,
                     original_etas=orig_etas,
                     return_details=True,
+                    route_cost_config=route_cost_config,
                 )
                 if len(eval_result) == 4:
                     is_feasible, cost, _, details = eval_result
@@ -921,6 +1032,7 @@ class CoreDispatcher:
                             v_zone=vehicle.op_zone,
                             original_etas=orig_etas,
                             return_details=True,
+                            route_cost_config=route_cost_config,
                         )
                         if len(eval_result) == 4:
                             is_feasible, cost, _, details = eval_result
@@ -965,7 +1077,7 @@ class CoreDispatcher:
         return False
 
     @staticmethod
-    def _evaluate_vehicle_current_route_cost(vehicle, city_map):
+    def _evaluate_vehicle_current_route_cost(vehicle, city_map, route_cost_config=None):
         """计算车辆当前计划路线的绝对成本，用于订单池内的增量成本比较。"""
         if not vehicle.planned_route:
             return 0.0
@@ -984,6 +1096,7 @@ class CoreDispatcher:
             city_map,
             vehicle.capacity,
             v_zone=vehicle.op_zone,
+            route_cost_config=route_cost_config,
         )
         return cost if is_feasible else 0.0
 
@@ -1137,7 +1250,9 @@ class CoreDispatcher:
         返回值包含最优车辆、最优路线、最优成本和次优成本。次优成本只在同一候选层
         内比较，避免空车/顺路分层规则被其他候选的成本干扰。
         """
-        route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot()
+        route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot(
+            CoreDispatcher._order_operation_area_id(order)
+        )
         busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
         planned_route_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
         idle_first_wait_threshold = route_cost_config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"]
@@ -1152,8 +1267,18 @@ class CoreDispatcher:
             if not CoreDispatcher._vehicle_can_accept_order(vehicle):
                 continue
 
-            original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(vehicle, city_map)
-            insert_result = CoreDispatcher._try_insert_order(vehicle, order, city_map, return_details=True)
+            original_cost = CoreDispatcher._evaluate_vehicle_current_route_cost(
+                vehicle,
+                city_map,
+                route_cost_config=route_cost_config,
+            )
+            insert_result = CoreDispatcher._try_insert_order(
+                vehicle,
+                order,
+                city_map,
+                return_details=True,
+                route_cost_config=route_cost_config,
+            )
             if len(insert_result) == 3:
                 route, absolute_cost, route_details = insert_result
             else:
@@ -1416,7 +1541,7 @@ class CoreDispatcher:
             best_priority_score = 0.0
             best_cancel_risk_score = 0.0
             order_candidates = []
-            route_cost_config = CoreDispatcher.route_cost_config_snapshot()
+            route_cost_config = CoreDispatcher.route_cost_config_snapshot(area_id)
             current_timestamp = max(
                 (getattr(v, "time", 0.0) for v in area_fleet),
                 default=time.time(),
@@ -1674,7 +1799,6 @@ class CoreDispatcher:
                     best_priority_score = 0.0
                     best_cancel_risk_score = 0.0
                     order_candidates = []
-                    route_cost_config = CoreDispatcher.route_cost_config_snapshot()
                     current_timestamp = max(
                         (getattr(v, "time", 0.0) for v in fleet),
                         default=time.time(),
@@ -1691,7 +1815,9 @@ class CoreDispatcher:
                             fleet,
                             city_map,
                             current_timestamp,
-                            route_cost_config=route_cost_config,
+                            route_cost_config=CoreDispatcher.route_cost_config_snapshot(
+                                CoreDispatcher._order_operation_area_id(order)
+                            ),
                         )
                         if best_vehicle_candidate is None:
                             continue

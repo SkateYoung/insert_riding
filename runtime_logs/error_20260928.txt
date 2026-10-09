@@ -1,0 +1,85 @@
+========================================================================================
+time: 2026-09-28 14:32:55
+level: ERROR
+source: api.core.idle_hotspot_v6_forecast
+message: Unable to allocate 8.69 MiB for an array with shape (87600, 13) and data type float64
+context: {"operation_area_id": 20260713, "clean_order_count": 14, "forecast_time": "2026-09-28 14:45:00"}
+exception: MemoryError((87600, 13), dtype('float64'))
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\core.py", line 2981, in _build_idle_hotspot_cache
+    predictions, _, metrics = od_forecast_module.predict_od_flows_v6(
+  File "d:\Bus_Project\insert_riding\forecast\od_forecast_module.py", line 766, in predict_od_flows_v6
+    x = np.asarray(x_all, dtype=float)
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 8.69 MiB for an array with shape (87600, 13) and data type float64
+
+========================================================================================
+time: 2026-09-28 15:12:43
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1790579560.9442856, "request_id": "demo-manual-1790579558567-4115", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:a3e883e2c02566b1020baa3029c2f183", "status": "success", "task_no": "dispatch:demo-manual-1790579558567-4115:grasp:v1:a3e883e2c02566b1020baa3029c2f183:1790579560944", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4224, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4465, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4180, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-09-28 15:24:39
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1790580277.2112095, "request_id": "demo-manual-1790580276120-463", "vehicle_code": "72057594546145555", "route_version": "grasp:v1:2c984d7b5ca81d7660055143112c908e", "status": "success", "task_no": "dispatch:demo-manual-1790580276120-463:grasp:v1:2c984d7b5ca81d7660055143112c908e:1790580277211", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4224, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4465, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4180, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+

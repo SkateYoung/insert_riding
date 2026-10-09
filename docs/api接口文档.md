@@ -1238,12 +1238,19 @@ POST/PUT 请求体：
 
 ### 4.4.3 GET/POST/PUT `/admin/dispatch/route-cost-config`
 
-查看或运行时更新订单插单成本函数配置。配置更新后只影响后续新的派单、插单和重规划评估，不会主动重算已经生成的车辆路线。配置为内存运行时配置，服务重启后恢复代码默认值。
+查看或运行时更新指定运营区的订单插单成本函数配置。各运营区配置互相隔离；配置更新后只影响该运营区后续新的派单和插单评估，不会主动重算已经生成的车辆路线。配置仅保存在内存中，服务重启后恢复代码默认值。
+
+GET 请求示例：
+
+```text
+GET /admin/dispatch/route-cost-config?operation_area_id=19
+```
 
 GET 响应示例：
 
 ```json
 {
+  "operation_area_id": 19,
   "config": {
     "W_PASSENGER": 0.65,
     "W_ENTERPRISE": 0.2,
@@ -1268,31 +1275,11 @@ GET 响应示例：
 }
 ```
 
-批量请求体：
-
-```json
-{
-  "orders": [
-    {
-      "request_id": "order_10001",
-      "operation_area_id": 10001,
-      "passenger_phone": "13900000001",
-      "origin": {"lon": 113.38, "lat": 23.04},
-      "destination": {"lon": 113.39, "lat": 23.05},
-      "expected_pickup_time": {
-        "earliest": "2026-06-07 12:05:00",
-        "latest": "2026-06-07 12:20:00"
-      },
-      "passenger_count": 2
-    }
-  ]
-}
-```
-
 POST/PUT 请求体示例：
 
 ```json
 {
+  "operation_area_id": 19,
   "W_PASSENGER": 0.75,
   "OLD_DELAY_COST_PER_MIN": 8,
   "IN_CAR_COST_PER_MIN": 5,
@@ -1306,6 +1293,7 @@ POST/PUT 请求体示例：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `operation_area_id` | integer | 是 | 运营区业务 ID，对应 `map_operation_area.area_id`；GET 时通过查询参数传入 |
 | `W_PASSENGER` | number | 否 | 乘客体验总权重 |
 | `W_ENTERPRISE` | number | 否 | 企业效益总权重 |
 | `W_SOCIAL` | number | 否 | 社会效益总权重 |
@@ -1325,17 +1313,34 @@ POST/PUT 请求体示例：
 说明：
 
 - POST/PUT 可只传其中一个或多个字段，未传字段保持当前值。
+- 未配置过的运营区会从 `ROUTE_COST_CONFIG_DEFAULTS` 初始化独立配置副本。
+- 如需在代码中设置区域初始值，可编辑 `CoreDispatcher.ROUTE_COST_CONFIG_BY_AREA_DEFAULTS`；每个区域只需填写与公共默认值不同的参数。
 - 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
 - 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
 - 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
 - 顺路优先会先看新订单 O/D 与车辆已有订单是否同起点、同终点或同路线站点，再在同级顺路候选中比较成本。
 
+代码默认值示例：
+
+```python
+ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
+    19: {
+        "WAIT_COST_PER_MIN": 8.0,
+        "IN_CAR_COST_PER_MIN": 10.0,
+    },
+    25: {
+        "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+    },
+}
+```
+
 成功响应：
 
 ```json
 {
   "status": "ok",
+  "operation_area_id": 19,
   "config": {
     "W_PASSENGER": 0.75
   },
@@ -1344,40 +1349,13 @@ POST/PUT 请求体示例：
 }
 ```
 
-批量响应：
-
-```json
-{
-  "total": 2,
-  "success_count": 1,
-  "failure_count": 1,
-  "pool_size": 1,
-  "results": [
-    {
-      "index": 0,
-      "success": true,
-      "status": 200,
-      "request_id": "order_10001"
-    },
-    {
-      "index": 1,
-      "success": false,
-      "status": 409,
-      "code": "same_origin_destination",
-      "error": "起点和终点不能是同一个站点"
-    }
-  ]
-}
-```
-
-批量发起采用逐项处理，某一项失败不会回滚其他成功订单。全部成功返回 `200`，部分成功返回 `207`，全部失败返回 `400`。
-
 状态码：
 
 | 状态码 | 场景 |
 | --- | --- |
 | 200 | 查询或更新成功 |
-| 400 | 请求体不是 JSON 对象、存在未知字段、参数不是有限数字或小于 0 |
+| 400 | 缺少或错误的 `operation_area_id`、请求体不是 JSON 对象、存在未知字段、参数不是有限数字或小于 0 |
+| 404 | `operation_area_id` 对应的运营区不存在 |
 
 ### 4.5 GET `/orders/pool`
 

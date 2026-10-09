@@ -1,0 +1,1735 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>琶洲路网批量订单组合分配 Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d8dee8;
+      --panel: #ffffff;
+      --canvas: #f3f6fa;
+      --blue: #1f66d1;
+      --blue-soft: #e8f0fc;
+      --green: #198754;
+      --red: #cf3f4d;
+      --amber: #b76a00;
+      --violet: #6f52b5;
+      --shadow: 0 8px 24px rgba(25, 40, 68, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      overflow-x: hidden;
+      color: var(--ink);
+      background: #eef2f7;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .app {
+      width: min(1560px, 100%);
+      margin: 0 auto;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 20px 24px 16px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    .subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+    }
+
+    .source-badge {
+      max-width: 520px;
+      padding: 8px 10px;
+      border: 1px solid #b9cae7;
+      border-radius: 6px;
+      color: #244b82;
+      background: #edf4ff;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.7fr) minmax(140px, 0.8fr) minmax(160px, 1fr) auto auto;
+      align-items: end;
+      gap: 12px;
+      padding: 14px 24px;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: 6px;
+      color: #475467;
+      font-size: 12px;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      height: 38px;
+      padding: 0 10px;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid #bfc8d6;
+      border-radius: 6px;
+      outline: none;
+    }
+
+    .field input:focus,
+    .field select:focus,
+    textarea:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 2px rgba(31, 102, 209, .12);
+    }
+
+    .segment-control {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      height: 38px;
+      border: 1px solid #bfc8d6;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .segment-control button {
+      border: 0;
+      color: #475467;
+      background: #fff;
+    }
+
+    .segment-control button+button {
+      border-left: 1px solid #bfc8d6;
+    }
+
+    .segment-control button.active {
+      color: #fff;
+      background: var(--blue);
+    }
+
+    .primary,
+    .secondary {
+      height: 38px;
+      padding: 0 16px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+
+    .primary {
+      border: 1px solid var(--blue);
+      color: #fff;
+      background: var(--blue);
+      font-weight: 700;
+    }
+
+    .secondary {
+      border: 1px solid #aeb9ca;
+      color: #344054;
+      background: #fff;
+    }
+
+    .primary:hover {
+      background: #1858b7;
+    }
+
+    .secondary:hover {
+      background: #f7f9fc;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric {
+      min-height: 94px;
+      padding: 16px 18px;
+      border-right: 1px solid var(--line);
+    }
+
+    .metric:last-child {
+      border-right: 0;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric-value {
+      margin-top: 6px;
+      font-size: 23px;
+      line-height: 1.2;
+      font-weight: 800;
+    }
+
+    .metric-delta {
+      display: block;
+      margin-top: 5px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .metric-delta.bad {
+      color: var(--red);
+    }
+
+    main {
+      padding: 14px 18px 24px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1.75fr) minmax(340px, 0.75fr);
+      gap: 14px;
+    }
+
+    .panel {
+      min-width: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 56px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-title {
+      font-weight: 800;
+    }
+
+    .panel-note {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .view-tabs {
+      display: flex;
+      border: 1px solid #c5cedb;
+      border-radius: 6px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .view-tabs button {
+      height: 32px;
+      padding: 0 12px;
+      border: 0;
+      color: #566176;
+      background: #fff;
+    }
+
+    .view-tabs button+button {
+      border-left: 1px solid #c5cedb;
+    }
+
+    .view-tabs button.active {
+      color: #fff;
+      background: #263a5d;
+    }
+
+    .map-shell {
+      position: relative;
+      height: 600px;
+      background: #f8fafc;
+    }
+
+    #roadMap {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .legend {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid #cad3e0;
+      border-radius: 6px;
+      color: #475467;
+      background: rgba(255, 255, 255, .94);
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .swatch {
+      width: 16px;
+      height: 4px;
+      border-radius: 2px;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+    }
+
+    .side-stack {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .side-body {
+      padding: 12px 14px;
+    }
+
+    #shareGraph {
+      width: 100%;
+      height: 230px;
+      display: block;
+      background: #fafbfd;
+      border: 1px solid #edf0f5;
+    }
+
+    .assignment-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .assignment {
+      display: grid;
+      grid-template-columns: 46px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid #d7deea;
+      border-radius: 6px;
+      background: #fbfcfe;
+    }
+
+    .vehicle-tag {
+      color: #fff;
+      text-align: center;
+      padding: 4px 6px;
+      border-radius: 4px;
+      font-weight: 800;
+    }
+
+    .assignment-orders {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .assignment-sequence {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .assignment-cost {
+      color: #344054;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .empty {
+      padding: 16px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .details-panel {
+      margin-top: 14px;
+    }
+
+    details>summary {
+      cursor: pointer;
+      padding: 14px;
+      font-weight: 800;
+      user-select: none;
+    }
+
+    .json-editor {
+      padding: 0 14px 14px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      padding: 10px;
+      border: 1px solid #c4cedb;
+      border-radius: 6px;
+      color: #1d2939;
+      background: #fbfcfe;
+      font: 12px/1.55 Consolas, "Courier New", monospace;
+      outline: none;
+    }
+
+    .editor-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .status {
+      min-width: 0;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .status.error {
+      color: var(--red);
+    }
+
+    .tables {
+      display: grid;
+      grid-template-columns: 0.85fr 1.15fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+
+    .table-wrap {
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 620px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e4e8ef;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: #475467;
+      background: #f7f9fc;
+      font-size: 12px;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .good {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    .warn {
+      color: var(--amber);
+      font-weight: 700;
+    }
+
+    .bad {
+      color: var(--red);
+      font-weight: 700;
+    }
+
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+    }
+
+    .footnote {
+      padding: 10px 14px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 12px;
+    }
+
+    @media (max-width: 1120px) {
+      .metrics {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .metric:nth-child(3) {
+        border-right: 0;
+      }
+
+      .metric:nth-child(-n+3) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .workspace,
+      .tables {
+        grid-template-columns: 1fr;
+      }
+
+      .side-stack {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 16px 12px;
+      }
+
+      h1 {
+        font-size: 19px;
+      }
+
+      .source-badge {
+        max-width: 100%;
+      }
+
+      .toolbar {
+        grid-template-columns: 1fr 1fr;
+        padding: 12px;
+      }
+
+      .toolbar .field:nth-child(3) {
+        grid-column: 1 / -1;
+      }
+
+      .toolbar button.primary,
+      .toolbar button.secondary {
+        width: 100%;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .metric {
+        min-height: 88px;
+        padding: 13px 12px;
+      }
+
+      .metric:nth-child(3) {
+        border-right: 1px solid var(--line);
+      }
+
+      .metric:nth-child(even) {
+        border-right: 0;
+      }
+
+      .metric:nth-child(-n+4) {
+        border-bottom: 1px solid var(--line);
+      }
+
+      .metric-value {
+        font-size: 20px;
+      }
+
+      main {
+        padding: 10px;
+      }
+
+      .side-stack {
+        grid-template-columns: 1fr;
+      }
+
+      .panel-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .map-shell {
+        height: 440px;
+      }
+
+      .legend {
+        right: 10px;
+      }
+
+      .editor-actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .editor-actions button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div>
+        <h1>琶洲路网批量订单组合分配</h1>
+        <div class="subtitle">共享图 + 组合分配与项目当前后悔值插入算法对照 Demo</div>
+      </div>
+      <div class="source-badge" id="sourceBadge">正在读取 SHP 路网数据...</div>
+    </header>
+
+    <section class="toolbar" aria-label="测试参数">
+      <div class="field">
+        <label for="orderCount">批量订单数</label>
+        <select id="orderCount">
+          <option value="4">4 单</option>
+          <option value="5">5 单</option>
+          <option value="6">6 单</option>
+          <option value="7">7 单</option>
+          <option value="8" selected>8 单</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="seedInput">随机种子</label>
+        <input id="seedInput" type="number" value="20260921" step="1">
+      </div>
+      <div class="field">
+        <label>最大订单组合数</label>
+        <div class="segment-control" id="bundleControl">
+          <button type="button" data-size="2">2</button>
+          <button type="button" data-size="3" class="active">3</button>
+        </div>
+      </div>
+      <button type="button" class="secondary" id="generateButton">重新生成批次</button>
+      <button type="button" class="primary" id="solveButton">运行对比</button>
+    </section>
+
+    <section class="metrics" id="metrics"></section>
+
+    <main>
+      <section class="workspace">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">实际 SHP 路网与车辆分配路线</div>
+              <div class="panel-note">灰色为琶洲路网，彩色实线为当前方案的 A* 服务顺序</div>
+            </div>
+            <div class="view-tabs" id="viewTabs">
+              <button type="button" data-view="global" class="active">组合分配</button>
+              <button type="button" data-view="current">项目当前算法</button>
+            </div>
+          </div>
+          <div class="map-shell">
+            <svg id="roadMap" viewBox="0 0 1100 600" role="img" aria-label="琶洲 SHP 路网匹配结果"></svg>
+            <div class="legend">
+              <span class="legend-item"><span class="swatch" style="background:#c3cad5"></span> SHP 路网</span>
+              <span class="legend-item"><span class="dot" style="background:#1f66d1"></span> 车辆</span>
+              <span class="legend-item"><span class="dot" style="background:#198754"></span> 上车点</span>
+              <span class="legend-item"><span class="dot" style="background:#cf3f4d"></span> 下车点</span>
+            </div>
+          </div>
+        </article>
+
+        <aside class="side-stack">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">订单共享图</div>
+                <div class="panel-note">连边表示至少一辆车可同时服务两单</div>
+              </div>
+            </div>
+            <div class="side-body"><svg id="shareGraph" viewBox="0 0 420 230"></svg></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <div class="panel-title">当前车辆方案</div>
+                <div class="panel-note" id="assignmentNote"></div>
+              </div>
+            </div>
+            <div class="side-body">
+              <div class="assignment-list" id="assignmentList"></div>
+            </div>
+          </article>
+        </aside>
+      </section>
+
+      <article class="panel details-panel">
+        <details>
+          <summary>批量订单 JSON（可编辑并重新计算）</summary>
+          <div class="json-editor">
+            <textarea id="batchJson" spellcheck="false" aria-label="批量订单 JSON"></textarea>
+            <div class="editor-actions">
+              <div class="status" id="editorStatus">坐标会自动吸附到本 Demo 的 SHP 路网节点。</div>
+              <button type="button" class="primary" id="applyJsonButton">应用批量订单</button>
+            </div>
+          </div>
+        </details>
+      </article>
+
+      <section class="tables">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">算法对比</div>
+              <div class="panel-note">同一车辆、订单、路网和约束下的结果</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="comparisonTable"></table>
+          </div>
+          <div class="footnote">项目当前算法基线复刻 core.py 的 Regret-2 插入、2-Opt、取消风险优先级、空车等待阈值、顺路车辆分层及当前代码默认成本参数；司机拒单、运营区和推送确认在本地
+            Demo 中不参与。</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">批量订单明细</div>
+              <div class="panel-note">时间窗按测试开始后的相对分钟表示</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="orderTable"></table>
+          </div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <script src="pazhou_network_data.js"></script>
+  <script>
+    "use strict";
+
+    const NETWORK = window.PAZHOU_NETWORK;
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const AVG_SPEED_MPS = 8.333333;
+    const MAX_EARLY_PICKUP_WAIT_SECONDS = 180;
+    const UNASSIGNED_PENALTY = 120;
+    const VEHICLE_COLORS = ["#1267c4", "#d47a08", "#6f52b5"];
+    const CURRENT_ROUTE_COST_CONFIG = {
+      W_PASSENGER: 0.50,
+      W_ENTERPRISE: 0.30,
+      W_SOCIAL: 0.20,
+      WAIT_COST_PER_MIN: 5.0,
+      IN_CAR_COST_PER_MIN: 5.0,
+      LATE_PICKUP_COST_PER_MIN: 8.0,
+      MILEAGE_UTIL_PENALTY_BASE: 10.0,
+      LOAD_RATE_PENALTY_BASE: 1.0,
+      SOCIAL_DISTANCE_COST_PER_KM: 1.0,
+      BUSY_VEHICLE_MAX_ABSOLUTE_COST: 150.0,
+      PLANNED_ROUTE_INSERTION_PENALTY: 0.0,
+      IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS: 120.0
+    };
+
+    const state = {
+      seed: 20260921,
+      orderCount: 8,
+      maxBundleSize: 3,
+      view: "global",
+      batch: null,
+      result: null,
+      pathCache: new Map(),
+      pathStats: { searches: 0, hits: 0, expanded: 0 }
+    };
+
+    class MinHeap {
+      constructor() { this.items = []; }
+      push(item) {
+        const items = this.items;
+        items.push(item);
+        let index = items.length - 1;
+        while (index > 0) {
+          const parent = (index - 1) >> 1;
+          if (items[parent][0] <= item[0]) break;
+          items[index] = items[parent];
+          index = parent;
+        }
+        items[index] = item;
+      }
+      pop() {
+        const items = this.items;
+        if (!items.length) return null;
+        const root = items[0];
+        const tail = items.pop();
+        if (items.length) {
+          let index = 0;
+          while (true) {
+            let child = index * 2 + 1;
+            if (child >= items.length) break;
+            if (child + 1 < items.length && items[child + 1][0] < items[child][0]) child += 1;
+            if (items[child][0] >= tail[0]) break;
+            items[index] = items[child];
+            index = child;
+          }
+          items[index] = tail;
+        }
+        return root;
+      }
+      get size() { return this.items.length; }
+    }
+
+    function svgElement(name, attributes = {}) {
+      const element = document.createElementNS(SVG_NS, name);
+      for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+      return element;
+    }
+
+    function haversineMeters(a, b) {
+      const rad = Math.PI / 180;
+      const lat1 = a[1] * rad;
+      const lat2 = b[1] * rad;
+      const dLat = (b[1] - a[1]) * rad;
+      const dLon = (b[0] - a[0]) * rad;
+      const value = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+      return 6371000 * 2 * Math.asin(Math.sqrt(value));
+    }
+
+    function seededRandom(seed) {
+      let value = seed >>> 0;
+      return function random() {
+        value += 0x6D2B79F5;
+        let number = value;
+        number = Math.imul(number ^ number >>> 15, number | 1);
+        number ^= number + Math.imul(number ^ number >>> 7, number | 61);
+        return ((number ^ number >>> 14) >>> 0) / 4294967296;
+      };
+    }
+
+    function nearestNode(lon, lat) {
+      let bestId = 0;
+      let bestDistance = Infinity;
+      for (let index = 0; index < NETWORK.nodes.length; index += 1) {
+        const node = NETWORK.nodes[index];
+        const dx = (node[0] - lon) * Math.cos(lat * Math.PI / 180);
+        const dy = node[1] - lat;
+        const value = dx * dx + dy * dy;
+        if (value < bestDistance) {
+          bestDistance = value;
+          bestId = index;
+        }
+      }
+      return bestId;
+    }
+
+    function normalizedNode(xRatio, yRatio) {
+      const [minLon, minLat, maxLon, maxLat] = NETWORK.meta.bounds;
+      return nearestNode(minLon + (maxLon - minLon) * xRatio, minLat + (maxLat - minLat) * yRatio);
+    }
+
+    function astar(start, end) {
+      if (start === end) return { distance: 0, path: [start] };
+      const cacheKey = `${start}|${end}`;
+      const cached = state.pathCache.get(cacheKey);
+      if (cached) {
+        state.pathStats.hits += 1;
+        return cached;
+      }
+      state.pathStats.searches += 1;
+      const count = NETWORK.nodes.length;
+      const distances = new Float64Array(count);
+      distances.fill(Infinity);
+      const previous = new Int32Array(count);
+      previous.fill(-1);
+      const closed = new Uint8Array(count);
+      const queue = new MinHeap();
+      distances[start] = 0;
+      queue.push([haversineMeters(NETWORK.nodes[start], NETWORK.nodes[end]), start]);
+
+      while (queue.size) {
+        const current = queue.pop();
+        const node = current[1];
+        if (closed[node]) continue;
+        closed[node] = 1;
+        state.pathStats.expanded += 1;
+        if (node === end) break;
+        for (const [target, edgeDistance] of NETWORK.adjacency[node]) {
+          if (closed[target]) continue;
+          const candidate = distances[node] + edgeDistance;
+          if (candidate >= distances[target]) continue;
+          distances[target] = candidate;
+          previous[target] = node;
+          const heuristic = haversineMeters(NETWORK.nodes[target], NETWORK.nodes[end]);
+          queue.push([candidate + heuristic, target]);
+        }
+      }
+
+      if (!Number.isFinite(distances[end])) {
+        const missing = { distance: Infinity, path: [] };
+        state.pathCache.set(cacheKey, missing);
+        return missing;
+      }
+      const path = [];
+      for (let node = end; node !== -1; node = previous[node]) {
+        path.push(node);
+        if (node === start) break;
+      }
+      path.reverse();
+      const result = { distance: distances[end], path };
+      state.pathCache.set(cacheKey, result);
+      return result;
+    }
+
+    function combinations(items, size, start = 0, prefix = [], result = []) {
+      if (prefix.length === size) {
+        result.push(prefix.slice());
+        return result;
+      }
+      for (let index = start; index <= items.length - (size - prefix.length); index += 1) {
+        prefix.push(items[index]);
+        combinations(items, size, index + 1, prefix, result);
+        prefix.pop();
+      }
+      return result;
+    }
+
+    function generateBatch(seed, orderCount) {
+      const random = seededRandom(seed);
+      const vehicleAnchors = [[0.10, 0.63], [0.48, 0.28], [0.86, 0.67]];
+      const vehicles = vehicleAnchors.map((anchor, index) => ({
+        id: `V${index + 1}`,
+        node: normalizedNode(anchor[0], anchor[1]),
+        capacity: index === 1 ? 3 : 4,
+        color: VEHICLE_COLORS[index]
+      }));
+
+      const templates = [
+        { origin: [0.13, 0.62], destination: [0.76, 0.62], passengers: 2, latest: 18 },
+        { origin: [0.12, 0.66], destination: [0.42, 0.56], passengers: 3, latest: 4.5 },
+        { origin: [0.43, 0.31], destination: [0.84, 0.33], passengers: 2, latest: 11 },
+        { origin: [0.47, 0.34], destination: [0.82, 0.36], passengers: 1, latest: 12 },
+        { origin: [0.26, 0.78], destination: [0.68, 0.72], passengers: 1, latest: 13 },
+        { origin: [0.62, 0.57], destination: [0.91, 0.68], passengers: 2, latest: 10 },
+        { origin: [0.21, 0.42], destination: [0.55, 0.24], passengers: 1, latest: 12 },
+        { origin: [0.70, 0.76], destination: [0.38, 0.54], passengers: 1, latest: 16 }
+      ];
+
+      const orders = templates.slice(0, orderCount).map((template, index) => {
+        const jitter = () => (random() - 0.5) * 0.025;
+        let origin = normalizedNode(template.origin[0] + jitter(), template.origin[1] + jitter());
+        let destination = normalizedNode(template.destination[0] + jitter(), template.destination[1] + jitter());
+        if (origin === destination) destination = normalizedNode(Math.min(0.96, template.destination[0] + 0.04), template.destination[1]);
+        return {
+          id: `R${index + 1}`,
+          origin,
+          destination,
+          passengers: template.passengers,
+          earliest: 0,
+          latest: template.latest + Math.round(random() * 2),
+          requestAgeMinutes: 0
+        };
+      });
+      return { vehicles, orders };
+    }
+
+    function orderToJson(order) {
+      const origin = NETWORK.nodes[order.origin];
+      const destination = NETWORK.nodes[order.destination];
+      return {
+        request_id: order.id,
+        origin: { lon: origin[0], lat: origin[1] },
+        destination: { lon: destination[0], lat: destination[1] },
+        passenger_count: order.passengers,
+        earliest_min: order.earliest,
+        latest_min: order.latest,
+        request_age_min: order.requestAgeMinutes || 0
+      };
+    }
+
+    function updateBatchJson() {
+      document.getElementById("batchJson").value = JSON.stringify({ orders: state.batch.orders.map(orderToJson) }, null, 2);
+    }
+
+    function parseBatchJson() {
+      const payload = JSON.parse(document.getElementById("batchJson").value);
+      if (!payload || !Array.isArray(payload.orders)) throw new Error("请求体必须包含 orders 数组");
+      if (payload.orders.length < 1 || payload.orders.length > 8) throw new Error("本 Demo 支持 1 至 8 个批量订单");
+      const seen = new Set();
+      return payload.orders.map((item, index) => {
+        const id = String(item.request_id || `R${index + 1}`).trim();
+        if (!id || seen.has(id)) throw new Error(`第 ${index + 1} 条订单 request_id 为空或重复`);
+        seen.add(id);
+        const originLon = Number(item.origin && item.origin.lon);
+        const originLat = Number(item.origin && item.origin.lat);
+        const destinationLon = Number(item.destination && item.destination.lon);
+        const destinationLat = Number(item.destination && item.destination.lat);
+        if (![originLon, originLat, destinationLon, destinationLat].every(Number.isFinite)) throw new Error(`订单 ${id} 的经纬度无效`);
+        const origin = nearestNode(originLon, originLat);
+        const destination = nearestNode(destinationLon, destinationLat);
+        if (origin === destination) throw new Error(`订单 ${id} 的起终点吸附到了同一路网节点`);
+        const passengers = Math.max(1, Math.min(6, Math.trunc(Number(item.passenger_count) || 1)));
+        const earliest = Math.max(0, Number(item.earliest_min) || 0);
+        const latest = Number(item.latest_min);
+        if (!Number.isFinite(latest) || latest < earliest) throw new Error(`订单 ${id} 的时间窗无效`);
+        const requestAgeMinutes = Math.max(0, Number(item.request_age_min) || 0);
+        return { id, origin, destination, passengers, earliest, latest, requestAgeMinutes };
+      });
+    }
+
+    function precomputeRelevantPaths(batch) {
+      const relevant = new Set(batch.vehicles.map(vehicle => vehicle.node));
+      batch.orders.forEach(order => { relevant.add(order.origin); relevant.add(order.destination); });
+      const nodes = [...relevant];
+      for (const start of nodes) {
+        for (const end of nodes) {
+          if (start !== end) astar(start, end);
+        }
+      }
+    }
+
+    function scoreRoute(vehicle, orders, events, emptyDistance, loadedDistance) {
+      let pickupWait = 0;
+      let inCarMinutes = 0;
+      let latePickupMinutes = 0;
+      for (const order of orders) {
+        const pickup = events.find(event => event.orderId === order.id && event.type === "O");
+        const dropoff = events.find(event => event.orderId === order.id && event.type === "D");
+        if (!pickup || !dropoff) return null;
+        pickupWait += Math.max(0, pickup.time / 60 - order.earliest);
+        inCarMinutes += Math.max(0, dropoff.time - pickup.time) / 60;
+        latePickupMinutes += Math.max(0, pickup.time / 60 - order.latest);
+      }
+      const distance = emptyDistance + loadedDistance;
+      const mileageUtilRate = distance > 0 ? loadedDistance / distance : 0;
+      const loadRate = Math.min(1, orders.reduce((sum, order) => sum + order.passengers, 0) / Math.max(1, vehicle.capacity));
+      const passengerCost = (
+        pickupWait * CURRENT_ROUTE_COST_CONFIG.WAIT_COST_PER_MIN
+        + inCarMinutes * CURRENT_ROUTE_COST_CONFIG.IN_CAR_COST_PER_MIN
+        + latePickupMinutes * CURRENT_ROUTE_COST_CONFIG.LATE_PICKUP_COST_PER_MIN
+      );
+      const enterpriseCost = (
+        (1 - mileageUtilRate) * CURRENT_ROUTE_COST_CONFIG.MILEAGE_UTIL_PENALTY_BASE
+        + (1 - loadRate) * CURRENT_ROUTE_COST_CONFIG.LOAD_RATE_PENALTY_BASE
+      );
+      const socialCost = distance / 1000 * CURRENT_ROUTE_COST_CONFIG.SOCIAL_DISTANCE_COST_PER_KM;
+      const cost = (
+        CURRENT_ROUTE_COST_CONFIG.W_PASSENGER * passengerCost
+        + CURRENT_ROUTE_COST_CONFIG.W_ENTERPRISE * enterpriseCost
+        + CURRENT_ROUTE_COST_CONFIG.W_SOCIAL * socialCost
+      );
+      return {
+        cost,
+        distance,
+        emptyDistance,
+        loadedDistance,
+        events: events.slice(),
+        pickupWait,
+        inCarMinutes,
+        latePickupMinutes,
+        mileageUtilRate,
+        loadRate
+      };
+    }
+
+    function evaluateBundle(vehicle, orders) {
+      if (!orders.length || orders.length > state.maxBundleSize) return null;
+      for (const order of orders) {
+        const route = astar(order.origin, order.destination);
+        if (!Number.isFinite(route.distance)) return null;
+      }
+      let best = null;
+      const picked = new Set();
+      const dropped = new Set();
+
+      function visit(currentNode, currentTime, load, emptyDistance, loadedDistance, events) {
+        if (dropped.size === orders.length) {
+          const candidate = scoreRoute(vehicle, orders, events, emptyDistance, loadedDistance);
+          if (candidate && (!best || candidate.cost < best.cost)) best = candidate;
+          return;
+        }
+
+        for (const order of orders) {
+          if (!picked.has(order.id)) {
+            if (load + order.passengers > vehicle.capacity) continue;
+            const leg = astar(currentNode, order.origin);
+            if (!Number.isFinite(leg.distance)) continue;
+            const arrival = currentTime + leg.distance / AVG_SPEED_MPS;
+            const earlyWaitSeconds = Math.max(0, order.earliest * 60 - arrival);
+            if (earlyWaitSeconds > MAX_EARLY_PICKUP_WAIT_SECONDS) continue;
+            const serviceTime = Math.max(arrival, order.earliest * 60);
+            picked.add(order.id);
+            events.push({ orderId: order.id, type: "O", node: order.origin, time: serviceTime, load: load + order.passengers });
+            visit(
+              order.origin,
+              serviceTime,
+              load + order.passengers,
+              emptyDistance + (load === 0 ? leg.distance : 0),
+              loadedDistance + (load > 0 ? leg.distance : 0),
+              events
+            );
+            events.pop();
+            picked.delete(order.id);
+          } else if (!dropped.has(order.id)) {
+            const leg = astar(currentNode, order.destination);
+            if (!Number.isFinite(leg.distance)) continue;
+            const arrival = currentTime + leg.distance / AVG_SPEED_MPS;
+            dropped.add(order.id);
+            events.push({ orderId: order.id, type: "D", node: order.destination, time: arrival, load: load - order.passengers });
+            visit(
+              order.destination,
+              arrival,
+              load - order.passengers,
+              emptyDistance + (load === 0 ? leg.distance : 0),
+              loadedDistance + (load > 0 ? leg.distance : 0),
+              events
+            );
+            events.pop();
+            dropped.delete(order.id);
+          }
+        }
+      }
+
+      visit(vehicle.node, 0, 0, 0, 0, []);
+      return best;
+    }
+
+    function buildShareabilityGraph(vehicles, orders, evaluator) {
+      const edges = [];
+      const edgeSet = new Set();
+      for (let i = 0; i < orders.length; i += 1) {
+        for (let j = i + 1; j < orders.length; j += 1) {
+          const pair = [orders[i], orders[j]];
+          if (vehicles.some(vehicle => evaluator(vehicle, pair))) {
+            const key = `${orders[i].id}|${orders[j].id}`;
+            edgeSet.add(key);
+            edgeSet.add(`${orders[j].id}|${orders[i].id}`);
+            edges.push([orders[i].id, orders[j].id]);
+          }
+        }
+      }
+      return { edges, edgeSet };
+    }
+
+    function generateTrips(vehicles, orders, graph, evaluator) {
+      const subsets = [];
+      for (let size = 1; size <= state.maxBundleSize; size += 1) {
+        for (const subset of combinations(orders, size)) {
+          let clique = true;
+          for (let i = 0; i < subset.length && clique; i += 1) {
+            for (let j = i + 1; j < subset.length; j += 1) {
+              if (!graph.edgeSet.has(`${subset[i].id}|${subset[j].id}`)) { clique = false; break; }
+            }
+          }
+          if (clique) subsets.push(subset);
+        }
+      }
+      const byVehicle = new Map();
+      let feasibleEdges = 0;
+      for (const vehicle of vehicles) {
+        const trips = [];
+        for (const subset of subsets) {
+          const route = evaluator(vehicle, subset);
+          if (!route) continue;
+          feasibleEdges += 1;
+          trips.push({ vehicle, orders: subset, orderIds: subset.map(order => order.id), route, cost: route.cost });
+        }
+        trips.sort((a, b) => b.orders.length - a.orders.length || a.cost - b.cost);
+        byVehicle.set(vehicle.id, trips);
+      }
+      return { subsets, byVehicle, feasibleEdges };
+    }
+
+    function solveGlobal(vehicles, orders, tripsByVehicle) {
+      let best = null;
+      let explored = 0;
+      const used = new Set();
+
+      function visit(vehicleIndex, assignments, routeCost) {
+        explored += 1;
+        if (vehicleIndex >= vehicles.length) {
+          const served = used.size;
+          const objective = routeCost + (orders.length - served) * UNASSIGNED_PENALTY;
+          if (!best || served > best.served || (served === best.served && objective < best.objective)) {
+            best = { assignments: assignments.slice(), served, routeCost, objective, exploredStates: explored };
+          }
+          return;
+        }
+        if (best && used.size + (vehicles.length - vehicleIndex) * state.maxBundleSize < best.served) return;
+        const vehicle = vehicles[vehicleIndex];
+        for (const trip of tripsByVehicle.get(vehicle.id)) {
+          if (trip.orderIds.some(id => used.has(id))) continue;
+          trip.orderIds.forEach(id => used.add(id));
+          assignments.push(trip);
+          visit(vehicleIndex + 1, assignments, routeCost + trip.cost);
+          assignments.pop();
+          trip.orderIds.forEach(id => used.delete(id));
+        }
+        visit(vehicleIndex + 1, assignments, routeCost);
+      }
+
+      visit(0, [], 0);
+      const servedIds = new Set(best.assignments.flatMap(item => item.orderIds));
+      best.unassigned = orders.filter(order => !servedIds.has(order.id));
+      best.exploredStates = explored;
+      return best;
+    }
+
+    function evaluateFixedSequence(vehicle, orders, sequence) {
+      const orderMap = new Map(orders.map(order => [order.id, order]));
+      const picked = new Set();
+      const dropped = new Set();
+      const events = [];
+      let currentNode = vehicle.node;
+      let currentTime = 0;
+      let load = 0;
+      let emptyDistance = 0;
+      let loadedDistance = 0;
+
+      for (const step of sequence) {
+        const order = orderMap.get(step.orderId);
+        if (!order) return null;
+        const target = step.type === "O" ? order.origin : order.destination;
+        const leg = astar(currentNode, target);
+        if (!Number.isFinite(leg.distance)) return null;
+        if (load === 0) emptyDistance += leg.distance;
+        else loadedDistance += leg.distance;
+        currentTime += leg.distance / AVG_SPEED_MPS;
+
+        if (step.type === "O") {
+          if (picked.has(order.id) || dropped.has(order.id) || load + order.passengers > vehicle.capacity) return null;
+          const earlyWaitSeconds = Math.max(0, order.earliest * 60 - currentTime);
+          if (earlyWaitSeconds > MAX_EARLY_PICKUP_WAIT_SECONDS) return null;
+          currentTime = Math.max(currentTime, order.earliest * 60);
+          load += order.passengers;
+          picked.add(order.id);
+        } else if (step.type === "D") {
+          if (!picked.has(order.id) || dropped.has(order.id)) return null;
+          load -= order.passengers;
+          if (load < 0) return null;
+          dropped.add(order.id);
+        } else {
+          return null;
+        }
+        events.push({ orderId: order.id, type: step.type, node: target, time: currentTime, load });
+        currentNode = target;
+      }
+      if (dropped.size !== orders.length) return null;
+      return scoreRoute(vehicle, orders, events, emptyDistance, loadedDistance);
+    }
+
+    function insertOrderIntoCurrentRoute(vehicle, current, newOrder) {
+      const orders = current.orders.concat(newOrder);
+      const baseSequence = current.route
+        ? current.route.events.map(event => ({ orderId: event.orderId, type: event.type }))
+        : [];
+      let best = null;
+      for (let originIndex = 0; originIndex <= baseSequence.length; originIndex += 1) {
+        const withOrigin = baseSequence.slice();
+        withOrigin.splice(originIndex, 0, { orderId: newOrder.id, type: "O" });
+        for (let destinationIndex = originIndex + 1; destinationIndex <= withOrigin.length; destinationIndex += 1) {
+          const candidateSequence = withOrigin.slice();
+          candidateSequence.splice(destinationIndex, 0, { orderId: newOrder.id, type: "D" });
+          const route = evaluateFixedSequence(vehicle, orders, candidateSequence);
+          if (route && (!best || route.cost < best.cost)) best = route;
+        }
+      }
+
+      if (!best) return null;
+      let improved = true;
+      let safety = 50;
+      while (improved && safety > 0) {
+        safety -= 1;
+        improved = false;
+        const bestSequence = best.events.map(event => ({ orderId: event.orderId, type: event.type }));
+        for (let left = 0; left < bestSequence.length - 1 && !improved; left += 1) {
+          for (let right = left + 1; right < bestSequence.length; right += 1) {
+            const mutated = bestSequence.slice();
+            const reversed = mutated.slice(left, right + 1).reverse();
+            mutated.splice(left, reversed.length, ...reversed);
+            const seenOrigins = new Set();
+            let valid = true;
+            for (const step of mutated) {
+              if (step.type === "O") seenOrigins.add(step.orderId);
+              else if (!seenOrigins.has(step.orderId)) { valid = false; break; }
+            }
+            if (!valid) continue;
+            const route = evaluateFixedSequence(vehicle, orders, mutated);
+            if (route && route.cost < best.cost - 0.001) {
+              best = route;
+              improved = true;
+              break;
+            }
+          }
+        }
+      }
+      return best;
+    }
+
+    function routeAlignmentScore(order, existingOrders) {
+      let bestScore = 0;
+      for (const existing of existingOrders) {
+        const sameOrigin = order.origin === existing.origin;
+        const sameDestination = order.destination === existing.destination;
+        if (sameOrigin && sameDestination) return 3;
+        if (sameOrigin || sameDestination) bestScore = Math.max(bestScore, 2);
+        if (
+          order.origin === existing.destination
+          || order.destination === existing.origin
+        ) bestScore = Math.max(bestScore, 1);
+      }
+      return bestScore;
+    }
+
+    function cancelRiskScore(order) {
+      const waitMinutes = Math.max(0, Number(order.requestAgeMinutes) || 0);
+      if (waitMinutes <= 10) return 0;
+      if (waitMinutes <= 30) return (waitMinutes - 10) / 20 * 40;
+      if (waitMinutes <= 60) return 40 + (waitMinutes - 30) / 30 * 40;
+      return 100;
+    }
+
+    function bestCurrentVehicleCandidate(order, vehicles, assignmentStates) {
+      const idleCandidates = [];
+      const busyCandidates = [];
+      for (const vehicle of vehicles) {
+        const current = assignmentStates.get(vehicle.id);
+        if (current.orders.length >= state.maxBundleSize || order.passengers > vehicle.capacity) continue;
+        const route = insertOrderIntoCurrentRoute(vehicle, current, order);
+        if (!route) continue;
+        const absoluteCost = route.cost;
+        const incrementalCost = absoluteCost - current.cost;
+        const pickupEvent = route.events.find(event => event.orderId === order.id && event.type === "O");
+        const pickupWaitSeconds = pickupEvent
+          ? Math.max(0, pickupEvent.time - order.earliest * 60)
+          : Infinity;
+        if (!current.orders.length) {
+          idleCandidates.push({ vehicle, current, route, cost: incrementalCost, absoluteCost, pickupWaitSeconds, alignmentScore: 0, idle: true });
+          continue;
+        }
+        if (absoluteCost > CURRENT_ROUTE_COST_CONFIG.BUSY_VEHICLE_MAX_ABSOLUTE_COST) continue;
+        busyCandidates.push({
+          vehicle,
+          current,
+          route,
+          cost: incrementalCost + CURRENT_ROUTE_COST_CONFIG.PLANNED_ROUTE_INSERTION_PENALTY,
+          absoluteCost,
+          pickupWaitSeconds,
+          alignmentScore: routeAlignmentScore(order, current.orders),
+          idle: false
+        });
+      }
+
+      idleCandidates.sort((left, right) => left.cost - right.cost);
+      const bestIdle = idleCandidates[0];
+      let candidates;
+      let policy;
+      if (bestIdle && bestIdle.pickupWaitSeconds <= CURRENT_ROUTE_COST_CONFIG.IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS) {
+        candidates = idleCandidates;
+        policy = "idle_wait_within_threshold";
+        candidates.sort((left, right) => left.cost - right.cost);
+      } else {
+        const alignedBusy = busyCandidates.filter(candidate => candidate.alignmentScore > 0);
+        if (alignedBusy.length) {
+          candidates = alignedBusy;
+          policy = "route_aligned_busy";
+          candidates.sort((left, right) => right.alignmentScore - left.alignmentScore || left.cost - right.cost);
+        } else {
+          candidates = idleCandidates.concat(busyCandidates);
+          policy = "lowest_cost";
+          candidates.sort((left, right) => left.cost - right.cost);
+        }
+      }
+      if (!candidates.length) return null;
+      return {
+        ...candidates[0],
+        secondCost: candidates.length > 1 ? candidates[1].cost : Infinity,
+        policy
+      };
+    }
+
+    function solveCurrentDispatcher(vehicles, orders) {
+      const assignmentStates = new Map(vehicles.map(vehicle => [vehicle.id, { vehicle, orders: [], route: null, cost: 0 }]));
+      const remaining = orders.slice();
+      const decisionLog = [];
+
+      while (remaining.length) {
+        const orderCandidates = [];
+        for (let index = 0; index < remaining.length; index += 1) {
+          const order = remaining[index];
+          const candidate = bestCurrentVehicleCandidate(order, vehicles, assignmentStates);
+          if (!candidate) continue;
+          orderCandidates.push({
+            order,
+            orderIndex: index,
+            candidate,
+            regret: Number.isFinite(candidate.secondCost) ? Math.max(0, candidate.secondCost - candidate.cost) : null,
+            cancelRisk: cancelRiskScore(order)
+          });
+        }
+        if (!orderCandidates.length) break;
+
+        const finiteRegrets = orderCandidates.filter(item => item.regret !== null).map(item => item.regret);
+        const maxFiniteRegret = finiteRegrets.length ? Math.max(...finiteRegrets) : 0;
+        for (const item of orderCandidates) {
+          item.normalizedRegret = item.regret === null
+            ? 100
+            : maxFiniteRegret > 0 ? Math.min(100, item.regret / maxFiniteRegret * 100) : 0;
+          item.priority = 0.6 * item.cancelRisk + 0.4 * item.normalizedRegret;
+        }
+        orderCandidates.sort((left, right) => (
+          right.priority - left.priority
+          || right.cancelRisk - left.cancelRisk
+          || right.normalizedRegret - left.normalizedRegret
+        ));
+        const selected = orderCandidates[0];
+        const current = selected.candidate.current;
+        current.orders.push(selected.order);
+        current.route = selected.candidate.route;
+        current.cost = selected.candidate.absoluteCost;
+        decisionLog.push({
+          round: decisionLog.length + 1,
+          orderId: selected.order.id,
+          vehicleId: selected.candidate.vehicle.id,
+          priority: selected.priority,
+          regret: selected.regret,
+          policy: selected.candidate.policy
+        });
+        remaining.splice(selected.orderIndex, 1);
+      }
+
+      const selectedAssignments = [...assignmentStates.values()].filter(item => item.orders.length).map(item => ({
+        vehicle: item.vehicle,
+        orders: item.orders,
+        orderIds: item.orders.map(order => order.id),
+        route: item.route,
+        cost: item.cost
+      }));
+      const servedIds = new Set(selectedAssignments.flatMap(item => item.orderIds));
+      const unassigned = orders.filter(order => !servedIds.has(order.id));
+      const routeCost = selectedAssignments.reduce((sum, item) => sum + item.cost, 0);
+      return {
+        assignments: selectedAssignments,
+        served: servedIds.size,
+        routeCost,
+        objective: routeCost + unassigned.length * UNASSIGNED_PENALTY,
+        unassigned,
+        decisionLog
+      };
+    }
+
+    function summarize(solution) {
+      const distance = solution.assignments.reduce((sum, item) => sum + item.route.distance, 0) / 1000;
+      const pickupWait = solution.assignments.reduce((sum, item) => sum + item.route.pickupWait, 0);
+      return {
+        served: solution.served,
+        distance,
+        averageWait: solution.served ? pickupWait / solution.served : 0,
+        objective: solution.objective
+      };
+    }
+
+    function solve() {
+      const started = performance.now();
+      state.pathCache.clear();
+      state.pathStats = { searches: 0, hits: 0, expanded: 0 };
+      precomputeRelevantPaths(state.batch);
+      const evaluationCache = new Map();
+      function evaluator(vehicle, orders) {
+        const ids = orders.map(order => order.id).sort().join(",");
+        const key = `${vehicle.id}|${ids}`;
+        if (!evaluationCache.has(key)) evaluationCache.set(key, evaluateBundle(vehicle, orders));
+        return evaluationCache.get(key);
+      }
+      const graph = buildShareabilityGraph(state.batch.vehicles, state.batch.orders, evaluator);
+      const trips = generateTrips(state.batch.vehicles, state.batch.orders, graph, evaluator);
+      const globalStarted = performance.now();
+      const global = solveGlobal(state.batch.vehicles, state.batch.orders, trips.byVehicle);
+      const globalMs = performance.now() - globalStarted;
+      const currentStarted = performance.now();
+      const current = solveCurrentDispatcher(state.batch.vehicles, state.batch.orders);
+      const currentMs = performance.now() - currentStarted;
+      state.result = {
+        graph,
+        trips,
+        global,
+        current,
+        globalSummary: summarize(global),
+        currentSummary: summarize(current),
+        globalMs,
+        currentMs,
+        totalMs: performance.now() - started,
+        evaluationCount: evaluationCache.size,
+        pathStats: { ...state.pathStats }
+      };
+      render();
+    }
+
+    function mapProjection() {
+      const [minLon, minLat, maxLon, maxLat] = NETWORK.meta.bounds;
+      const padding = 24;
+      const width = 1100 - padding * 2;
+      const height = 600 - padding * 2;
+      return nodeId => {
+        const [lon, lat] = NETWORK.nodes[nodeId];
+        return [padding + (lon - minLon) / (maxLon - minLon) * width, 600 - padding - (lat - minLat) / (maxLat - minLat) * height];
+      };
+    }
+
+    function solutionForView() { return state.view === "global" ? state.result.global : state.result.current; }
+
+    function renderMap() {
+      const svg = document.getElementById("roadMap");
+      svg.replaceChildren();
+      const project = mapProjection();
+      const roadLayer = svgElement("g", { opacity: 0.75 });
+      for (const [source, target, , highway] of NETWORK.segments) {
+        const a = project(source);
+        const b = project(target);
+        roadLayer.appendChild(svgElement("line", {
+          x1: a[0], y1: a[1], x2: b[0], y2: b[1],
+          stroke: highway === "primary" || highway === "secondary" ? "#aeb8c7" : "#cbd2dd",
+          "stroke-width": highway === "primary" ? 1.55 : 0.9,
+          "stroke-linecap": "round"
+        }));
+      }
+      svg.appendChild(roadLayer);
+
+      const routeLayer = svgElement("g");
+      for (const assignment of solutionForView().assignments) {
+        const sequence = [assignment.vehicle.node].concat(assignment.route.events.map(event => event.node));
+        for (let index = 0; index < sequence.length - 1; index += 1) {
+          const path = astar(sequence[index], sequence[index + 1]).path;
+          const points = path.map(node => project(node).join(",")).join(" ");
+          routeLayer.appendChild(svgElement("polyline", {
+            points,
+            fill: "none",
+            stroke: assignment.vehicle.color,
+            "stroke-width": 4.2,
+            "stroke-linecap": "round",
+            "stroke-linejoin": "round",
+            opacity: 0.88
+          }));
+        }
+      }
+      svg.appendChild(routeLayer);
+
+      const pointLayer = svgElement("g");
+      state.batch.orders.forEach((order, index) => {
+        [[order.origin, "O", "#198754"], [order.destination, "D", "#cf3f4d"]].forEach(([node, type, color]) => {
+          const [x, y] = project(node);
+          pointLayer.appendChild(svgElement("circle", { cx: x, cy: y, r: 7, fill: color, stroke: "#fff", "stroke-width": 2 }));
+          const text = svgElement("text", { x: x + 9, y: y - 8, fill: color, "font-size": 12, "font-weight": 800, stroke: "#fff", "stroke-width": 3, "paint-order": "stroke" });
+          text.textContent = `${type}${index + 1}`;
+          pointLayer.appendChild(text);
+        });
+      });
+      state.batch.vehicles.forEach(vehicle => {
+        const [x, y] = project(vehicle.node);
+        pointLayer.appendChild(svgElement("rect", { x: x - 13, y: y - 10, width: 26, height: 20, rx: 4, fill: vehicle.color, stroke: "#fff", "stroke-width": 2 }));
+        const text = svgElement("text", { x, y: y + 4, fill: "#fff", "font-size": 10, "font-weight": 800, "text-anchor": "middle" });
+        text.textContent = vehicle.id;
+        pointLayer.appendChild(text);
+      });
+      svg.appendChild(pointLayer);
+    }
+
+    function renderShareGraph() {
+      const svg = document.getElementById("shareGraph");
+      svg.replaceChildren();
+      const orders = state.batch.orders;
+      const positions = new Map();
+      orders.forEach((order, index) => {
+        const angle = -Math.PI / 2 + index * Math.PI * 2 / orders.length;
+        positions.set(order.id, [210 + Math.cos(angle) * 145, 115 + Math.sin(angle) * 82]);
+      });
+      for (const [left, right] of state.result.graph.edges) {
+        const b = positions.get(right);
+        svg.appendChild(svgElement("line", { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "#83a7d9", "stroke-width": 2, opacity: 0.75 }));
+      }
+      orders.forEach(order => {
+        const [x, y] = positions.get(order.id);
+        svg.appendChild(svgElement("circle", { cx: x, cy: y, r: 18, fill: "#fff", stroke: "#2768bd", "stroke-width": 2 }));
+        const text = svgElement("text", { x, y: y + 4, fill: "#234c80", "text-anchor": "middle", "font-size": 11, "font-weight": 800 });
+        text.textContent = order.id;
+        svg.appendChild(text);
+      });
+    }
+
+    function renderAssignments() {
+      const solution = solutionForView();
+      const currentDecisionOrder = state.result.current.decisionLog.map(item => item.orderId).join(" → ");
+      document.getElementById("assignmentNote").textContent = state.view === "global"
+        ? "全局选择互不冲突的车辆-订单组合"
+        : `Regret-2 派单顺序：${currentDecisionOrder || "无可行订单"}`;
+      const list = document.getElementById("assignmentList");
+      if (!solution.assignments.length) {
+        list.innerHTML = '<div class="empty">当前没有可行分配。</div>';
+        return;
+      }
+      list.innerHTML = solution.assignments.map(assignment => {
+        const sequence = assignment.route.events.map(event => `${event.type}${event.orderId.replace(/^R/, "")}`).join(" → ");
+        return `<div class="assignment">
+          <div class="vehicle-tag" style="background:${assignment.vehicle.color}">${assignment.vehicle.id}</div>
+          <div><div class="assignment-orders">${assignment.orderIds.join(" + ")}</div><div class="assignment-sequence">${sequence}</div></div>
+          <div class="assignment-cost">${assignment.cost.toFixed(1)}</div>
+        </div>`;
+      }).join("") + (solution.unassigned.length ? `<div class="empty bad">未分配：${solution.unassigned.map(order => order.id).join("、")}</div>` : "");
+    }
+
+    function renderMetrics() {
+      const global = state.result.globalSummary;
+      const current = state.result.currentSummary;
+      const serviceDelta = global.served - current.served;
+      const objectiveGain = current.objective ? (current.objective - global.objective) / current.objective * 100 : 0;
+      const items = [
+        ["组合已服务", `${global.served}/${state.batch.orders.length}`, `${serviceDelta >= 0 ? "+" : ""}${serviceDelta} 单 vs 当前算法`, serviceDelta < 0],
+        ["组合目标值", global.objective.toFixed(2), `${objectiveGain >= 0 ? "降低" : "增加"} ${Math.abs(objectiveGain).toFixed(1)}%`, objectiveGain < 0],
+        ["组合总里程", `${global.distance.toFixed(2)} km`, `当前 ${current.distance.toFixed(2)} km`, false],
+        ["平均接客", `${global.averageWait.toFixed(1)} min`, `当前 ${current.averageWait.toFixed(1)} min`, false],
+        ["共享/候选", `${state.result.graph.edges.length} / ${state.result.trips.subsets.length}`, `${state.result.trips.feasibleEdges} 条车-组合边`, false],
+        ["本轮计算", `${state.result.totalMs.toFixed(1)} ms`, `${state.result.pathStats.searches} 次 A*`, false]
+      ];
+      document.getElementById("metrics").innerHTML = items.map(([label, value, delta, bad]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}<span class="metric-delta ${bad ? "bad" : ""}">${delta}</span></div></div>`).join("");
+    }
+
+    function assignmentMap(solution) {
+      const map = new Map();
+      solution.assignments.forEach(item => item.orderIds.forEach(id => map.set(id, item.vehicle.id)));
+      return map;
+    }
+
+    function renderTables() {
+      const global = state.result.globalSummary;
+      const current = state.result.currentSummary;
+      const rows = [
+        ["服务订单", `${global.served}/${state.batch.orders.length}`, `${current.served}/${state.batch.orders.length}`, global.served >= current.served],
+        ["未服务订单", state.result.global.unassigned.length, state.result.current.unassigned.length, state.result.global.unassigned.length <= state.result.current.unassigned.length],
+        ["总行驶里程", `${global.distance.toFixed(2)} km`, `${current.distance.toFixed(2)} km`, global.distance <= current.distance],
+        ["平均接客等待", `${global.averageWait.toFixed(2)} min`, `${current.averageWait.toFixed(2)} min`, global.averageWait <= current.averageWait],
+        ["含未服务罚分目标值", global.objective.toFixed(2), current.objective.toFixed(2), global.objective <= current.objective],
+        ["求解时间", `${state.result.globalMs.toFixed(2)} ms`, `${state.result.currentMs.toFixed(2)} ms`, null]
+      ];
+      document.getElementById("comparisonTable").innerHTML = `<thead><tr><th>指标</th><th>共享图 + 组合分配</th><th>项目当前算法</th><th>判断</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row[0]}</td><td>${row[1]}</td><td>${row[2]}</td><td class="${row[3] === null ? "" : row[3] ? "good" : "warn"}">${row[3] === null ? "性能参考" : row[3] ? "组合更优/持平" : "当前算法更优"}</td></tr>`).join("")}</tbody>`;
+
+      const globalMap = assignmentMap(state.result.global);
+      const currentMap = assignmentMap(state.result.current);
+      document.getElementById("orderTable").innerHTML = `<thead><tr><th>订单</th><th>人数</th><th>时间窗</th><th>起点节点</th><th>终点节点</th><th>组合分配</th><th>项目当前算法</th></tr></thead><tbody>${state.batch.orders.map(order => `<tr><td><strong>${order.id}</strong></td><td>${order.passengers}</td><td>${order.earliest.toFixed(1)}–${order.latest.toFixed(1)} min</td><td class="mono">${order.origin}</td><td class="mono">${order.destination}</td><td class="${globalMap.has(order.id) ? "good" : "bad"}">${globalMap.get(order.id) || "未分配"}</td><td class="${currentMap.has(order.id) ? "good" : "bad"}">${currentMap.get(order.id) || "未分配"}</td></tr>`).join("")}</tbody>`;
+    }
+
+    function render() {
+      renderMetrics();
+      renderMap();
+      renderShareGraph();
+      renderAssignments();
+      renderTables();
+      document.querySelectorAll("#viewTabs button").forEach(button => button.classList.toggle("active", button.dataset.view === state.view));
+    }
+
+    function regenerate() {
+      state.seed = Math.trunc(Number(document.getElementById("seedInput").value) || 1);
+      state.orderCount = Number(document.getElementById("orderCount").value);
+      state.batch = generateBatch(state.seed, state.orderCount);
+      updateBatchJson();
+      document.getElementById("editorStatus").textContent = `已生成 ${state.orderCount} 个批量订单和 3 辆测试车。`;
+      document.getElementById("editorStatus").classList.remove("error");
+      solve();
+    }
+
+    function initialize() {
+      if (!NETWORK || !NETWORK.nodes || !NETWORK.nodes.length) {
+        document.body.innerHTML = '<div style="padding:24px;color:#b42318">路网数据加载失败，请确认 pazhou_network_data.js 与本文件位于同一目录。</div>';
+        return;
+      }
+      const query = new URLSearchParams(window.location.search);
+      const queryOrderCount = query.has("orders") ? Number(query.get("orders")) : NaN;
+      const querySeed = query.has("seed") ? Number(query.get("seed")) : NaN;
+      const queryBundleSize = query.has("bundle") ? Number(query.get("bundle")) : NaN;
+      const queryView = String(query.get("view") || "");
+      if ([4, 5, 6, 7, 8].includes(queryOrderCount)) document.getElementById("orderCount").value = String(queryOrderCount);
+      if (Number.isFinite(querySeed)) document.getElementById("seedInput").value = String(Math.trunc(querySeed));
+      if ([2, 3].includes(queryBundleSize)) {
+        state.maxBundleSize = queryBundleSize;
+        document.querySelectorAll("#bundleControl button").forEach(item => item.classList.toggle("active", Number(item.dataset.size) === queryBundleSize));
+      }
+      if (["global", "current"].includes(queryView)) state.view = queryView;
+      document.getElementById("sourceBadge").textContent = `${NETWORK.meta.source} · ${NETWORK.meta.nodes.toLocaleString()} 节点 · ${NETWORK.meta.directed_edges.toLocaleString()} 有向边`;
+      document.getElementById("generateButton").addEventListener("click", regenerate);
+      document.getElementById("solveButton").addEventListener("click", solve);
+      document.getElementById("bundleControl").addEventListener("click", event => {
+        const button = event.target.closest("button[data-size]");
+        if (!button) return;
+        state.maxBundleSize = Number(button.dataset.size);
+        document.querySelectorAll("#bundleControl button").forEach(item => item.classList.toggle("active", item === button));
+        solve();
+      });
+      document.getElementById("viewTabs").addEventListener("click", event => {
+        const button = event.target.closest("button[data-view]");
+        if (!button) return;
+        state.view = button.dataset.view;
+        renderMap();
+        renderAssignments();
+        document.querySelectorAll("#viewTabs button").forEach(item => item.classList.toggle("active", item === button));
+      });
+      document.getElementById("applyJsonButton").addEventListener("click", () => {
+        const status = document.getElementById("editorStatus");
+        try {
+          state.batch.orders = parseBatchJson();
+          state.orderCount = state.batch.orders.length;
+          document.getElementById("orderCount").value = String(state.orderCount);
+          status.textContent = `已应用 ${state.orderCount} 条订单，坐标已吸附至琶洲 SHP 路网。`;
+          status.classList.remove("error");
+          solve();
+        } catch (error) {
+          status.textContent = error.message || String(error);
+          status.classList.add("error");
+        }
+      });
+      regenerate();
+    }
+
+    initialize();
+  </script>
+</body>
+
+</html>

@@ -130,11 +130,15 @@ def _normalize_route_cost_config_payload(data):
     """规范化路线成本配置更新请求。"""
     if not isinstance(data, dict):
         raise ValueError("请求体必须是 JSON 对象")
-    allowed_fields = set(CoreDispatcher.ROUTE_COST_CONFIG_DEFAULTS)
+    allowed_fields = set(CoreDispatcher.ROUTE_COST_CONFIG_DEFAULTS) | {"operation_area_id"}
     unknown_fields = sorted(key for key in data if key not in allowed_fields)
     if unknown_fields:
         raise ValueError(f"不支持的路线成本参数: {', '.join(unknown_fields)}")
-    return {key: data[key] for key in data}
+    return {
+        key: data[key]
+        for key in data
+        if key != "operation_area_id"
+    }
 
 
 def _vehicle_to_dict(v):
@@ -1426,6 +1430,7 @@ def _clear_operation_area_runtime_after_delete(operation_area_id):
     state.city_maps.pop(area_id, None)
     state.operation_area_records.pop(area_id, None)
     CoreDispatcher.set_operation_restriction_policy(None, operation_area_id=area_id)
+    CoreDispatcher.clear_route_cost_config(area_id)
 
 
 def _set_runtime_vehicle_status(vehicle, operation_status):
@@ -2257,14 +2262,40 @@ def admin_dispatch_matching_window_config():
 
 @bp.route("/admin/dispatch/route-cost-config", methods=["GET", "POST", "PUT"])
 def admin_dispatch_route_cost_config():
-    """读取或更新路线插单成本函数运行时配置。"""
-    if request.method == "GET":
-        return jsonify(CoreDispatcher.route_cost_config_response())
+    """读取或更新指定运营区的路线插单成本函数运行时配置。"""
+    data = None if request.method == "GET" else request.get_json(silent=True)
+    raw_area_id = request.args.get("operation_area_id") if request.method == "GET" else (
+        data.get("operation_area_id") if isinstance(data, dict) else None
+    )
+    if raw_area_id in (None, ""):
+        return jsonify({
+            "error": "operation_area_id_required",
+            "message": "缺少 operation_area_id",
+        }), 400
+    try:
+        operation_area_id = int(raw_area_id)
+        if operation_area_id <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({
+            "error": "operation_area_id_invalid",
+            "message": "operation_area_id 必须是正整数",
+            "operation_area_id": raw_area_id,
+        }), 400
 
-    data = request.get_json(silent=True)
+    if persistence.get_operation_area_by_area_id(operation_area_id) is None:
+        return jsonify({
+            "error": "operation_area_not_found",
+            "message": "operation_area_id 对应的运营区不存在",
+            "operation_area_id": operation_area_id,
+        }), 404
+
+    if request.method == "GET":
+        return jsonify(CoreDispatcher.route_cost_config_response(operation_area_id))
+
     try:
         updates = _normalize_route_cost_config_payload(data)
-        result = CoreDispatcher.configure_route_cost(**updates)
+        result = CoreDispatcher.configure_route_cost(operation_area_id, **updates)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({

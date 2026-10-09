@@ -1,0 +1,1122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>共享图与订单组合分配 Demo</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #687287;
+      --line: #d9dee8;
+      --panel: #ffffff;
+      --page: #f4f6f9;
+      --blue: #2367d1;
+      --teal: #05877d;
+      --amber: #c77813;
+      --red: #c9364f;
+      --green: #2a8b57;
+      --violet: #7654b5;
+      --shadow: 0 8px 24px rgba(23, 32, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--page);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 14px;
+    }
+
+    button, select { font: inherit; }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+    }
+
+    .toolbar {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 10px 22px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .brand {
+      min-width: 230px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.35;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .brand p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .controls {
+      flex: 1;
+      display: flex;
+      justify-content: flex-end;
+      align-items: end;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .control {
+      display: grid;
+      gap: 5px;
+    }
+
+    .control label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    select, .segmented, .primary-button, .icon-button {
+      height: 36px;
+      border: 1px solid #cbd2df;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    select {
+      min-width: 146px;
+      padding: 0 30px 0 10px;
+    }
+
+    .segmented {
+      display: inline-grid;
+      grid-template-columns: repeat(2, 48px);
+      overflow: hidden;
+    }
+
+    .segmented button {
+      border: 0;
+      border-right: 1px solid #d5dbe6;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .segmented button:last-child { border-right: 0; }
+    .segmented button.active { color: #fff; background: var(--blue); }
+
+    .primary-button {
+      min-width: 108px;
+      padding: 0 16px;
+      border-color: var(--blue);
+      color: #fff;
+      background: var(--blue);
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .primary-button:hover { background: #1759bd; }
+
+    .icon-button {
+      width: 36px;
+      padding: 0;
+      cursor: pointer;
+      font-size: 18px;
+    }
+
+    .icon-button:hover { border-color: var(--blue); color: var(--blue); }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: 0 22px;
+    }
+
+    .metric {
+      min-height: 76px;
+      padding: 13px 16px;
+      border-right: 1px solid #e5e8ef;
+    }
+
+    .metric:first-child { padding-left: 0; }
+    .metric:last-child { border-right: 0; }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value { margin-top: 5px; font-size: 22px; font-weight: 750; }
+    .metric-delta { margin-left: 5px; font-size: 12px; font-weight: 600; color: var(--green); }
+    .metric-delta.bad { color: var(--red); }
+
+    main {
+      padding: 16px 22px 24px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: minmax(0, 1.7fr) minmax(340px, 0.8fr);
+      align-content: start;
+    }
+
+    .panel {
+      min-width: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      min-height: 48px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid #e5e8ef;
+    }
+
+    .panel-title { font-size: 14px; font-weight: 700; }
+    .panel-meta { color: var(--muted); font-size: 12px; }
+
+    .view-tabs {
+      display: inline-flex;
+      gap: 2px;
+      padding: 2px;
+      border: 1px solid #d5dbe6;
+      border-radius: 6px;
+      background: #f5f7fa;
+    }
+
+    .view-tabs button {
+      height: 28px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 4px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .view-tabs button.active { color: #fff; background: var(--ink); }
+
+    .map-wrap {
+      position: relative;
+      height: 430px;
+      background: #f9fafc;
+    }
+
+    #routeMap, #shareGraph {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .legend {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 7px 9px;
+      border: 1px solid rgba(203, 210, 223, 0.9);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.94);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+    .legend-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--blue); }
+    .legend-dot.pickup { background: var(--green); }
+    .legend-dot.dropoff { background: var(--red); }
+    .legend-dot.vehicle { width: 11px; height: 11px; border-radius: 3px; background: var(--blue); }
+
+    .right-stack {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .graph-wrap { height: 258px; background: #fbfcfe; }
+
+    .bundle-list {
+      max-height: 250px;
+      overflow: auto;
+      padding: 8px 12px 12px;
+    }
+
+    .bundle-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) 76px;
+      gap: 8px;
+      align-items: center;
+      min-height: 38px;
+      border-bottom: 1px solid #edf0f4;
+    }
+
+    .bundle-row:last-child { border-bottom: 0; }
+    .bundle-vehicle { font-weight: 700; }
+    .bundle-orders { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bundle-cost { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+    .bottom-grid {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .table-wrap { overflow: auto; max-height: 330px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th, td {
+      height: 38px;
+      padding: 7px 10px;
+      border-bottom: 1px solid #e8ebf1;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: var(--muted);
+      background: #f8f9fb;
+      font-weight: 650;
+    }
+
+    .tag {
+      display: inline-block;
+      min-width: 28px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #fff;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .empty {
+      padding: 28px 14px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .status-line {
+      padding: 9px 14px;
+      color: var(--muted);
+      border-top: 1px solid #e5e8ef;
+      font-size: 12px;
+    }
+
+    @media (max-width: 1040px) {
+      .toolbar { align-items: flex-start; }
+      .metrics { grid-template-columns: repeat(3, 1fr); }
+      .metric:nth-child(3) { border-right: 0; }
+      main { grid-template-columns: 1fr; }
+      .right-stack { grid-template-columns: 1fr 1fr; }
+      .bottom-grid { grid-column: auto; }
+    }
+
+    @media (max-width: 720px) {
+      body { overflow-x: hidden; }
+      .toolbar {
+        padding: 12px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto;
+      }
+      .brand { min-width: 0; grid-column: 1; grid-row: 1; }
+      .controls {
+        width: 100%;
+        display: grid;
+        grid-column: 1;
+        grid-row: 2;
+        grid-template-columns: minmax(0, 1fr) 102px 38px;
+        justify-content: stretch;
+        align-items: end;
+      }
+      .controls .control:first-child { grid-column: 1 / 2; }
+      .controls select { width: 100%; min-width: 0; }
+      .controls .primary-button { grid-column: 1 / -1; width: 100%; }
+      .metrics { grid-template-columns: repeat(2, 1fr); padding: 0 12px; }
+      .metric { min-width: 0; padding: 12px 10px; }
+      .metric-value { font-size: 20px; }
+      .metric-delta { display: block; margin: 2px 0 0; font-size: 11px; }
+      .metric:nth-child(2n) { border-right: 0; }
+      .metric:nth-child(3) { border-right: 1px solid #e5e8ef; }
+      main { padding: 12px; }
+      .panel-header { flex-wrap: wrap; }
+      .map-wrap { height: 360px; }
+      .right-stack, .bottom-grid { grid-template-columns: 1fr; }
+      .bottom-grid { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="toolbar">
+      <div class="brand">
+        <h1>共享图与订单组合分配</h1>
+        <p>独立算法 Demo · 不连接现有后端</p>
+      </div>
+      <div class="controls">
+        <div class="control">
+          <label for="scenarioSelect">测试场景</label>
+          <select id="scenarioSelect">
+            <option value="scarce">稀缺车辆冲突</option>
+            <option value="corridor">走廊型拼单</option>
+            <option value="cross">交叉客流</option>
+          </select>
+        </div>
+        <div class="control">
+          <label>最大组合订单数</label>
+          <div class="segmented" id="bundleControl">
+            <button type="button" data-size="2">2</button>
+            <button type="button" data-size="3" class="active">3</button>
+          </div>
+        </div>
+        <button class="icon-button" id="resetButton" type="button" title="恢复默认场景">↻</button>
+        <button class="primary-button" id="runButton" type="button">重新计算</button>
+      </div>
+    </header>
+
+    <section class="metrics" id="metrics"></section>
+
+    <main>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">车辆分配与服务顺序</div>
+            <div class="panel-meta" id="mapMeta"></div>
+          </div>
+          <div class="view-tabs" id="viewTabs">
+            <button type="button" data-view="global" class="active">组合分配</button>
+            <button type="button" data-view="greedy">逐单贪心</button>
+          </div>
+        </div>
+        <div class="map-wrap">
+          <svg id="routeMap" viewBox="0 0 900 500" role="img" aria-label="车辆与订单路线示意图"></svg>
+          <div class="legend">
+            <span class="legend-item"><span class="legend-dot vehicle"></span>车辆</span>
+            <span class="legend-item"><span class="legend-dot pickup"></span>上车点</span>
+            <span class="legend-item"><span class="legend-dot dropoff"></span>下车点</span>
+            <span class="legend-item">实线：中选服务顺序</span>
+            <span class="legend-item">虚线：原始 O-D</span>
+          </div>
+        </div>
+      </section>
+
+      <aside class="right-stack">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">订单共享图</div>
+              <div class="panel-meta" id="graphMeta"></div>
+            </div>
+          </div>
+          <div class="graph-wrap">
+            <svg id="shareGraph" viewBox="0 0 420 258" role="img" aria-label="订单共享关系图"></svg>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">中选订单组合</div>
+              <div class="panel-meta" id="bundleMeta"></div>
+            </div>
+          </div>
+          <div class="bundle-list" id="bundleList"></div>
+        </section>
+      </aside>
+
+      <div class="bottom-grid">
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">批次订单</div>
+              <div class="panel-meta">时间单位：从批次开始后的分钟</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>订单</th><th>人数</th><th>起点</th><th>终点</th><th>最晚上车</th><th>组合结果</th></tr>
+              </thead>
+              <tbody id="orderRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">算法过程摘要</div>
+              <div class="panel-meta">先生成组合，再统一分配</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>阶段</th><th>规模</th><th>结果</th></tr>
+              </thead>
+              <tbody id="processRows"></tbody>
+            </table>
+          </div>
+          <div class="status-line" id="statusLine"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const VEHICLE_COLORS = ["#2367d1", "#05877d", "#c77813", "#7654b5"];
+    const AVG_SPEED_KMH = 24;
+    const SERVICE_MINUTES = 0.35;
+    const MAX_RIDE_RATIO = 1.55;
+    const MAX_EXTRA_RIDE_MINUTES = 5;
+    const UNASSIGNED_PENALTY = 180;
+
+    const scenarios = {
+      scarce: {
+        name: "稀缺车辆冲突",
+        vehicles: [
+          { id: "V1", plate: "粤A·S101", capacity: 4, lon: 113.3300, lat: 23.1080 },
+          { id: "V2", plate: "粤A·S102", capacity: 4, lon: 113.3500, lat: 23.1080 },
+          { id: "V3", plate: "粤A·S103", capacity: 4, lon: 113.3450, lat: 23.1170 }
+        ],
+        orders: [
+          order("R1", 3, "中轴西站", 113.3390, 23.1080, "西区总站", 113.3310, 23.1080, 0, 4.5),
+          order("R2", 2, "西区急单站", 113.3305, 23.1080, "东区总站", 113.3450, 23.1080, 0, 1.0),
+          order("R3", 2, "北区一站", 113.3455, 23.1160, "东区一站", 113.3490, 23.1080, 0, 4.0),
+          order("R4", 2, "北区二站", 113.3448, 23.1155, "东区二站", 113.3485, 23.1085, 0, 4.5)
+        ]
+      },
+      corridor: {
+        name: "走廊型拼单",
+        vehicles: [
+          { id: "V1", plate: "粤A·D101", capacity: 4, lon: 113.3370, lat: 23.1114 },
+          { id: "V2", plate: "粤A·D102", capacity: 4, lon: 113.3472, lat: 23.1041 },
+          { id: "V3", plate: "粤A·D103", capacity: 3, lon: 113.3538, lat: 23.1160 }
+        ],
+        orders: [
+          order("R1", 2, "开元广场", 113.3390, 23.1104, "赫基大厦", 113.3494, 23.1039, 0, 8),
+          order("R2", 1, "磨碟沙路", 113.3400, 23.1098, "海港花园", 113.3506, 23.1032, 0, 10),
+          order("R3", 2, "海港花园", 113.3499, 23.1040, "开元广场", 113.3383, 23.1111, 0, 7),
+          order("R4", 1, "天河公园北", 113.3527, 23.1151, "潭村南", 113.3487, 23.1051, 0, 7),
+          order("R5", 2, "天河公园东", 113.3540, 23.1144, "猎德大道", 113.3501, 23.1056, 1, 10),
+          order("R6", 1, "员村西", 113.3447, 23.1081, "珠江新城", 113.3376, 23.1060, 0, 12)
+        ]
+      },
+      cross: {
+        name: "交叉客流",
+        vehicles: [
+          { id: "V1", plate: "粤A·X201", capacity: 4, lon: 113.3378, lat: 23.1118 },
+          { id: "V2", plate: "粤A·X202", capacity: 4, lon: 113.3504, lat: 23.1042 },
+          { id: "V3", plate: "粤A·X203", capacity: 3, lon: 113.3516, lat: 23.1154 }
+        ],
+        orders: [
+          order("R1", 2, "西区一站", 113.3389, 23.1110, "东区一站", 113.3500, 23.1048, 0, 8),
+          order("R2", 1, "西区二站", 113.3402, 23.1102, "东区二站", 113.3511, 23.1040, 0, 9),
+          order("R3", 1, "东区一站", 113.3498, 23.1047, "西区一站", 113.3385, 23.1114, 0, 8),
+          order("R4", 2, "北区一站", 113.3524, 23.1147, "南区一站", 113.3456, 23.1041, 0, 9),
+          order("R5", 1, "南区二站", 113.3448, 23.1047, "北区二站", 113.3517, 23.1140, 0, 10),
+          order("R6", 1, "中心西站", 113.3442, 23.1088, "中心东站", 113.3480, 23.1080, 0, 6)
+        ]
+      }
+    };
+
+    let state = {
+      scenarioKey: "scarce",
+      maxBundleSize: 3,
+      view: "global",
+      result: null
+    };
+
+    function order(id, passengers, originName, oLon, oLat, destinationName, dLon, dLat, earliest, latest) {
+      return {
+        id,
+        passengers,
+        origin: { name: originName, lon: oLon, lat: oLat },
+        destination: { name: destinationName, lon: dLon, lat: dLat },
+        earliest,
+        latest
+      };
+    }
+
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function haversineKm(a, b) {
+      const rad = Math.PI / 180;
+      const lat1 = a.lat * rad;
+      const lat2 = b.lat * rad;
+      const dLat = (b.lat - a.lat) * rad;
+      const dLon = (b.lon - a.lon) * rad;
+      const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+      return 6371.0088 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+    }
+
+    function travelMinutes(a, b) {
+      return haversineKm(a, b) / AVG_SPEED_KMH * 60;
+    }
+
+    function directMinutes(request) {
+      return travelMinutes(request.origin, request.destination);
+    }
+
+    function optimizeRoute(vehicle, requests) {
+      if (!requests.length) {
+        return { feasible: true, sequence: [], cost: 0, distanceKm: 0, totalMinutes: 0, pickupWaits: {} };
+      }
+      let best = null;
+      const requestById = new Map(requests.map(item => [item.id, item]));
+
+      function search(current, time, load, picked, dropped, pickupTimes, sequence, distanceKm, pickupDelay, detourMinutes) {
+        if (best && distanceKm * 1.45 > best.cost) return;
+        if (dropped.size === requests.length) {
+          const cost = distanceKm * 1.45 + pickupDelay * 0.9 + detourMinutes * 1.25 + time * 0.08;
+          if (!best || cost < best.cost) {
+            best = {
+              feasible: true,
+              sequence: sequence.map(item => ({ ...item })),
+              cost,
+              distanceKm,
+              totalMinutes: time,
+              pickupWaits: Object.fromEntries([...pickupTimes.entries()].map(([id, value]) => [id, value.time]))
+            };
+          }
+          return;
+        }
+
+        for (const request of requests) {
+          if (!picked.has(request.id)) {
+            if (load + request.passengers > vehicle.capacity) continue;
+            const legKm = haversineKm(current, request.origin);
+            const rawArrival = time + legKm / AVG_SPEED_KMH * 60;
+            const arrival = Math.max(rawArrival, request.earliest);
+            if (arrival > request.latest) continue;
+            const nextPicked = new Set(picked);
+            nextPicked.add(request.id);
+            const nextPickupTimes = new Map(pickupTimes);
+            nextPickupTimes.set(request.id, { time: arrival, serviceEnd: arrival + SERVICE_MINUTES });
+            search(
+              request.origin,
+              arrival + SERVICE_MINUTES,
+              load + request.passengers,
+              nextPicked,
+              dropped,
+              nextPickupTimes,
+              [...sequence, { type: "O", requestId: request.id, point: request.origin, time: arrival, loadAfter: load + request.passengers }],
+              distanceKm + legKm,
+              pickupDelay + Math.max(0, arrival - request.earliest),
+              detourMinutes
+            );
+          } else if (!dropped.has(request.id)) {
+            const legKm = haversineKm(current, request.destination);
+            const arrival = time + legKm / AVG_SPEED_KMH * 60;
+            const pickup = pickupTimes.get(request.id);
+            const rideMinutes = arrival - pickup.serviceEnd;
+            const direct = directMinutes(request);
+            const maxRide = direct * MAX_RIDE_RATIO + MAX_EXTRA_RIDE_MINUTES;
+            if (rideMinutes > maxRide) continue;
+            const nextDropped = new Set(dropped);
+            nextDropped.add(request.id);
+            search(
+              request.destination,
+              arrival + SERVICE_MINUTES,
+              load - request.passengers,
+              picked,
+              nextDropped,
+              pickupTimes,
+              [...sequence, { type: "D", requestId: request.id, point: request.destination, time: arrival, loadAfter: load - request.passengers }],
+              distanceKm + legKm,
+              pickupDelay,
+              detourMinutes + Math.max(0, rideMinutes - direct)
+            );
+          }
+        }
+      }
+
+      search(
+        { lon: vehicle.lon, lat: vehicle.lat, name: vehicle.plate },
+        0,
+        0,
+        new Set(),
+        new Set(),
+        new Map(),
+        [],
+        0,
+        0,
+        0
+      );
+      return best || { feasible: false, sequence: [], cost: Infinity, distanceKm: Infinity, totalMinutes: Infinity, pickupWaits: {} };
+    }
+
+    function combinations(items, size) {
+      const output = [];
+      function visit(start, selected) {
+        if (selected.length === size) {
+          output.push(selected.slice());
+          return;
+        }
+        for (let index = start; index <= items.length - (size - selected.length); index += 1) {
+          selected.push(items[index]);
+          visit(index + 1, selected);
+          selected.pop();
+        }
+      }
+      visit(0, []);
+      return output;
+    }
+
+    function pairKey(a, b) {
+      return [a, b].sort().join("|");
+    }
+
+    function buildShareabilityGraph(vehicles, orders) {
+      const edges = [];
+      const edgeSet = new Set();
+      for (let i = 0; i < orders.length; i += 1) {
+        for (let j = i + 1; j < orders.length; j += 1) {
+          const pair = [orders[i], orders[j]];
+          const feasibleVehicles = vehicles.filter(vehicle => optimizeRoute(vehicle, pair).feasible);
+          if (feasibleVehicles.length) {
+            const key = pairKey(orders[i].id, orders[j].id);
+            edgeSet.add(key);
+            edges.push({ a: orders[i].id, b: orders[j].id, vehicleCount: feasibleVehicles.length });
+          }
+        }
+      }
+      return { edges, edgeSet };
+    }
+
+    function isClique(requests, edgeSet) {
+      if (requests.length < 2) return true;
+      for (let i = 0; i < requests.length; i += 1) {
+        for (let j = i + 1; j < requests.length; j += 1) {
+          if (!edgeSet.has(pairKey(requests[i].id, requests[j].id))) return false;
+        }
+      }
+      return true;
+    }
+
+    function generateVehicleTrips(vehicles, orders, maxBundleSize, graph) {
+      const subsets = [];
+      for (let size = 1; size <= Math.min(maxBundleSize, orders.length); size += 1) {
+        for (const subset of combinations(orders, size)) {
+          if (isClique(subset, graph.edgeSet)) subsets.push(subset);
+        }
+      }
+
+      const byVehicle = new Map();
+      let feasibleEdgeCount = 0;
+      for (const vehicle of vehicles) {
+        const trips = [];
+        for (const subset of subsets) {
+          const route = optimizeRoute(vehicle, subset);
+          if (!route.feasible) continue;
+          trips.push({
+            vehicle,
+            orders: subset,
+            orderIds: subset.map(item => item.id),
+            route,
+            cost: route.cost
+          });
+          feasibleEdgeCount += 1;
+        }
+        trips.sort((left, right) => right.orders.length - left.orders.length || left.cost - right.cost);
+        byVehicle.set(vehicle.id, trips);
+      }
+      return { subsets, byVehicle, feasibleEdgeCount };
+    }
+
+    function solveGlobalAssignment(vehicles, orders, tripsByVehicle) {
+      let best = null;
+      let exploredStates = 0;
+
+      function visit(vehicleIndex, used, assignments, routeCost) {
+        exploredStates += 1;
+        if (vehicleIndex >= vehicles.length) {
+          const served = used.size;
+          const objective = routeCost + (orders.length - served) * UNASSIGNED_PENALTY;
+          if (!best || served > best.served || (served === best.served && objective < best.objective)) {
+            best = {
+              assignments: assignments.slice(),
+              served,
+              routeCost,
+              objective,
+              used: new Set(used)
+            };
+          }
+          return;
+        }
+
+        visit(vehicleIndex + 1, used, assignments, routeCost);
+        const vehicle = vehicles[vehicleIndex];
+        for (const trip of tripsByVehicle.get(vehicle.id) || []) {
+          if (trip.orderIds.some(id => used.has(id))) continue;
+          const nextUsed = new Set(used);
+          trip.orderIds.forEach(id => nextUsed.add(id));
+          assignments.push(trip);
+          visit(vehicleIndex + 1, nextUsed, assignments, routeCost + trip.cost);
+          assignments.pop();
+        }
+      }
+
+      visit(0, new Set(), [], 0);
+      const unassigned = orders.filter(item => !best.used.has(item.id));
+      return { ...best, unassigned, exploredStates };
+    }
+
+    function solveGreedy(vehicles, orders, maxBundleSize) {
+      const assigned = new Map(vehicles.map(vehicle => [vehicle.id, []]));
+      const routes = new Map(vehicles.map(vehicle => [vehicle.id, optimizeRoute(vehicle, [])]));
+      const unassigned = [];
+
+      for (const request of orders) {
+        let best = null;
+        for (const vehicle of vehicles) {
+          const currentOrders = assigned.get(vehicle.id);
+          if (currentOrders.length >= maxBundleSize) continue;
+          const route = optimizeRoute(vehicle, [...currentOrders, request]);
+          if (!route.feasible) continue;
+          const incremental = route.cost - routes.get(vehicle.id).cost;
+          if (!best || incremental < best.incremental) best = { vehicle, route, incremental };
+        }
+        if (!best) {
+          unassigned.push(request);
+          continue;
+        }
+        assigned.get(best.vehicle.id).push(request);
+        routes.set(best.vehicle.id, best.route);
+      }
+
+      const assignments = vehicles
+        .filter(vehicle => assigned.get(vehicle.id).length)
+        .map(vehicle => ({
+          vehicle,
+          orders: assigned.get(vehicle.id),
+          orderIds: assigned.get(vehicle.id).map(item => item.id),
+          route: routes.get(vehicle.id),
+          cost: routes.get(vehicle.id).cost
+        }));
+      return {
+        assignments,
+        served: orders.length - unassigned.length,
+        routeCost: assignments.reduce((sum, item) => sum + item.cost, 0),
+        objective: assignments.reduce((sum, item) => sum + item.cost, 0) + unassigned.length * UNASSIGNED_PENALTY,
+        unassigned
+      };
+    }
+
+    function summarize(solution) {
+      const distanceKm = solution.assignments.reduce((sum, item) => sum + item.route.distanceKm, 0);
+      const waits = [];
+      solution.assignments.forEach(item => Object.values(item.route.pickupWaits).forEach(value => waits.push(value)));
+      return {
+        served: solution.served,
+        unassigned: solution.unassigned.length,
+        cost: solution.routeCost,
+        distanceKm,
+        averageWait: waits.length ? waits.reduce((sum, value) => sum + value, 0) / waits.length : 0,
+        maxWait: waits.length ? Math.max(...waits) : 0
+      };
+    }
+
+    function runDemo() {
+      const started = performance.now();
+      const scenario = clone(scenarios[state.scenarioKey]);
+      const graph = buildShareabilityGraph(scenario.vehicles, scenario.orders);
+      const trips = generateVehicleTrips(scenario.vehicles, scenario.orders, state.maxBundleSize, graph);
+      const global = solveGlobalAssignment(scenario.vehicles, scenario.orders, trips.byVehicle);
+      const greedy = solveGreedy(scenario.vehicles, scenario.orders, state.maxBundleSize);
+      const elapsedMs = performance.now() - started;
+      state.result = {
+        scenario,
+        graph,
+        trips,
+        global,
+        greedy,
+        globalSummary: summarize(global),
+        greedySummary: summarize(greedy),
+        elapsedMs
+      };
+      render();
+    }
+
+    function svgElement(name, attributes = {}) {
+      const element = document.createElementNS(SVG_NS, name);
+      Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+      return element;
+    }
+
+    function appendTitle(element, text) {
+      const title = svgElement("title");
+      title.textContent = text;
+      element.appendChild(title);
+    }
+
+    function mapProjection(scenario) {
+      const points = [];
+      scenario.vehicles.forEach(item => points.push({ lon: item.lon, lat: item.lat }));
+      scenario.orders.forEach(item => points.push(item.origin, item.destination));
+      const minLon = Math.min(...points.map(item => item.lon));
+      const maxLon = Math.max(...points.map(item => item.lon));
+      const minLat = Math.min(...points.map(item => item.lat));
+      const maxLat = Math.max(...points.map(item => item.lat));
+      const padding = 55;
+      return point => ({
+        x: padding + (point.lon - minLon) / Math.max(0.00001, maxLon - minLon) * (900 - padding * 2),
+        y: 500 - padding - (point.lat - minLat) / Math.max(0.00001, maxLat - minLat) * (500 - padding * 2)
+      });
+    }
+
+    function renderMap() {
+      const svg = document.getElementById("routeMap");
+      svg.replaceChildren();
+      const { scenario } = state.result;
+      const solution = state.view === "global" ? state.result.global : state.result.greedy;
+      const project = mapProjection(scenario);
+
+      for (let x = 70; x < 900; x += 90) {
+        svg.appendChild(svgElement("line", { x1: x, y1: 0, x2: x, y2: 500, stroke: "#e7eaf0", "stroke-width": 1 }));
+      }
+      for (let y = 55; y < 500; y += 72) {
+        svg.appendChild(svgElement("line", { x1: 0, y1: y, x2: 900, y2: y, stroke: "#e7eaf0", "stroke-width": 1 }));
+      }
+
+      scenario.orders.forEach(request => {
+        const origin = project(request.origin);
+        const destination = project(request.destination);
+        const line = svgElement("line", {
+          x1: origin.x, y1: origin.y, x2: destination.x, y2: destination.y,
+          stroke: "#aeb6c5", "stroke-width": 1.3, "stroke-dasharray": "5 6", opacity: 0.55
+        });
+        appendTitle(line, `${request.id} 原始 O-D`);
+        svg.appendChild(line);
+      });
+
+      solution.assignments.forEach((assignment, vehicleIndex) => {
+        const color = VEHICLE_COLORS[scenario.vehicles.findIndex(item => item.id === assignment.vehicle.id) % VEHICLE_COLORS.length];
+        const points = [
+          project({ lon: assignment.vehicle.lon, lat: assignment.vehicle.lat }),
+          ...assignment.route.sequence.map(step => project(step.point))
+        ];
+        const polyline = svgElement("polyline", {
+          points: points.map(point => `${point.x},${point.y}`).join(" "),
+          fill: "none", stroke: color, "stroke-width": 4, "stroke-linecap": "round", "stroke-linejoin": "round", opacity: 0.82
+        });
+        appendTitle(polyline, `${assignment.vehicle.plate}: ${assignment.orderIds.join(" + ")}`);
+        svg.appendChild(polyline);
+
+        assignment.route.sequence.forEach((step, index) => {
+          const point = project(step.point);
+          const sequence = svgElement("circle", { cx: point.x, cy: point.y, r: 11, fill: color, stroke: "#fff", "stroke-width": 2 });
+          appendTitle(sequence, `${index + 1}. ${step.type}${step.requestId} · ${step.point.name} · ${step.time.toFixed(1)} 分钟`);
+          svg.appendChild(sequence);
+          const text = svgElement("text", { x: point.x, y: point.y + 4, "text-anchor": "middle", fill: "#fff", "font-size": 9, "font-weight": 700 });
+          text.textContent = index + 1;
+          svg.appendChild(text);
+        });
+      });
+
+      scenario.orders.forEach(request => {
+        [[request.origin, "O", "#2a8b57"], [request.destination, "D", "#c9364f"]].forEach(([raw, type, color]) => {
+          const point = project(raw);
+          const marker = svgElement("circle", { cx: point.x, cy: point.y, r: 8, fill: color, stroke: "#fff", "stroke-width": 2 });
+          appendTitle(marker, `${type}${request.id} · ${raw.name}`);
+          svg.appendChild(marker);
+          const label = svgElement("text", { x: point.x + 11, y: point.y - 10, fill: "#354056", "font-size": 11, "font-weight": 650 });
+          label.textContent = `${type}${request.id}`;
+          svg.appendChild(label);
+        });
+      });
+
+      scenario.vehicles.forEach((vehicle, index) => {
+        const point = project(vehicle);
+        const color = VEHICLE_COLORS[index % VEHICLE_COLORS.length];
+        const rect = svgElement("rect", { x: point.x - 13, y: point.y - 12, width: 26, height: 24, rx: 4, fill: color, stroke: "#fff", "stroke-width": 2 });
+        appendTitle(rect, `${vehicle.id} · ${vehicle.plate} · ${vehicle.capacity}座`);
+        svg.appendChild(rect);
+        const text = svgElement("text", { x: point.x, y: point.y + 4, "text-anchor": "middle", fill: "#fff", "font-size": 10, "font-weight": 700 });
+        text.textContent = vehicle.id;
+        svg.appendChild(text);
+      });
+
+      document.getElementById("mapMeta").textContent = state.view === "global"
+        ? "共享图候选组合的全局最优分配"
+        : "按订单输入顺序执行的逐单最低增量成本";
+    }
+
+    function renderGraph() {
+      const svg = document.getElementById("shareGraph");
+      svg.replaceChildren();
+      const { scenario, graph } = state.result;
+      const center = { x: 210, y: 129 };
+      const radius = 86;
+      const positions = new Map();
+      scenario.orders.forEach((request, index) => {
+        const angle = -Math.PI / 2 + index / scenario.orders.length * Math.PI * 2;
+        positions.set(request.id, { x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius });
+      });
+      graph.edges.forEach(edge => {
+        const a = positions.get(edge.a);
+        const b = positions.get(edge.b);
+        const line = svgElement("line", {
+          x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+          stroke: edge.vehicleCount > 1 ? "#7b8aa3" : "#c6ccd7",
+          "stroke-width": edge.vehicleCount > 1 ? 2.2 : 1.2,
+          opacity: 0.78
+        });
+        appendTitle(line, `${edge.a} 与 ${edge.b} 可由 ${edge.vehicleCount} 辆车拼接`);
+        svg.appendChild(line);
+      });
+      scenario.orders.forEach((request, index) => {
+        const point = positions.get(request.id);
+        const circle = svgElement("circle", { cx: point.x, cy: point.y, r: 21, fill: "#fff", stroke: VEHICLE_COLORS[index % VEHICLE_COLORS.length], "stroke-width": 3 });
+        appendTitle(circle, `${request.id}: ${request.origin.name} → ${request.destination.name}`);
+        svg.appendChild(circle);
+        const text = svgElement("text", { x: point.x, y: point.y + 4, "text-anchor": "middle", fill: "#172033", "font-size": 11, "font-weight": 700 });
+        text.textContent = request.id;
+        svg.appendChild(text);
+      });
+      document.getElementById("graphMeta").textContent = `${graph.edges.length} 条兼容边；线越深表示可选车辆越多`;
+    }
+
+    function renderMetrics() {
+      const container = document.getElementById("metrics");
+      const global = state.result.globalSummary;
+      const greedy = state.result.greedySummary;
+      const objectiveGain = state.result.greedy.objective > 0
+        ? (state.result.greedy.objective - state.result.global.objective) / state.result.greedy.objective * 100
+        : 0;
+      const items = [
+        ["组合已服务", `${global.served}/${state.result.scenario.orders.length}`, `${global.served - greedy.served >= 0 ? "+" : ""}${global.served - greedy.served} 单`],
+        ["组合目标值", state.result.global.objective.toFixed(2), `${objectiveGain >= 0 ? "降低" : "增加"} ${Math.abs(objectiveGain).toFixed(1)}%`],
+        ["组合总里程", `${global.distanceKm.toFixed(2)} km`, `贪心 ${greedy.distanceKm.toFixed(2)} km`],
+        ["平均接客", `${global.averageWait.toFixed(1)} min`, `贪心 ${greedy.averageWait.toFixed(1)} min`],
+        ["候选车-组合边", state.result.trips.feasibleEdgeCount, `${state.result.trips.subsets.length} 个订单组合`],
+        ["求解耗时", `${state.result.elapsedMs.toFixed(1)} ms`, `${state.result.global.exploredStates} 个分配状态`]
+      ];
+      container.innerHTML = items.map(([label, value, delta], index) => `
+        <div class="metric">
+          <div class="metric-label">${label}</div>
+          <div class="metric-value">${value}<span class="metric-delta ${index === 0 && global.served < greedy.served ? "bad" : ""}">${delta}</span></div>
+        </div>
+      `).join("");
+    }
+
+    function renderBundles() {
+      const solution = state.view === "global" ? state.result.global : state.result.greedy;
+      const list = document.getElementById("bundleList");
+      if (!solution.assignments.length) {
+        list.innerHTML = '<div class="empty">当前没有可行分配。</div>';
+      } else {
+        list.innerHTML = solution.assignments.map((assignment, index) => {
+          const sequence = assignment.route.sequence.map(step => `${step.type}${step.requestId}`).join(" → ");
+          return `<div class="bundle-row" title="${sequence}">
+            <div class="bundle-vehicle" style="color:${VEHICLE_COLORS[index % VEHICLE_COLORS.length]}">${assignment.vehicle.id}</div>
+            <div class="bundle-orders">${assignment.orderIds.join(" + ")}</div>
+            <div class="bundle-cost">${assignment.cost.toFixed(2)}</div>
+          </div>`;
+        }).join("");
+      }
+      document.getElementById("bundleMeta").textContent = `${solution.assignments.length} 辆车执行；${solution.unassigned.length} 单暂未匹配`;
+    }
+
+    function renderOrders() {
+      const solution = state.result.global;
+      const assignmentByOrder = new Map();
+      solution.assignments.forEach(item => item.orderIds.forEach(id => assignmentByOrder.set(id, item.vehicle.id)));
+      document.getElementById("orderRows").innerHTML = state.result.scenario.orders.map((request, index) => {
+        const vehicleId = assignmentByOrder.get(request.id);
+        return `<tr>
+          <td><span class="tag" style="background:${VEHICLE_COLORS[index % VEHICLE_COLORS.length]}">${request.id}</span></td>
+          <td>${request.passengers}</td>
+          <td>${request.origin.name}</td>
+          <td>${request.destination.name}</td>
+          <td>${request.latest} min</td>
+          <td>${vehicleId || "暂未匹配"}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderProcess() {
+      const result = state.result;
+      const rows = [
+        ["订单两两可行性", `${result.scenario.orders.length * (result.scenario.orders.length - 1) / 2} 对`, `${result.graph.edges.length} 对可共享`],
+        ["团/组合生成", `上限 ${state.maxBundleSize} 单`, `${result.trips.subsets.length} 个候选组合`],
+        ["车辆可行性检查", `${result.scenario.vehicles.length} 辆车`, `${result.trips.feasibleEdgeCount} 条可行连接`],
+        ["集合分配搜索", `${result.global.exploredStates} 状态`, `服务 ${result.global.served} 单`],
+        ["最终规划", `${result.global.assignments.length} 辆车`, "每辆车只需重规划一次"]
+      ];
+      document.getElementById("processRows").innerHTML = rows.map(row => `<tr><td>${row[0]}</td><td>${row[1]}</td><td>${row[2]}</td></tr>`).join("");
+      document.getElementById("statusLine").textContent = `当前使用 Haversine 直线距离与 ${AVG_SPEED_KMH} km/h 平均速度；正式接入时应替换为项目本地 A* 缓存。`;
+    }
+
+    function render() {
+      renderMetrics();
+      renderMap();
+      renderGraph();
+      renderBundles();
+      renderOrders();
+      renderProcess();
+    }
+
+    document.getElementById("scenarioSelect").addEventListener("change", event => {
+      state.scenarioKey = event.target.value;
+      runDemo();
+    });
+
+    document.getElementById("bundleControl").addEventListener("click", event => {
+      const button = event.target.closest("button[data-size]");
+      if (!button) return;
+      state.maxBundleSize = Number(button.dataset.size);
+      document.querySelectorAll("#bundleControl button").forEach(item => item.classList.toggle("active", item === button));
+      runDemo();
+    });
+
+    document.getElementById("viewTabs").addEventListener("click", event => {
+      const button = event.target.closest("button[data-view]");
+      if (!button) return;
+      state.view = button.dataset.view;
+      document.querySelectorAll("#viewTabs button").forEach(item => item.classList.toggle("active", item === button));
+      renderMap();
+      renderBundles();
+    });
+
+    document.getElementById("runButton").addEventListener("click", runDemo);
+    document.getElementById("resetButton").addEventListener("click", () => {
+      state.scenarioKey = "scarce";
+      state.maxBundleSize = 3;
+      state.view = "global";
+      document.getElementById("scenarioSelect").value = "scarce";
+      document.querySelectorAll("#bundleControl button").forEach(item => item.classList.toggle("active", item.dataset.size === "3"));
+      document.querySelectorAll("#viewTabs button").forEach(item => item.classList.toggle("active", item.dataset.view === "global"));
+      runDemo();
+    });
+
+    runDemo();
+  </script>
+</body>
+</html>
