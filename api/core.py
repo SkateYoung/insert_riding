@@ -54,6 +54,7 @@ class CoreDispatcher:
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
+        "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
         "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
@@ -71,12 +72,13 @@ class CoreDispatcher:
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": "非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受此阈值限制。",
         "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": "空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择。",
+        "PICKUP_ETA_TOLERANCE_SECONDS": "预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆。",
     }
     # 按运营区配置代码默认值时只需填写与公共默认值不同的参数。
     # 示例：19: {"WAIT_COST_PER_MIN": 8.0, "IN_CAR_COST_PER_MIN": 10.0}
     ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
         # 琶洲运营区
-        666666:{        
+        25:{        
         "W_PASSENGER": 0.50,
         "W_ENTERPRISE": 0.30,
         "W_SOCIAL": 0.20,
@@ -91,9 +93,10 @@ class CoreDispatcher:
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
-        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0},
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
+        "PICKUP_ETA_TOLERANCE_SECONDS": 600.0},
         # 白云运营区
-        222222:{        
+        24:{        
         "W_PASSENGER": 0.50,
         "W_ENTERPRISE": 0.30,
         "W_SOCIAL": 0.20,
@@ -101,14 +104,15 @@ class CoreDispatcher:
         "WAIT_COST_PER_MIN": 5.0,
         "IN_CAR_COST_PER_MIN": 5.0,
         "LATE_ARRIVAL_COST_PER_MIN": 0.0,
-        "OLD_DELAY_COST_PER_MIN": 10.0,
+        "OLD_DELAY_COST_PER_MIN": 15.0,
         "SEVERE_OLD_DELAY_PENALTY": 30.0,
         "MILEAGE_UTIL_PENALTY_BASE": 10.0,
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
-        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 450.0,
+        "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 500.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
-        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0}
+        "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
+        "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0}
     }
     # 各运营区维护独立的运行时成本配置；未配置区域按默认值初始化。
     route_cost_configs_by_area = {}
@@ -141,7 +145,7 @@ class CoreDispatcher:
     ROUTE_HEAD_LOCK_DISTANCE_M = 100.0
     ROUTE_HEAD_LOCK_ETA_SECONDS = 30
 
-    # 高德路线规划/ETA 后台刷新配置：ETA 仍由独立线程周期刷新，不参与派单评分。
+    # 高德路线规划/ETA 后台配置：展示 ETA 周期刷新；候选上车 ETA 只参与最终精排。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
     ETA_REFRESH_MAX_WORKERS = 4
     ROUTE_GRASP_REFRESH_INTERVAL_SECONDS = 5.0
@@ -158,6 +162,16 @@ class CoreDispatcher:
     route_grasp_executor_workers = 4
     route_grasp_inflight = set()
     route_grasp_inflight_lock = threading.Lock()
+    PICKUP_ETA_TOP_K = 3
+    PICKUP_ETA_CACHE_TTL_SECONDS = 60.0
+    PICKUP_ETA_FAILURE_CACHE_TTL_SECONDS = 15.0
+    PICKUP_ETA_CACHE_MAX_ENTRIES = 2048
+    PICKUP_ETA_REQUEST_TIMEOUT_SECONDS = 2.0
+    pickup_eta_executor = None
+    pickup_eta_executor_workers = 3
+    pickup_eta_cache = {}
+    pickup_eta_inflight = set()
+    pickup_eta_lock = threading.RLock()
     operation_restriction_policies_by_area = {}
     operation_restriction_lock = threading.Lock()
 
@@ -1244,8 +1258,244 @@ class CoreDispatcher:
         return max(0.0, pickup_time - wait_start_time)
 
     @staticmethod
+    def _candidate_pickup_eta_points(vehicle, route, order):
+        """生成车辆原始 GPS 到新订单上车点的有序高德停靠点。"""
+        start_point = CoreDispatcher._vehicle_raw_gps_route_start_point(vehicle)
+        if start_point is None:
+            return []
+
+        points = [start_point]
+        target_request_id = str(getattr(order, "request_id", ""))
+        target_found = False
+        for step in route or []:
+            if not isinstance(step, dict):
+                continue
+            step_type = str(step.get("type") or "").upper()
+            if step_type not in {"O", "D"}:
+                continue
+            step_order = step.get("order")
+            if step_order is None:
+                continue
+            point = CoreDispatcher._order_original_path_point(
+                step_order,
+                step_type,
+                getattr(step_order, "o_node", None) if step_type == "O" else getattr(step_order, "d_node", None),
+            )
+            if isinstance(point, dict):
+                try:
+                    lon = float(point.get("lon"))
+                    lat = float(point.get("lat"))
+                except (TypeError, ValueError):
+                    lon = None
+                    lat = None
+                if lon is not None and lat is not None and math.isfinite(lon) and math.isfinite(lat):
+                    normalized = copy.deepcopy(point)
+                    normalized["lon"] = lon
+                    normalized["lat"] = lat
+                    points.append(normalized)
+            if (
+                step_type == "O"
+                and str(getattr(step_order, "request_id", "")) == target_request_id
+            ):
+                target_found = True
+                break
+        return points if target_found and len(points) >= 2 else []
+
+    @classmethod
+    def _pickup_eta_cache_key(cls, operation_area_id, points, restriction_policy, strategy):
+        """按运营区、原始坐标序列、规划策略和禁区生成 ETA 缓存键。"""
+        parts = [
+            cls._coerce_operation_area_id(operation_area_id),
+            str(strategy or ""),
+            restriction_signature(restriction_policy),
+        ]
+        for point in points or []:
+            parts.append(f"{float(point['lon']):.6f},{float(point['lat']):.6f}")
+        return cls._short_route_version("pickup_eta", parts)
+
+    @classmethod
+    def _pickup_eta_cached_result(cls, cache_key):
+        """读取未过期的候选上车 ETA 缓存。"""
+        now_monotonic = time.monotonic()
+        with cls.pickup_eta_lock:
+            entry = cls.pickup_eta_cache.get(cache_key)
+            if not isinstance(entry, dict):
+                return None
+            if float(entry.get("expires_at", 0.0) or 0.0) <= now_monotonic:
+                cls.pickup_eta_cache.pop(cache_key, None)
+                return None
+            return copy.deepcopy(entry.get("result"))
+
+    @classmethod
+    def _execute_pickup_eta_job(cls, cache_key, planner, points, restriction_policy):
+        """在线程池中请求候选上车 ETA，并写入短时缓存。"""
+        try:
+            result = planner.estimate_ordered_stops_eta_sync(
+                points,
+                restriction_policy=restriction_policy,
+                timeout_sec=cls.PICKUP_ETA_REQUEST_TIMEOUT_SECONDS,
+            )
+            if not isinstance(result, dict):
+                result = {"ok": False, "reason": "invalid_eta_result"}
+        except Exception as exc:
+            result = {"ok": False, "reason": str(exc)}
+            log_exception(
+                "api.core.pickup_eta_request",
+                exc,
+                context={"cache_key": cache_key},
+            )
+        ttl_seconds = (
+            cls.PICKUP_ETA_CACHE_TTL_SECONDS
+            if result.get("ok")
+            else cls.PICKUP_ETA_FAILURE_CACHE_TTL_SECONDS
+        )
+        with cls.pickup_eta_lock:
+            now_monotonic = time.monotonic()
+            expired_keys = [
+                key for key, entry in cls.pickup_eta_cache.items()
+                if float((entry or {}).get("expires_at", 0.0) or 0.0) <= now_monotonic
+            ]
+            for key in expired_keys:
+                cls.pickup_eta_cache.pop(key, None)
+            if len(cls.pickup_eta_cache) >= cls.PICKUP_ETA_CACHE_MAX_ENTRIES:
+                oldest_key = min(
+                    cls.pickup_eta_cache,
+                    key=lambda key: float(cls.pickup_eta_cache[key].get("expires_at", 0.0) or 0.0),
+                )
+                cls.pickup_eta_cache.pop(oldest_key, None)
+            cls.pickup_eta_cache[cache_key] = {
+                "result": copy.deepcopy(result),
+                "expires_at": now_monotonic + ttl_seconds,
+            }
+            cls.pickup_eta_inflight.discard(cache_key)
+
+    @classmethod
+    def _schedule_pickup_eta_job(cls, cache_key, planner, points, restriction_policy):
+        """提交去重后的候选上车 ETA 任务，提交过程不等待网络。"""
+        with cls.pickup_eta_lock:
+            if cache_key in cls.pickup_eta_inflight:
+                return False
+            if cls.pickup_eta_executor is None:
+                cls.pickup_eta_executor = ThreadPoolExecutor(
+                    max_workers=cls.pickup_eta_executor_workers,
+                    thread_name_prefix="PickupEtaRequest",
+                )
+            cls.pickup_eta_inflight.add(cache_key)
+            try:
+                cls.pickup_eta_executor.submit(
+                    cls._execute_pickup_eta_job,
+                    cache_key,
+                    planner,
+                    copy.deepcopy(points),
+                    copy.deepcopy(restriction_policy),
+                )
+            except Exception:
+                cls.pickup_eta_inflight.discard(cache_key)
+                raise
+        return True
+
+    @classmethod
+    def clear_pickup_eta_cache(cls, shutdown_executor=False):
+        """清理候选上车 ETA 缓存；测试或系统关闭时可同步停止执行器。"""
+        executor = None
+        with cls.pickup_eta_lock:
+            if shutdown_executor:
+                executor = cls.pickup_eta_executor
+                cls.pickup_eta_executor = None
+        if executor is not None:
+            executor.shutdown(wait=True)
+        with cls.pickup_eta_lock:
+            cls.pickup_eta_cache.clear()
+            cls.pickup_eta_inflight.clear()
+
+    @staticmethod
+    def _pickup_wait_from_travel_duration(order, current_timestamp, duration_seconds):
+        """把高德行驶时长换算成考虑预约最早时间的预计等车时间。"""
+        try:
+            now_ts = float(current_timestamp)
+            duration = max(0.0, float(duration_seconds))
+        except (TypeError, ValueError):
+            return float("inf")
+        earliest_ts = CoreDispatcher._order_pickup_earliest_timestamp(order)
+        pickup_time = max(now_ts + duration, earliest_ts)
+        return max(0.0, pickup_time - max(now_ts, earliest_ts))
+
+    @classmethod
+    def _refine_candidates_by_pickup_eta(cls, order, candidates, current_timestamp):
+        """异步预热 Top 3 候选的高德 ETA，全部就绪后返回精排候选。"""
+        if not candidates:
+            return []
+        locally_sorted = sorted(
+            candidates,
+            key=lambda item: (item.get("estimated_pickup_wait_seconds", float("inf")), item["cost"]),
+        )
+        top_candidates = locally_sorted[:cls.PICKUP_ETA_TOP_K]
+        planner = cls._get_route_planner()
+        if planner is None or not planner.enabled:
+            for candidate in candidates:
+                candidate["pickup_eta_source"] = "local_fallback"
+            return candidates
+
+        operation_area_id = cls._order_operation_area_id(order)
+        restriction_policy = cls.current_operation_restriction_policy(operation_area_id)
+        prepared = []
+        schedulable_count = 0
+        pending = False
+        for candidate in top_candidates:
+            points = cls._candidate_pickup_eta_points(
+                candidate["vehicle"],
+                candidate["route"],
+                order,
+            )
+            if not points:
+                candidate["pickup_eta_source"] = "local_fallback"
+                prepared.append(candidate)
+                continue
+
+            schedulable_count += 1
+            cache_key = cls._pickup_eta_cache_key(
+                operation_area_id,
+                points,
+                restriction_policy,
+                planner.strategy,
+            )
+            eta_result = cls._pickup_eta_cached_result(cache_key)
+            if eta_result is None:
+                cls._schedule_pickup_eta_job(
+                    cache_key,
+                    planner,
+                    points,
+                    restriction_policy,
+                )
+                pending = True
+                continue
+
+            refined = copy.copy(candidate)
+            if eta_result.get("ok"):
+                duration_seconds = float(eta_result.get("duration_sec") or 0.0)
+                refined["estimated_pickup_wait_seconds"] = cls._pickup_wait_from_travel_duration(
+                    order,
+                    current_timestamp,
+                    duration_seconds,
+                )
+                refined["amap_pickup_duration_seconds"] = duration_seconds
+                refined["pickup_eta_source"] = "amap"
+            else:
+                refined["pickup_eta_source"] = "local_fallback"
+                refined["pickup_eta_error"] = eta_result.get("reason") or eta_result.get("error")
+            prepared.append(refined)
+
+        if schedulable_count == 0:
+            for candidate in candidates:
+                candidate["pickup_eta_source"] = "local_fallback"
+            return candidates
+        if pending:
+            return None
+        return prepared
+
+    @staticmethod
     def _best_vehicle_candidate_for_order(order, fleet, city_map, current_timestamp, route_cost_config=None):
-        """为单个订单选择候选车辆，在空车等待可接受时优先空车，否则优先顺路车。
+        """为单个订单选择候选车辆，先按上车 ETA 过滤，再平衡空车、顺路和成本。
 
         返回值包含最优车辆、最优路线、最优成本和次优成本。次优成本只在同一候选层
         内比较，避免空车/顺路分层规则被其他候选的成本干扰。
@@ -1256,6 +1506,7 @@ class CoreDispatcher:
         busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
         planned_route_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
         idle_first_wait_threshold = route_cost_config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"]
+        pickup_eta_tolerance = route_cost_config["PICKUP_ETA_TOLERANCE_SECONDS"]
         idle_candidates = []
         busy_candidates = []
 
@@ -1320,12 +1571,37 @@ class CoreDispatcher:
                 "is_idle": False,
             })
 
-        idle_candidates.sort(key=lambda item: item["cost"])
+        refined_candidates = CoreDispatcher._refine_candidates_by_pickup_eta(
+            order,
+            idle_candidates + busy_candidates,
+            current_timestamp,
+        )
+        if refined_candidates is None:
+            return None
+        if not refined_candidates:
+            return None
+
+        finite_waits = [
+            float(item.get("estimated_pickup_wait_seconds"))
+            for item in refined_candidates
+            if math.isfinite(float(item.get("estimated_pickup_wait_seconds", float("inf"))))
+        ]
+        if finite_waits:
+            fastest_pickup_wait = min(finite_waits)
+            refined_candidates = [
+                item for item in refined_candidates
+                if float(item.get("estimated_pickup_wait_seconds", float("inf")))
+                <= fastest_pickup_wait + pickup_eta_tolerance
+            ]
+
+        idle_candidates = [item for item in refined_candidates if item.get("is_idle")]
+        busy_candidates = [item for item in refined_candidates if not item.get("is_idle")]
+        idle_candidates.sort(key=lambda item: (item["cost"], item.get("estimated_pickup_wait_seconds", float("inf"))))
         best_idle = idle_candidates[0] if idle_candidates else None
         if best_idle and best_idle["estimated_pickup_wait_seconds"] <= idle_first_wait_threshold:
             candidates = idle_candidates
             selection_policy = "idle_wait_within_threshold"
-            sort_key = lambda item: item["cost"]
+            sort_key = lambda item: (item["cost"], item.get("estimated_pickup_wait_seconds", float("inf")))
         else:
             route_aligned_busy_candidates = [
                 item for item in busy_candidates
@@ -1334,11 +1610,15 @@ class CoreDispatcher:
             if route_aligned_busy_candidates:
                 candidates = route_aligned_busy_candidates
                 selection_policy = "route_aligned_busy"
-                sort_key = lambda item: (-item.get("route_alignment_score", 0), item["cost"])
+                sort_key = lambda item: (
+                    -item.get("route_alignment_score", 0),
+                    item["cost"],
+                    item.get("estimated_pickup_wait_seconds", float("inf")),
+                )
             else:
                 candidates = idle_candidates + busy_candidates
                 selection_policy = "lowest_cost"
-                sort_key = lambda item: item["cost"]
+                sort_key = lambda item: (item["cost"], item.get("estimated_pickup_wait_seconds", float("inf")))
         if not candidates:
             return None
 
@@ -1353,6 +1633,8 @@ class CoreDispatcher:
             "candidate_class": "idle" if best.get("is_idle") else "busy",
             "absolute_cost": best["absolute_cost"],
             "estimated_pickup_wait_seconds": best.get("estimated_pickup_wait_seconds"),
+            "amap_pickup_duration_seconds": best.get("amap_pickup_duration_seconds"),
+            "pickup_eta_source": best.get("pickup_eta_source", "local_fallback"),
             "route_alignment_score": best.get("route_alignment_score", 0),
             "selection_policy": selection_policy,
         }

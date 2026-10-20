@@ -1,7 +1,7 @@
 """高德驾车规划路线生成模块。
 
-该模块只负责把车辆剩余 O/D/IDLE 分段转成高德驾车规划路线，不参与派单、
-不计算订单 ETA。调用方仍负责路线版本校验和写回车辆对象。
+该模块负责把车辆剩余 O/D/IDLE 分段转成高德驾车规划路线，并提供候选车辆
+有序停靠点 ETA 查询。调用方仍负责候选筛选、路线版本校验和车辆状态写回。
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ DEFAULT_DRIVING_STRATEGY = "2"
 DEFAULT_DRIVING_REQUEST_INTERVAL_MS = 500
 DEFAULT_DRIVING_QPS_RETRY_DELAYS_MS = (1500, 3000, 6000)
 DEFAULT_DRIVING_GET_URL_LIMIT = 1900
+MAX_DRIVING_WAYPOINTS = 16
 
 
 def _restriction_avoidpolygons(restriction_policy: dict[str, Any] | None) -> str | None:
@@ -192,6 +193,101 @@ class AmapDrivingRoutePlanner:
             self._route_cache[cache_key] = copy.deepcopy(result)
         return result
 
+    def estimate_ordered_stops_eta_sync(
+        self,
+        points: list[dict[str, Any]],
+        restriction_policy: dict[str, Any] | None = None,
+        *,
+        timeout_sec: float = 2.0,
+    ) -> dict[str, Any]:
+        """按有序停靠点计算总行驶时长，供候选车辆 ETA 精排使用。
+
+        单次请求最多携带 16 个途经点。停靠点超过限制时按连续区段拆分，
+        相邻区段共用边界点，最终累加各区段时长和距离。
+        """
+        if not self.enabled:
+            return {"ok": False, "reason": "missing_api_key"}
+
+        normalized = normalize_points(points)
+        ordered_points: list[dict[str, Any]] = []
+        for point in normalized:
+            if ordered_points and coord_text(ordered_points[-1]) == coord_text(point):
+                continue
+            ordered_points.append(point)
+        if not ordered_points:
+            return {"ok": False, "reason": "too_few_points"}
+        if len(ordered_points) == 1:
+            return {
+                "ok": True,
+                "duration_sec": 0.0,
+                "distance_m": 0.0,
+                "waypoint_count": 0,
+                "request_count": 0,
+                "strategy": self.strategy,
+            }
+
+        total_duration = 0.0
+        total_distance = 0.0
+        total_waypoints = 0
+        request_count = 0
+        max_points_per_request = MAX_DRIVING_WAYPOINTS + 2
+        start_index = 0
+        while start_index < len(ordered_points) - 1:
+            end_index = min(start_index + max_points_per_request - 1, len(ordered_points) - 1)
+            chunk = ordered_points[start_index:end_index + 1]
+            params = {
+                "key": self.api_key,
+                "origin": coord_text(chunk[0]),
+                "destination": coord_text(chunk[-1]),
+                "strategy": self.strategy,
+                "ferry": "1",
+                "show_fields": "cost,polyline,tmcs",
+                "output": "json",
+            }
+            waypoints = chunk[1:-1]
+            if waypoints:
+                params["waypoints"] = ";".join(coord_text(point) for point in waypoints)
+            avoidpolygons = _restriction_avoidpolygons(restriction_policy)
+            if avoidpolygons:
+                params["avoidpolygons"] = avoidpolygons
+
+            result = self._request_driving_with_qps_retry(
+                params,
+                timeout_sec=max(0.1, float(timeout_sec)),
+                http_retry_count=1,
+                allow_qps_retry=False,
+            )
+            if not isinstance(result, dict) or not result.get("ok"):
+                reason = "driving_eta_failed"
+                if isinstance(result, dict):
+                    reason = result.get("error") or result.get("reason") or result.get("info") or reason
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "request_count": request_count + 1,
+                    "waypoint_count": total_waypoints + len(waypoints),
+                }
+
+            total_duration += float(result.get("duration_sec") or 0.0)
+            total_distance += float(result.get("distance_m") or 0.0)
+            total_waypoints += len(waypoints)
+            request_count += 1
+            start_index = end_index
+
+        return {
+            "ok": True,
+            "duration_sec": total_duration,
+            "distance_m": total_distance,
+            "waypoint_count": total_waypoints,
+            "request_count": request_count,
+            "strategy": self.strategy,
+            "restriction_policy_signature": (
+                restriction_policy.get("policy_signature")
+                if isinstance(restriction_policy, dict)
+                else None
+            ),
+        }
+
     def plan_segments_sync(
         self,
         segments: list[dict[str, Any]],
@@ -262,9 +358,16 @@ class AmapDrivingRoutePlanner:
             "reason": None,
         }
 
-    def _request_driving_with_qps_retry(self, params: dict[str, str]) -> dict[str, Any]:
+    def _request_driving_with_qps_retry(
+        self,
+        params: dict[str, str],
+        *,
+        timeout_sec: float | None = None,
+        http_retry_count: int | None = None,
+        allow_qps_retry: bool = True,
+    ) -> dict[str, Any]:
         """请求高德驾车规划；命中 QPS 限流时按配置退避重试。"""
-        attempts = len(self.qps_retry_delays_sec) + 1
+        attempts = len(self.qps_retry_delays_sec) + 1 if allow_qps_retry else 1
         last_result = None
         for attempt_index in range(attempts):
             try:
@@ -278,7 +381,14 @@ class AmapDrivingRoutePlanner:
                     req = Request(base_url, data=encoded.encode("utf-8"), headers=headers, method="POST")
                 else:
                     req = Request(url, headers=headers)
-                payload = self._urlopen_json(req)
+                if timeout_sec is None and http_retry_count is None:
+                    payload = self._urlopen_json(req)
+                else:
+                    payload = self._urlopen_json(
+                        req,
+                        timeout_sec=timeout_sec,
+                        retry_count=http_retry_count,
+                    )
                 result = self._parse_driving_response(payload)
             except Exception as exc:
                 result = {"ok": False, "error": str(exc)}
@@ -316,16 +426,24 @@ class AmapDrivingRoutePlanner:
             handlers.insert(0, ProxyHandler({}))
         return build_opener(*handlers)
 
-    def _urlopen_json(self, req: Request) -> dict[str, Any]:
+    def _urlopen_json(
+        self,
+        req: Request,
+        *,
+        timeout_sec: float | None = None,
+        retry_count: int | None = None,
+    ) -> dict[str, Any]:
         """执行同步 HTTP JSON 请求。"""
         last_error = None
-        for attempt in range(1, self.retry_count + 1):
+        effective_timeout = self.timeout_sec if timeout_sec is None else max(0.1, float(timeout_sec))
+        effective_retry_count = self.retry_count if retry_count is None else max(1, int(retry_count))
+        for attempt in range(1, effective_retry_count + 1):
             try:
-                with self._opener.open(req, timeout=self.timeout_sec) as resp:
+                with self._opener.open(req, timeout=effective_timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except (ssl.SSLError, socket.timeout, TimeoutError, URLError, OSError) as exc:
                 last_error = exc
-                if attempt >= self.retry_count:
+                if attempt >= effective_retry_count:
                     break
                 time.sleep(self.retry_delay_sec * attempt)
         raise RuntimeError(self._format_http_error(last_error))

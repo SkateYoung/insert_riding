@@ -137,6 +137,31 @@ class _StopPoolLoop(Exception):
     """用于让后台订单池循环只执行一轮。"""
 
 
+class _PickupEtaPlanner:
+    """按车辆原始 GPS 返回预设时长的候选 ETA 测试替身。"""
+
+    enabled = True
+    strategy = "2"
+
+    def __init__(self, durations_by_origin):
+        self.durations_by_origin = dict(durations_by_origin)
+        self.calls = []
+
+    def estimate_ordered_stops_eta_sync(self, points, restriction_policy=None, timeout_sec=2.0):
+        self.calls.append({
+            "points": points,
+            "restriction_policy": restriction_policy,
+            "timeout_sec": timeout_sec,
+        })
+        origin_lon = float(points[0]["lon"])
+        if self.durations_by_origin[origin_lon] is None:
+            return {"ok": False, "reason": "simulated_eta_failure"}
+        return {
+            "ok": True,
+            "duration_sec": float(self.durations_by_origin[origin_lon]),
+        }
+
+
 class PoolTimeWindowMatchingTest(unittest.TestCase):
     """验证订单池匹配会尊重期望上车时间窗。"""
 
@@ -144,12 +169,14 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         CoreDispatcher.order_pool.clear()
         self._matching_window_config = CoreDispatcher.matching_window_config()
         CoreDispatcher.clear_route_cost_config()
+        CoreDispatcher.clear_pickup_eta_cache()
         self._route_cost_config = CoreDispatcher.route_cost_config_snapshot(19)
 
     def tearDown(self):
         CoreDispatcher.order_pool.clear()
         CoreDispatcher.configure_matching_window(**self._matching_window_config)
         CoreDispatcher.clear_route_cost_config()
+        CoreDispatcher.clear_pickup_eta_cache()
 
     def _run_one_pool_loop(self, fleet, city):
         with mock.patch("api.core.time.sleep", side_effect=_StopPoolLoop), \
@@ -169,6 +196,15 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
                 city,
                 operation_area_id=operation_area_id,
             )
+
+    def _wait_for_pickup_eta_jobs(self):
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            with CoreDispatcher.pickup_eta_lock:
+                if not CoreDispatcher.pickup_eta_inflight:
+                    return
+            time.sleep(0.01)
+        self.fail("候选上车 ETA 异步任务未在预期时间内完成")
 
     def test_future_order_stays_in_pool_before_dispatch_window(self):
         base_ts = 1_000_000.0
@@ -250,7 +286,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
             ["BATCH_A", "BATCH_B"],
         )
 
-    def test_area_cycle_prefers_feasible_idle_vehicle_over_busy_vehicle(self):
+    def test_area_cycle_prefers_much_faster_busy_vehicle_over_idle_vehicle(self):
         base_ts = 1_000_000.0
         node_ids = ["IDLE", "BUSY", "O_NEW", "D_NEW", "O_OLD", "D_OLD"]
         distances = {
@@ -280,10 +316,10 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
 
         self.assertEqual(assigned, 1)
         self.assertEqual(CoreDispatcher.order_pool, [])
-        self.assertEqual([step["order"].request_id for step in idle_vehicle.planned_route], ["NEW", "NEW"])
+        self.assertEqual(idle_vehicle.planned_route, [])
         self.assertEqual(
-            [step["order"].request_id for step in busy_vehicle.planned_route],
-            ["OLD", "OLD"],
+            sorted(step["order"].request_id for step in busy_vehicle.planned_route),
+            ["NEW", "NEW", "OLD", "OLD"],
         )
 
     def test_idle_candidate_wins_when_pickup_wait_within_threshold(self):
@@ -309,7 +345,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         )
 
         def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
-            wait_seconds = 480.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
+            wait_seconds = 120.0 if vehicle.vehicle_id == "IDLE_V" else 60.0
             absolute_cost = 100.0 if vehicle.vehicle_id == "IDLE_V" else 10.0
             details = {"metrics": {"pickup_times": {order.request_id: base_ts + wait_seconds}}}
             route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
@@ -414,6 +450,176 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertEqual(candidate["selection_policy"], "lowest_cost")
         self.assertEqual(candidate["route_alignment_score"], 0)
 
+    def test_amap_pickup_eta_excludes_candidate_outside_tolerance(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("IDLE", "O_NEW"): 1.0,
+            ("BUSY", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        idle_vehicle.gps = {"lon": 1.0, "lat": 23.0}
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        busy_vehicle.gps = {"lon": 2.0, "lat": 23.0}
+        old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        planner = _PickupEtaPlanner({1.0: 180.0, 2.0: 480.0})
+        CoreDispatcher.configure_route_cost(
+            19,
+            PICKUP_ETA_TOLERANCE_SECONDS=120.0,
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
+        )
+
+        def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
+            details = {"metrics": {"pickup_times": {order.request_id: base_ts + 60.0}}}
+            route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+            return route, 20.0 if vehicle is idle_vehicle else 10.0, details
+
+        with mock.patch.object(CoreDispatcher, "_get_route_planner", return_value=planner), \
+                mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            first = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+            self.assertIsNone(first)
+            self._wait_for_pickup_eta_jobs()
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], idle_vehicle)
+        self.assertEqual(candidate["pickup_eta_source"], "amap")
+        self.assertEqual(candidate["estimated_pickup_wait_seconds"], 180.0)
+        self.assertEqual(len(planner.calls), 2)
+
+    def test_busy_candidate_eta_points_include_existing_stops_before_new_pickup(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("V", "D_OLD"): 1.0,
+            ("D_OLD", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        vehicle = _fake_vehicle("V1", "V", base_ts)
+        vehicle.gps = {"lon": 113.1, "lat": 23.1}
+        old_order = _fake_order(city, "OLD", "V", "D_OLD", base_ts, 0, 3600)
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        route = [
+            {"type": "D", "order": old_order},
+            {"type": "O", "order": new_order},
+            {"type": "D", "order": new_order},
+        ]
+
+        points = CoreDispatcher._candidate_pickup_eta_points(vehicle, route, new_order)
+
+        self.assertEqual(len(points), 3)
+        self.assertEqual(points[0]["source"], "vehicle_raw_gps")
+        self.assertEqual(points[1]["id"], "D_OLD")
+        self.assertEqual(points[2]["id"], "O_NEW")
+
+    def test_amap_pickup_eta_failure_falls_back_to_local_wait(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("V", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        vehicle = _fake_vehicle("V1", "V", base_ts)
+        vehicle.gps = {"lon": 5.0, "lat": 23.0}
+        order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        planner = _PickupEtaPlanner({5.0: None})
+
+        def fake_insert(candidate_vehicle, candidate_order, city_map, return_details=False, route_cost_config=None):
+            details = {"metrics": {"pickup_times": {candidate_order.request_id: base_ts + 90.0}}}
+            route = [
+                {"type": "O", "order": candidate_order},
+                {"type": "D", "order": candidate_order},
+            ]
+            return route, 10.0, details
+
+        with mock.patch.object(CoreDispatcher, "_get_route_planner", return_value=planner), \
+                mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            self.assertIsNone(CoreDispatcher._best_vehicle_candidate_for_order(
+                order,
+                [vehicle],
+                city,
+                base_ts,
+            ))
+            self._wait_for_pickup_eta_jobs()
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                order,
+                [vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], vehicle)
+        self.assertEqual(candidate["pickup_eta_source"], "local_fallback")
+        self.assertEqual(candidate["estimated_pickup_wait_seconds"], 90.0)
+        self.assertEqual(len(planner.calls), 1)
+
+    def test_candidates_within_eta_tolerance_keep_existing_idle_priority(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("IDLE", "O_NEW"): 1.0,
+            ("BUSY", "O_NEW"): 1.0,
+            ("O_NEW", "D_NEW"): 1.0,
+        })
+        idle_vehicle = _fake_vehicle("IDLE_V", "IDLE", base_ts)
+        idle_vehicle.gps = {"lon": 3.0, "lat": 23.0}
+        busy_vehicle = _fake_vehicle("BUSY_V", "BUSY", base_ts)
+        busy_vehicle.gps = {"lon": 4.0, "lat": 23.0}
+        old_order = _fake_order(city, "OLD", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        busy_vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+        new_order = _fake_order(city, "NEW", "O_NEW", "D_NEW", base_ts, 0, 3600)
+        planner = _PickupEtaPlanner({3.0: 300.0, 4.0: 240.0})
+        CoreDispatcher.configure_route_cost(
+            19,
+            PICKUP_ETA_TOLERANCE_SECONDS=120.0,
+            IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS=600.0,
+            BUSY_VEHICLE_MAX_ABSOLUTE_COST=9999.0,
+        )
+
+        def fake_insert(vehicle, order, city_map, return_details=False, route_cost_config=None):
+            details = {"metrics": {"pickup_times": {order.request_id: base_ts + 60.0}}}
+            route = [{"type": "O", "order": order}, {"type": "D", "order": order}]
+            return route, 100.0 if vehicle is idle_vehicle else 10.0, details
+
+        with mock.patch.object(CoreDispatcher, "_get_route_planner", return_value=planner), \
+                mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=0.0), \
+                mock.patch.object(CoreDispatcher, "_try_insert_order", side_effect=fake_insert):
+            first = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+            self.assertIsNone(first)
+            self._wait_for_pickup_eta_jobs()
+            candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                new_order,
+                [idle_vehicle, busy_vehicle],
+                city,
+                base_ts,
+            )
+
+        self.assertEqual(candidate["vehicle"], idle_vehicle)
+        self.assertEqual(candidate["selection_policy"], "idle_wait_within_threshold")
+        self.assertEqual(candidate["estimated_pickup_wait_seconds"], 300.0)
+
     def test_area_cycle_spreads_batch_orders_to_remaining_idle_vehicles(self):
         base_ts = 1_000_000.0
         node_ids = ["V1", "V2", "O1", "D1", "O2", "D2"]
@@ -425,8 +631,8 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         }
         distances[("V1", "O1")] = _seconds_distance(30)
         distances[("V1", "O2")] = _seconds_distance(30)
-        distances[("V2", "O1")] = _seconds_distance(300)
-        distances[("V2", "O2")] = _seconds_distance(300)
+        distances[("V2", "O1")] = _seconds_distance(90)
+        distances[("V2", "O2")] = _seconds_distance(90)
         city = _TinyCity(distances)
         vehicle_a = _fake_vehicle("V1", "V1", base_ts)
         vehicle_b = _fake_vehicle("V2", "V2", base_ts)

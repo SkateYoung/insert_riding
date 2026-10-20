@@ -54,6 +54,7 @@ class RouteCostConfigApiTest(unittest.TestCase):
                 "operation_area_id": 19,
                 "WAIT_COST_PER_MIN": 12,
                 "PLANNED_ROUTE_INSERTION_PENALTY": 35,
+                "PICKUP_ETA_TOLERANCE_SECONDS": 90,
             },
         )
         area_25_response = self.client.get(
@@ -66,6 +67,7 @@ class RouteCostConfigApiTest(unittest.TestCase):
         self.assertEqual(area_19["operation_area_id"], 19)
         self.assertEqual(area_19["config"]["WAIT_COST_PER_MIN"], 12.0)
         self.assertEqual(area_19["config"]["PLANNED_ROUTE_INSERTION_PENALTY"], 35.0)
+        self.assertEqual(area_19["config"]["PICKUP_ETA_TOLERANCE_SECONDS"], 90.0)
         self.assertEqual(area_25["operation_area_id"], 25)
         self.assertEqual(
             area_25["config"]["WAIT_COST_PER_MIN"],

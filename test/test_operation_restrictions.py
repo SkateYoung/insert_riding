@@ -168,7 +168,7 @@ class FakePlanner(AmapDrivingRoutePlanner):
         )
         self.requests = []
 
-    def _urlopen_json(self, req):
+    def _urlopen_json(self, req, **kwargs):
         self.requests.append(req)
         return {
             "status": "1",
@@ -217,6 +217,39 @@ class AmapDrivingRestrictionTest(unittest.TestCase):
         self.assertIsNotNone(req.data)
         body = parse_qs(req.data.decode("utf-8"))
         self.assertIn("avoidpolygons", body)
+
+    def test_ordered_stops_eta_uses_waypoints_and_restriction(self):
+        planner = FakePlanner()
+        policy = normalize_policy_payload(policy_payload())
+        points = [
+            {"lon": 113.0, "lat": 23.0},
+            {"lon": 113.005, "lat": 23.005},
+            {"lon": 113.01, "lat": 23.01},
+        ]
+
+        result = planner.estimate_ordered_stops_eta_sync(points, restriction_policy=policy)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["duration_sec"], 10.0)
+        self.assertEqual(result["waypoint_count"], 1)
+        query = parse_qs(urlparse(planner.requests[0].full_url).query)
+        self.assertEqual(query["waypoints"][0], "113.005000,23.005000")
+        self.assertEqual(query["avoidpolygons"][0], policy["amap_avoidpolygons"])
+
+    def test_ordered_stops_eta_splits_more_than_sixteen_waypoints(self):
+        planner = FakePlanner()
+        points = [
+            {"lon": 113.0 + index * 0.001, "lat": 23.0}
+            for index in range(20)
+        ]
+
+        result = planner.estimate_ordered_stops_eta_sync(points)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["request_count"], 2)
+        self.assertEqual(result["waypoint_count"], 17)
+        self.assertEqual(result["duration_sec"], 20.0)
+        self.assertEqual(len(planner.requests), 2)
 
 
 class OperationRestrictionApiTest(unittest.TestCase):

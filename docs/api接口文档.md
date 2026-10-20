@@ -1266,7 +1266,8 @@ GET 响应示例：
     "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
     "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0,
     "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
-    "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 600.0
+    "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 600.0,
+    "PICKUP_ETA_TOLERANCE_SECONDS": 120.0
   },
   "defaults": {},
   "descriptions": {},
@@ -1285,7 +1286,8 @@ POST/PUT 请求体示例：
   "IN_CAR_COST_PER_MIN": 5,
   "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120,
   "PLANNED_ROUTE_INSERTION_PENALTY": 40,
-  "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 900
+  "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 900,
+  "PICKUP_ETA_TOLERANCE_SECONDS": 120
 }
 ```
 
@@ -1309,6 +1311,7 @@ POST/PUT 请求体示例：
 | `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
 | `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 已有任务车辆插单惩罚；调大后更倾向于把订单分给空车，调小后更容易给顺路忙车插单 |
 | `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` | number | 否 | 空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择 |
+| `PICKUP_ETA_TOLERANCE_SECONDS` | number | 否 | 高德预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆，默认 120 秒 |
 
 说明：
 
@@ -1320,6 +1323,10 @@ POST/PUT 请求体示例：
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
 - 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
 - 顺路优先会先看新订单 O/D 与车辆已有订单是否同起点、同终点或同路线站点，再在同级顺路候选中比较成本。
+- 候选选择先使用本地 A* 完成全部可行性和成本评估，再对本地预计上车时间最优的 3 辆车异步查询高德 ETA。
+- 高德 ETA 未就绪时订单继续保留在订单池，下一匹配周期读取结果；请求过程不会占用全局状态锁等待网络。
+- 精排时先应用 `PICKUP_ETA_TOLERANCE_SECONDS`，超出“最快 ETA + 容差”的候选不再参与空车、顺路和成本比较。
+- 高德不可用、超时或请求失败时自动使用本地 A* 预计时间，不会导致订单永久停留在订单池。
 
 代码默认值示例：
 
@@ -1331,6 +1338,7 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
     },
     25: {
         "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+        "PICKUP_ETA_TOLERANCE_SECONDS": 120.0,
     },
 }
 ```

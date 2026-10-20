@@ -626,7 +626,7 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["duration_sec"], 54.0)
         self.assertEqual(result["distance_m"], 321.0)
-        self.assertEqual(result["strategy"], "37")
+        self.assertEqual(result["strategy"], planner.strategy)
         self.assertEqual(len(result["polyline"]), 2)
 
     def test_driving_route_planner_plans_segments_and_combines_path(self):
