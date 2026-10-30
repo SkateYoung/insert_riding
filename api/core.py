@@ -43,8 +43,8 @@ class CoreDispatcher:
         "W_ENTERPRISE": 0.30,
         "W_SOCIAL": 0.20,
         "W_FAIRNESS": 0.05,
-        "WAIT_COST_PER_MIN": 5.0,
-        "IN_CAR_COST_PER_MIN": 5.0,
+        "WAIT_COST_PER_MIN": 20.0,
+        "IN_CAR_COST_PER_MIN": 10.0,
         "LATE_ARRIVAL_COST_PER_MIN": 0.0,
         "OLD_DELAY_COST_PER_MIN": 10.0,
         "SEVERE_OLD_DELAY_PENALTY": 30.0,
@@ -55,6 +55,8 @@ class CoreDispatcher:
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
+        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 15 * 60.0,
+        "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 3 * 60.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
         "W_PASSENGER": "乘客体验总权重，影响候车、在车、迟到和绕路成本的整体占比。",
@@ -73,6 +75,8 @@ class CoreDispatcher:
         "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": "空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择。",
         "PICKUP_ETA_TOLERANCE_SECONDS": "预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆。",
+        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": "已有乘客相对首次承诺 ETA 可接受的最大累计插单延误秒数。",
+        "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": "普通订单在池内等待达到该秒数后晋升为优先匹配订单。",
     }
     # 按运营区配置代码默认值时只需填写与公共默认值不同的参数。
     # 示例：19: {"WAIT_COST_PER_MIN": 8.0, "IN_CAR_COST_PER_MIN": 10.0}
@@ -94,14 +98,16 @@ class CoreDispatcher:
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
-        "PICKUP_ETA_TOLERANCE_SECONDS": 600.0},
+        "PICKUP_ETA_TOLERANCE_SECONDS": 600.0,
+        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 15 * 60.0,
+        "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 3 * 60.0},
         # 白云运营区
-        24:{        
+        24:{
         "W_PASSENGER": 0.50,
         "W_ENTERPRISE": 0.30,
         "W_SOCIAL": 0.20,
         "W_FAIRNESS": 0.05,
-        "WAIT_COST_PER_MIN": 5.0,
+        "WAIT_COST_PER_MIN": 15.0,
         "IN_CAR_COST_PER_MIN": 5.0,
         "LATE_ARRIVAL_COST_PER_MIN": 0.0,
         "OLD_DELAY_COST_PER_MIN": 15.0,
@@ -112,7 +118,10 @@ class CoreDispatcher:
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 500.0,
         "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
-        "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0}
+        "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
+        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 8 * 60.0,
+        "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 3 * 60.0
+        }
     }
     # 各运营区维护独立的运行时成本配置；未配置区域按默认值初始化。
     route_cost_configs_by_area = {}
@@ -142,10 +151,12 @@ class CoreDispatcher:
     DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS = 3 * 60
 
     # 车辆接近当前队首上下客点时锁定队首，避免插单/取消重排打断司机端正在执行的动作。
-    ROUTE_HEAD_LOCK_DISTANCE_M = 100.0
-    ROUTE_HEAD_LOCK_ETA_SECONDS = 30
+    ROUTE_HEAD_LOCK_DISTANCE_M = 500.0
+    ROUTE_HEAD_LOCK_ETA_SECONDS = 60
+    # 已迟到订单比较 ETA 时容忍 1 秒浮点误差；累计最大延误仍执行严格上限。
+    INSERTION_DELAY_EPSILON_SECONDS = 1.0
 
-    # 高德路线规划/ETA 后台配置：展示 ETA 周期刷新；候选上车 ETA 只参与最终精排。
+    # 高德路线规划/ETA 仅负责派单后的导航与展示；候选车辆精排使用本地 A* ETA。
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
     ETA_REFRESH_MAX_WORKERS = 4
     ROUTE_GRASP_REFRESH_INTERVAL_SECONDS = 5.0
@@ -162,16 +173,6 @@ class CoreDispatcher:
     route_grasp_executor_workers = 4
     route_grasp_inflight = set()
     route_grasp_inflight_lock = threading.Lock()
-    PICKUP_ETA_TOP_K = 3
-    PICKUP_ETA_CACHE_TTL_SECONDS = 60.0
-    PICKUP_ETA_FAILURE_CACHE_TTL_SECONDS = 15.0
-    PICKUP_ETA_CACHE_MAX_ENTRIES = 2048
-    PICKUP_ETA_REQUEST_TIMEOUT_SECONDS = 2.0
-    pickup_eta_executor = None
-    pickup_eta_executor_workers = 3
-    pickup_eta_cache = {}
-    pickup_eta_inflight = set()
-    pickup_eta_lock = threading.RLock()
     operation_restriction_policies_by_area = {}
     operation_restriction_lock = threading.Lock()
 
@@ -301,6 +302,39 @@ class CoreDispatcher:
         if request_to_earliest <= CoreDispatcher.ORDER_MATCH_FAR_PICKUP_THRESHOLD_SECONDS:
             return True
         return current_ts >= earliest_ts - CoreDispatcher.ORDER_MATCH_FAR_PICKUP_LEAD_SECONDS
+
+    @staticmethod
+    def _ensure_order_pool_entered_at(order, current_timestamp=None):
+        """确保订单只在首次进入内存池时记录入池时间。"""
+        now_ts = time.time() if current_timestamp is None else float(current_timestamp)
+        try:
+            entered_at = float(getattr(order, "pool_entered_at", None))
+        except (TypeError, ValueError):
+            entered_at = None
+        if entered_at is None or not math.isfinite(entered_at):
+            entered_at = now_ts
+            order.pool_entered_at = entered_at
+        return entered_at
+
+    @classmethod
+    def order_pool_priority_info(cls, order, route_cost_config=None, current_timestamp=None):
+        """返回订单池等待时长及普通/优先逻辑等级。"""
+        now_ts = time.time() if current_timestamp is None else float(current_timestamp)
+        entered_at = cls._ensure_order_pool_entered_at(order, now_ts)
+        operation_area_id = cls._order_operation_area_id(order)
+        route_cost_config = route_cost_config or cls.route_cost_config_snapshot(operation_area_id)
+        promotion_seconds = max(
+            0.0,
+            float(route_cost_config["ORDER_POOL_PRIORITY_PROMOTION_SECONDS"]),
+        )
+        pool_wait_seconds = max(0.0, now_ts - entered_at)
+        return {
+            "pool_level": "priority" if pool_wait_seconds >= promotion_seconds else "normal",
+            "pool_entered_at": entered_at,
+            "pool_wait_seconds": pool_wait_seconds,
+            "priority_promoted_at": entered_at + promotion_seconds,
+            "priority_promotion_seconds": promotion_seconds,
+        }
 
     @classmethod
     def matching_window_config(cls):
@@ -923,6 +957,352 @@ class CoreDispatcher:
         }
 
     @staticmethod
+    def _finite_eta(value):
+        """把 ETA 值规范为有限时间戳，非法值统一返回 None。"""
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    @staticmethod
+    def _route_timeline_metrics(route_details):
+        """读取路线推演中的上下车时间线。"""
+        metrics = route_details.get("metrics") if isinstance(route_details, dict) else None
+        if not isinstance(metrics, dict):
+            metrics = {}
+        pickup_times = metrics.get("pickup_times")
+        arrival_times = metrics.get("arrival_times")
+        return (
+            pickup_times if isinstance(pickup_times, dict) else {},
+            arrival_times if isinstance(arrival_times, dict) else {},
+        )
+
+    @classmethod
+    def _commit_order_eta_baseline(cls, order, route_details, overwrite=False):
+        """保存订单首次匹配时的本地 A* 承诺 ETA。"""
+        if order is None:
+            return
+        pickup_times, arrival_times = cls._route_timeline_metrics(route_details)
+        request_id = getattr(order, "request_id", None)
+        pickup_eta = cls._finite_eta(pickup_times.get(request_id))
+        dropoff_eta = cls._finite_eta(arrival_times.get(request_id))
+        if pickup_eta is not None and (overwrite or cls._finite_eta(getattr(order, "committed_pickup_eta", None)) is None):
+            order.committed_pickup_eta = pickup_eta
+        if dropoff_eta is not None and (overwrite or cls._finite_eta(getattr(order, "committed_dropoff_eta", None)) is None):
+            order.committed_dropoff_eta = dropoff_eta
+
+    @classmethod
+    def _initialize_existing_eta_baselines(cls, route, route_details):
+        """为升级前已在路线中的订单补齐承诺 ETA，后续不再随插单重置。"""
+        seen = set()
+        for step in route or []:
+            order = step.get("order") if isinstance(step, dict) else None
+            request_id = getattr(order, "request_id", None)
+            if order is None or request_id in seen:
+                continue
+            seen.add(request_id)
+            cls._commit_order_eta_baseline(order, route_details)
+
+    @classmethod
+    def update_vehicle_local_astar_eta_snapshot(cls, vehicle, segments=None, generated_at=None):
+        """基于既有 A* 分段距离更新车辆订单 ETA 与承诺延误快照。
+
+        该方法不再次执行寻路。快照只在业务路线重建或服务步骤变化时更新，
+        committed_* 始终保留首次派单承诺值，便于观察多次插单后的累计延误。
+        """
+        route = list(getattr(vehicle, "planned_route", None) or [])
+        segments = list(segments or [])
+        snapshot_time = cls._finite_eta(generated_at)
+        if snapshot_time is None:
+            snapshot_time = cls._finite_eta(getattr(vehicle, "time", None))
+        if snapshot_time is None:
+            snapshot_time = time.time()
+
+        previous_snapshot = getattr(vehicle, "local_astar_eta_snapshot", None) or {}
+        previous_orders = {
+            str(item.get("request_id")): item
+            for item in previous_snapshot.get("orders") or []
+            if isinstance(item, dict) and item.get("request_id") not in (None, "")
+        }
+
+        orders = {}
+        order_sequence = []
+        for step in route:
+            order = step.get("order") if isinstance(step, dict) else None
+            request_id = str(getattr(order, "request_id", "") or "")
+            if order is None or not request_id or request_id in orders:
+                continue
+            orders[request_id] = order
+            order_sequence.append(request_id)
+        for order in getattr(vehicle, "on_board_orders", None) or []:
+            request_id = str(getattr(order, "request_id", "") or "")
+            if not request_id or request_id in orders:
+                continue
+            orders[request_id] = order
+            order_sequence.append(request_id)
+
+        current_pickups = {}
+        current_dropoffs = {}
+        sim_time = snapshot_time
+        segment_cursor = 0
+        timeline_error = None
+
+        for step in route:
+            matched_segment = None
+            while segment_cursor < len(segments):
+                candidate_segment = segments[segment_cursor]
+                segment_cursor += 1
+                if cls._route_segment_matches_step(candidate_segment, step):
+                    matched_segment = candidate_segment
+                    break
+            if matched_segment is None:
+                timeline_error = "route_segment_missing"
+                break
+
+            distance_m = cls._finite_eta(
+                matched_segment.get("aStarDistanceM", matched_segment.get("distance"))
+            )
+            if distance_m is None or distance_m < 0 or SPEED_MPS <= 0:
+                timeline_error = "route_segment_distance_invalid"
+                break
+            sim_time += distance_m / SPEED_MPS
+
+            order = step.get("order")
+            request_id = str(getattr(order, "request_id", "") or "")
+            if step.get("type") == "O":
+                sim_time = max(sim_time, cls._order_pickup_earliest_timestamp(order))
+                current_pickups[request_id] = sim_time
+            elif step.get("type") == "D":
+                current_dropoffs[request_id] = sim_time
+
+        def _delta(current_eta, committed_eta):
+            current_eta = cls._finite_eta(current_eta)
+            committed_eta = cls._finite_eta(committed_eta)
+            if current_eta is None or committed_eta is None:
+                return None, None
+            signed_delta = current_eta - committed_eta
+            return signed_delta, max(0.0, signed_delta)
+
+        order_items = []
+        on_board_ids = {
+            str(getattr(order, "request_id", "") or "")
+            for order in getattr(vehicle, "on_board_orders", None) or []
+        }
+        for request_id in order_sequence:
+            order = orders[request_id]
+            status = str(getattr(order, "status", "") or "")
+            phase = "riding" if request_id in on_board_ids or status == "riding" else "waiting_pickup"
+            committed_pickup = cls._finite_eta(getattr(order, "committed_pickup_eta", None))
+            committed_dropoff = cls._finite_eta(getattr(order, "committed_dropoff_eta", None))
+            current_pickup = cls._finite_eta(current_pickups.get(request_id))
+            if current_pickup is None and phase == "riding":
+                # O 步骤完成后保留上车前最后一次路线推演值，避免把司机点击时间混入插单延误。
+                current_pickup = cls._finite_eta(
+                    (previous_orders.get(request_id) or {}).get("current_pickup_eta")
+                )
+            current_dropoff = cls._finite_eta(current_dropoffs.get(request_id))
+            pickup_delta, pickup_delay = _delta(current_pickup, committed_pickup)
+            dropoff_delta, dropoff_delay = _delta(current_dropoff, committed_dropoff)
+            effective_delay = dropoff_delay if phase == "riding" else pickup_delay
+            order_items.append({
+                "request_id": request_id,
+                "status": status or None,
+                "phase": phase,
+                "passenger_count": getattr(order, "passenger_count", None),
+                "committed_pickup_eta": committed_pickup,
+                "committed_dropoff_eta": committed_dropoff,
+                "current_pickup_eta": current_pickup,
+                "current_dropoff_eta": current_dropoff,
+                "pickup_eta_delta_seconds": pickup_delta,
+                "dropoff_eta_delta_seconds": dropoff_delta,
+                "pickup_delay_seconds": pickup_delay,
+                "dropoff_delay_seconds": dropoff_delay,
+                "effective_delay_seconds": effective_delay,
+                "effective_delay_stage": "dropoff" if phase == "riding" else "pickup",
+            })
+
+        snapshot = {
+            "status": "incomplete" if timeline_error else ("ready" if order_items else "empty"),
+            "generated_at": snapshot_time,
+            "speed_mps": SPEED_MPS,
+            "timeline_error": timeline_error,
+            "orders": order_items,
+        }
+        vehicle.local_astar_eta_snapshot = snapshot
+        return snapshot
+
+    @classmethod
+    def _validate_existing_passenger_insertion(
+        cls,
+        current_route,
+        candidate_route,
+        on_board_orders,
+        current_route_details,
+        candidate_route_details,
+        new_order,
+        max_delay_seconds,
+    ):
+        """校验插单不会突破已有候车及在车乘客的硬性延误上限。"""
+        if not current_route:
+            return True, {}
+
+        current_pickups, current_dropoffs = cls._route_timeline_metrics(current_route_details)
+        candidate_pickups, candidate_dropoffs = cls._route_timeline_metrics(candidate_route_details)
+        epsilon = cls.INSERTION_DELAY_EPSILON_SECONDS
+        max_delay_seconds = max(0.0, float(max_delay_seconds))
+        new_request_id = str(getattr(new_order, "request_id", ""))
+
+        candidate_step_indices = {}
+        for index, step in enumerate(candidate_route or []):
+            if not isinstance(step, dict):
+                continue
+            order = step.get("order")
+            key = (str(step.get("type") or "").upper(), str(getattr(order, "request_id", "")))
+            candidate_step_indices.setdefault(key, index)
+        new_origin_index = candidate_step_indices.get(("O", new_request_id))
+
+        on_board_by_id = {
+            str(getattr(order, "request_id", "")): order
+            for order in on_board_orders or []
+        }
+        waiting_by_id = {}
+        for step in current_route or []:
+            if not isinstance(step, dict) or str(step.get("type") or "").upper() != "O":
+                continue
+            order = step.get("order")
+            request_id = str(getattr(order, "request_id", ""))
+            if order is not None and request_id and request_id not in on_board_by_id:
+                waiting_by_id.setdefault(request_id, order)
+
+        for request_id, order in waiting_by_id.items():
+            existing_dropoff_index = candidate_step_indices.get(("D", request_id))
+            # 新订单从该乘客下车后才开始服务，不会影响其上下车 ETA，直接放行。
+            if (
+                new_origin_index is not None
+                and existing_dropoff_index is not None
+                and new_origin_index > existing_dropoff_index
+            ):
+                continue
+
+            current_pickup = cls._finite_eta(current_pickups.get(getattr(order, "request_id", request_id)))
+            candidate_pickup = cls._finite_eta(candidate_pickups.get(getattr(order, "request_id", request_id)))
+            committed_pickup = cls._finite_eta(getattr(order, "committed_pickup_eta", None))
+            if current_pickup is None or candidate_pickup is None or committed_pickup is None:
+                return False, {
+                    "infeasible_reason": "passenger_eta_baseline_missing",
+                    "request_id": request_id,
+                    "passenger_state": "waiting_pickup",
+                }
+
+            latest_pickup = cls._order_pickup_latest_timestamp(order)
+            if current_pickup > latest_pickup + epsilon:
+                if candidate_pickup > current_pickup + epsilon:
+                    return False, {
+                        "infeasible_reason": "overdue_pickup_protection_violated",
+                        "request_id": request_id,
+                        "current_pickup_time": current_pickup,
+                        "candidate_pickup_time": candidate_pickup,
+                    }
+            elif candidate_pickup > latest_pickup + epsilon:
+                return False, {
+                    "infeasible_reason": "waiting_pickup_latest_exceeded",
+                    "request_id": request_id,
+                    "latest_pickup_time": latest_pickup,
+                    "candidate_pickup_time": candidate_pickup,
+                }
+
+            current_delay = max(0.0, current_pickup - committed_pickup)
+            candidate_delay = max(0.0, candidate_pickup - committed_pickup)
+            incremental_delay = candidate_pickup - current_pickup
+
+            # 已经超过累计上限时只禁止继续增加延误；ETA 不变或提前仍可插单。
+            if current_delay > max_delay_seconds:
+                if incremental_delay > epsilon:
+                    return False, {
+                        "infeasible_reason": "waiting_passenger_delay_exceeded",
+                        "request_id": request_id,
+                        "committed_pickup_eta": committed_pickup,
+                        "current_pickup_time": current_pickup,
+                        "candidate_pickup_time": candidate_pickup,
+                        "current_delay_seconds": current_delay,
+                        "delay_seconds": candidate_delay,
+                        "incremental_delay_seconds": incremental_delay,
+                        "max_delay_seconds": max_delay_seconds,
+                    }
+                continue
+
+            if candidate_delay > max_delay_seconds:
+                return False, {
+                    "infeasible_reason": "waiting_passenger_delay_exceeded",
+                    "request_id": request_id,
+                    "committed_pickup_eta": committed_pickup,
+                    "current_pickup_time": current_pickup,
+                    "candidate_pickup_time": candidate_pickup,
+                    "current_delay_seconds": current_delay,
+                    "delay_seconds": candidate_delay,
+                    "incremental_delay_seconds": incremental_delay,
+                    "max_delay_seconds": max_delay_seconds,
+                }
+
+        for request_id, order in on_board_by_id.items():
+            existing_dropoff_index = candidate_step_indices.get(("D", request_id))
+            # 新订单 O 点位于在车乘客 D 点之后时，不会改变该乘客的送达时间。
+            if (
+                new_origin_index is not None
+                and existing_dropoff_index is not None
+                and new_origin_index > existing_dropoff_index
+            ):
+                continue
+
+            current_dropoff = cls._finite_eta(current_dropoffs.get(getattr(order, "request_id", request_id)))
+            candidate_dropoff = cls._finite_eta(candidate_dropoffs.get(getattr(order, "request_id", request_id)))
+            committed_dropoff = cls._finite_eta(getattr(order, "committed_dropoff_eta", None))
+            if current_dropoff is None or candidate_dropoff is None or committed_dropoff is None:
+                return False, {
+                    "infeasible_reason": "passenger_eta_baseline_missing",
+                    "request_id": request_id,
+                    "passenger_state": "riding",
+                }
+
+            current_delay = max(0.0, current_dropoff - committed_dropoff)
+            candidate_delay = max(0.0, candidate_dropoff - committed_dropoff)
+            incremental_delay = candidate_dropoff - current_dropoff
+
+            # 在车乘客已经超限时，候选路线不能再推迟其下车；零增量或提前允许。
+            if current_delay > max_delay_seconds:
+                if incremental_delay > epsilon:
+                    return False, {
+                        "infeasible_reason": "onboard_passenger_delay_exceeded",
+                        "request_id": request_id,
+                        "committed_dropoff_eta": committed_dropoff,
+                        "current_dropoff_time": current_dropoff,
+                        "candidate_dropoff_time": candidate_dropoff,
+                        "current_delay_seconds": current_delay,
+                        "delay_seconds": candidate_delay,
+                        "incremental_delay_seconds": incremental_delay,
+                        "max_delay_seconds": max_delay_seconds,
+                    }
+                continue
+
+            if candidate_delay > max_delay_seconds:
+                return False, {
+                    "infeasible_reason": "onboard_passenger_delay_exceeded",
+                    "request_id": request_id,
+                    "committed_dropoff_eta": committed_dropoff,
+                    "current_dropoff_time": current_dropoff,
+                    "candidate_dropoff_time": candidate_dropoff,
+                    "current_delay_seconds": current_delay,
+                    "delay_seconds": candidate_delay,
+                    "incremental_delay_seconds": incremental_delay,
+                    "max_delay_seconds": max_delay_seconds,
+                }
+
+        return True, {
+            "max_passenger_insertion_delay_seconds": max_delay_seconds,
+        }
+
+    @staticmethod
     def _try_insert_order(vehicle, new_order, city_map, return_details=False, route_cost_config=None):
         """【组客内循环】：针对单车的贪婪性全路径缝隙插入探测寻优。
         
@@ -939,6 +1319,12 @@ class CoreDispatcher:
             tuple: 默认返回 (最优路径 list|None, 最优成本 float)；
                 return_details=True 时返回 (最优路径, 最优成本, 成本明细)。
         """
+        operation_area_id = CoreDispatcher._coerce_operation_area_id(
+            getattr(vehicle, "operation_area_id", None)
+        ) or CoreDispatcher._order_operation_area_id(new_order)
+        route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot(operation_area_id)
+        max_delay_seconds = route_cost_config["MAX_PASSENGER_INSERTION_DELAY_SECONDS"]
+
         if not CoreDispatcher._vehicle_has_capacity_for_order(vehicle, new_order):
             if return_details:
                 return None, float('inf'), {}
@@ -962,18 +1348,34 @@ class CoreDispatcher:
             'operation_area_id': getattr(vehicle, "operation_area_id", None),
         }
         
-        # 在做任何尝试之前，先推演一次原路线，获取所有车上老乘客的原始 ETA
+        # 插单前只推演一次当前路线，作为已有乘客延误与最晚上车保护的比较基线。
         orig_etas = None
-        if vehicle.on_board_orders and route:
-            _, _, orig_etas = CoreDispatcher.evaluate_route(
+        current_route_details = {}
+        if route:
+            baseline_result = CoreDispatcher.evaluate_route(
                 route,
                 v_state,
                 vehicle.on_board_orders,
                 city_map,
                 vehicle.capacity,
                 v_zone=vehicle.op_zone,
+                return_details=True,
                 route_cost_config=route_cost_config,
             )
+            if len(baseline_result) == 4:
+                baseline_feasible, _, _, current_route_details = baseline_result
+            else:
+                baseline_feasible, _, orig_etas = baseline_result
+                current_route_details = {}
+            if not baseline_feasible:
+                if return_details:
+                    return None, float('inf'), {
+                        "infeasible_reason": "existing_route_baseline_unavailable",
+                    }
+                return None, float('inf')
+            CoreDispatcher._initialize_existing_eta_baselines(route, current_route_details)
+            _, baseline_arrivals = CoreDispatcher._route_timeline_metrics(current_route_details)
+            orig_etas = baseline_arrivals or orig_etas
         
         for i in range(min_origin_index, n + 1):
             temp_route = route[:i] + [o_step] + route[i:]
@@ -996,7 +1398,20 @@ class CoreDispatcher:
                 else:
                     is_feasible, cost, _ = eval_result
                     details = {}
-                if is_feasible and cost < best_cost:
+                constraint_ok = False
+                constraint_details = {}
+                if is_feasible:
+                    constraint_ok, constraint_details = CoreDispatcher._validate_existing_passenger_insertion(
+                        route,
+                        test_route,
+                        vehicle.on_board_orders,
+                        current_route_details,
+                        details,
+                        new_order,
+                        max_delay_seconds,
+                    )
+                if is_feasible and constraint_ok and cost < best_cost:
+                    details["passenger_delay_constraints"] = constraint_details
                     best_cost = cost
                     best_route = test_route
                     best_details = details
@@ -1054,8 +1469,22 @@ class CoreDispatcher:
                             is_feasible, cost, _ = eval_result
                             details = {}
                         
-                        # 若成本存在优化，立刻吸纳新的序列
-                        if is_feasible and cost < (best_cost - 0.001):
+                        constraint_ok = False
+                        constraint_details = {}
+                        if is_feasible:
+                            constraint_ok, constraint_details = CoreDispatcher._validate_existing_passenger_insertion(
+                                route,
+                                mut_route,
+                                vehicle.on_board_orders,
+                                current_route_details,
+                                details,
+                                new_order,
+                                max_delay_seconds,
+                            )
+
+                        # 2-Opt 同样必须满足已有乘客延误与最晚上车硬约束。
+                        if is_feasible and constraint_ok and cost < (best_cost - 0.001):
+                            details["passenger_delay_constraints"] = constraint_details
                             best_cost = cost
                             best_route = mut_route
                             best_details = details
@@ -1086,6 +1515,7 @@ class CoreDispatcher:
             bool: 永远返回 False 表示进入池化，切断即时指派避免出现极度绕路。
         """
         print(f"[Core.Dispatcher] 新订单 [单{order.request_id}] 注入系统统筹池，等待匹配车辆中...")
+        CoreDispatcher._ensure_order_pool_entered_at(order)
         CoreDispatcher.order_pool.append(order)
         persistence.record_order_created(order, city_map, status="pooled")
         return False
@@ -1258,242 +1688,6 @@ class CoreDispatcher:
         return max(0.0, pickup_time - wait_start_time)
 
     @staticmethod
-    def _candidate_pickup_eta_points(vehicle, route, order):
-        """生成车辆原始 GPS 到新订单上车点的有序高德停靠点。"""
-        start_point = CoreDispatcher._vehicle_raw_gps_route_start_point(vehicle)
-        if start_point is None:
-            return []
-
-        points = [start_point]
-        target_request_id = str(getattr(order, "request_id", ""))
-        target_found = False
-        for step in route or []:
-            if not isinstance(step, dict):
-                continue
-            step_type = str(step.get("type") or "").upper()
-            if step_type not in {"O", "D"}:
-                continue
-            step_order = step.get("order")
-            if step_order is None:
-                continue
-            point = CoreDispatcher._order_original_path_point(
-                step_order,
-                step_type,
-                getattr(step_order, "o_node", None) if step_type == "O" else getattr(step_order, "d_node", None),
-            )
-            if isinstance(point, dict):
-                try:
-                    lon = float(point.get("lon"))
-                    lat = float(point.get("lat"))
-                except (TypeError, ValueError):
-                    lon = None
-                    lat = None
-                if lon is not None and lat is not None and math.isfinite(lon) and math.isfinite(lat):
-                    normalized = copy.deepcopy(point)
-                    normalized["lon"] = lon
-                    normalized["lat"] = lat
-                    points.append(normalized)
-            if (
-                step_type == "O"
-                and str(getattr(step_order, "request_id", "")) == target_request_id
-            ):
-                target_found = True
-                break
-        return points if target_found and len(points) >= 2 else []
-
-    @classmethod
-    def _pickup_eta_cache_key(cls, operation_area_id, points, restriction_policy, strategy):
-        """按运营区、原始坐标序列、规划策略和禁区生成 ETA 缓存键。"""
-        parts = [
-            cls._coerce_operation_area_id(operation_area_id),
-            str(strategy or ""),
-            restriction_signature(restriction_policy),
-        ]
-        for point in points or []:
-            parts.append(f"{float(point['lon']):.6f},{float(point['lat']):.6f}")
-        return cls._short_route_version("pickup_eta", parts)
-
-    @classmethod
-    def _pickup_eta_cached_result(cls, cache_key):
-        """读取未过期的候选上车 ETA 缓存。"""
-        now_monotonic = time.monotonic()
-        with cls.pickup_eta_lock:
-            entry = cls.pickup_eta_cache.get(cache_key)
-            if not isinstance(entry, dict):
-                return None
-            if float(entry.get("expires_at", 0.0) or 0.0) <= now_monotonic:
-                cls.pickup_eta_cache.pop(cache_key, None)
-                return None
-            return copy.deepcopy(entry.get("result"))
-
-    @classmethod
-    def _execute_pickup_eta_job(cls, cache_key, planner, points, restriction_policy):
-        """在线程池中请求候选上车 ETA，并写入短时缓存。"""
-        try:
-            result = planner.estimate_ordered_stops_eta_sync(
-                points,
-                restriction_policy=restriction_policy,
-                timeout_sec=cls.PICKUP_ETA_REQUEST_TIMEOUT_SECONDS,
-            )
-            if not isinstance(result, dict):
-                result = {"ok": False, "reason": "invalid_eta_result"}
-        except Exception as exc:
-            result = {"ok": False, "reason": str(exc)}
-            log_exception(
-                "api.core.pickup_eta_request",
-                exc,
-                context={"cache_key": cache_key},
-            )
-        ttl_seconds = (
-            cls.PICKUP_ETA_CACHE_TTL_SECONDS
-            if result.get("ok")
-            else cls.PICKUP_ETA_FAILURE_CACHE_TTL_SECONDS
-        )
-        with cls.pickup_eta_lock:
-            now_monotonic = time.monotonic()
-            expired_keys = [
-                key for key, entry in cls.pickup_eta_cache.items()
-                if float((entry or {}).get("expires_at", 0.0) or 0.0) <= now_monotonic
-            ]
-            for key in expired_keys:
-                cls.pickup_eta_cache.pop(key, None)
-            if len(cls.pickup_eta_cache) >= cls.PICKUP_ETA_CACHE_MAX_ENTRIES:
-                oldest_key = min(
-                    cls.pickup_eta_cache,
-                    key=lambda key: float(cls.pickup_eta_cache[key].get("expires_at", 0.0) or 0.0),
-                )
-                cls.pickup_eta_cache.pop(oldest_key, None)
-            cls.pickup_eta_cache[cache_key] = {
-                "result": copy.deepcopy(result),
-                "expires_at": now_monotonic + ttl_seconds,
-            }
-            cls.pickup_eta_inflight.discard(cache_key)
-
-    @classmethod
-    def _schedule_pickup_eta_job(cls, cache_key, planner, points, restriction_policy):
-        """提交去重后的候选上车 ETA 任务，提交过程不等待网络。"""
-        with cls.pickup_eta_lock:
-            if cache_key in cls.pickup_eta_inflight:
-                return False
-            if cls.pickup_eta_executor is None:
-                cls.pickup_eta_executor = ThreadPoolExecutor(
-                    max_workers=cls.pickup_eta_executor_workers,
-                    thread_name_prefix="PickupEtaRequest",
-                )
-            cls.pickup_eta_inflight.add(cache_key)
-            try:
-                cls.pickup_eta_executor.submit(
-                    cls._execute_pickup_eta_job,
-                    cache_key,
-                    planner,
-                    copy.deepcopy(points),
-                    copy.deepcopy(restriction_policy),
-                )
-            except Exception:
-                cls.pickup_eta_inflight.discard(cache_key)
-                raise
-        return True
-
-    @classmethod
-    def clear_pickup_eta_cache(cls, shutdown_executor=False):
-        """清理候选上车 ETA 缓存；测试或系统关闭时可同步停止执行器。"""
-        executor = None
-        with cls.pickup_eta_lock:
-            if shutdown_executor:
-                executor = cls.pickup_eta_executor
-                cls.pickup_eta_executor = None
-        if executor is not None:
-            executor.shutdown(wait=True)
-        with cls.pickup_eta_lock:
-            cls.pickup_eta_cache.clear()
-            cls.pickup_eta_inflight.clear()
-
-    @staticmethod
-    def _pickup_wait_from_travel_duration(order, current_timestamp, duration_seconds):
-        """把高德行驶时长换算成考虑预约最早时间的预计等车时间。"""
-        try:
-            now_ts = float(current_timestamp)
-            duration = max(0.0, float(duration_seconds))
-        except (TypeError, ValueError):
-            return float("inf")
-        earliest_ts = CoreDispatcher._order_pickup_earliest_timestamp(order)
-        pickup_time = max(now_ts + duration, earliest_ts)
-        return max(0.0, pickup_time - max(now_ts, earliest_ts))
-
-    @classmethod
-    def _refine_candidates_by_pickup_eta(cls, order, candidates, current_timestamp):
-        """异步预热 Top 3 候选的高德 ETA，全部就绪后返回精排候选。"""
-        if not candidates:
-            return []
-        locally_sorted = sorted(
-            candidates,
-            key=lambda item: (item.get("estimated_pickup_wait_seconds", float("inf")), item["cost"]),
-        )
-        top_candidates = locally_sorted[:cls.PICKUP_ETA_TOP_K]
-        planner = cls._get_route_planner()
-        if planner is None or not planner.enabled:
-            for candidate in candidates:
-                candidate["pickup_eta_source"] = "local_fallback"
-            return candidates
-
-        operation_area_id = cls._order_operation_area_id(order)
-        restriction_policy = cls.current_operation_restriction_policy(operation_area_id)
-        prepared = []
-        schedulable_count = 0
-        pending = False
-        for candidate in top_candidates:
-            points = cls._candidate_pickup_eta_points(
-                candidate["vehicle"],
-                candidate["route"],
-                order,
-            )
-            if not points:
-                candidate["pickup_eta_source"] = "local_fallback"
-                prepared.append(candidate)
-                continue
-
-            schedulable_count += 1
-            cache_key = cls._pickup_eta_cache_key(
-                operation_area_id,
-                points,
-                restriction_policy,
-                planner.strategy,
-            )
-            eta_result = cls._pickup_eta_cached_result(cache_key)
-            if eta_result is None:
-                cls._schedule_pickup_eta_job(
-                    cache_key,
-                    planner,
-                    points,
-                    restriction_policy,
-                )
-                pending = True
-                continue
-
-            refined = copy.copy(candidate)
-            if eta_result.get("ok"):
-                duration_seconds = float(eta_result.get("duration_sec") or 0.0)
-                refined["estimated_pickup_wait_seconds"] = cls._pickup_wait_from_travel_duration(
-                    order,
-                    current_timestamp,
-                    duration_seconds,
-                )
-                refined["amap_pickup_duration_seconds"] = duration_seconds
-                refined["pickup_eta_source"] = "amap"
-            else:
-                refined["pickup_eta_source"] = "local_fallback"
-                refined["pickup_eta_error"] = eta_result.get("reason") or eta_result.get("error")
-            prepared.append(refined)
-
-        if schedulable_count == 0:
-            for candidate in candidates:
-                candidate["pickup_eta_source"] = "local_fallback"
-            return candidates
-        if pending:
-            return None
-        return prepared
-
-    @staticmethod
     def _best_vehicle_candidate_for_order(order, fleet, city_map, current_timestamp, route_cost_config=None):
         """为单个订单选择候选车辆，先按上车 ETA 过滤，再平衡空车、顺路和成本。
 
@@ -1549,6 +1743,7 @@ class CoreDispatcher:
                 idle_candidates.append({
                     "vehicle": vehicle,
                     "route": route,
+                    "route_details": route_details,
                     "cost": cost,
                     "absolute_cost": absolute_cost,
                     "estimated_pickup_wait_seconds": pickup_wait_seconds,
@@ -1564,6 +1759,7 @@ class CoreDispatcher:
             busy_candidates.append({
                 "vehicle": vehicle,
                 "route": route,
+                "route_details": route_details,
                 "cost": cost,
                 "absolute_cost": absolute_cost,
                 "estimated_pickup_wait_seconds": pickup_wait_seconds,
@@ -1571,13 +1767,9 @@ class CoreDispatcher:
                 "is_idle": False,
             })
 
-        refined_candidates = CoreDispatcher._refine_candidates_by_pickup_eta(
-            order,
-            idle_candidates + busy_candidates,
-            current_timestamp,
-        )
-        if refined_candidates is None:
-            return None
+        refined_candidates = idle_candidates + busy_candidates
+        for candidate in refined_candidates:
+            candidate["pickup_eta_source"] = "local_astar"
         if not refined_candidates:
             return None
 
@@ -1628,13 +1820,13 @@ class CoreDispatcher:
         return {
             "vehicle": best["vehicle"],
             "route": best["route"],
+            "route_details": best.get("route_details") or {},
             "cost": best["cost"],
             "second_cost": second_cost,
             "candidate_class": "idle" if best.get("is_idle") else "busy",
             "absolute_cost": best["absolute_cost"],
             "estimated_pickup_wait_seconds": best.get("estimated_pickup_wait_seconds"),
-            "amap_pickup_duration_seconds": best.get("amap_pickup_duration_seconds"),
-            "pickup_eta_source": best.get("pickup_eta_source", "local_fallback"),
+            "pickup_eta_source": best.get("pickup_eta_source", "local_astar"),
             "route_alignment_score": best.get("route_alignment_score", 0),
             "selection_policy": selection_policy,
         }
@@ -1789,10 +1981,99 @@ class CoreDispatcher:
         return str(getattr(vehicle, "operation_mode", "") or "").strip() in CoreDispatcher.COMMUTE_OPERATION_MODES
 
     @staticmethod
+    def _best_pool_order_candidate(
+        order_indices,
+        fleet,
+        city_map,
+        current_timestamp,
+        route_cost_config=None,
+    ):
+        """按优先池、普通池顺序选择本轮后悔值最高的可行订单。"""
+        tier_entries = {"priority": [], "normal": []}
+        pool_now = time.time()
+        for index in order_indices:
+            order = CoreDispatcher.order_pool[index]
+            if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
+                continue
+            order_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot(
+                CoreDispatcher._order_operation_area_id(order)
+            )
+            pool_info = CoreDispatcher.order_pool_priority_info(
+                order,
+                route_cost_config=order_config,
+                current_timestamp=pool_now,
+            )
+            tier_entries[pool_info["pool_level"]].append((index, order, order_config, pool_info))
+
+        # 优先池没有可行候选时才降级评估普通池，避免不可达订单阻塞整个运营区。
+        for pool_level in ("priority", "normal"):
+            order_candidates = []
+            for index, order, order_config, pool_info in tier_entries[pool_level]:
+                best_vehicle_candidate = CoreDispatcher._best_vehicle_candidate_for_order(
+                    order,
+                    fleet,
+                    city_map,
+                    current_timestamp,
+                    route_cost_config=order_config,
+                )
+                if best_vehicle_candidate is None:
+                    continue
+                second_cost = best_vehicle_candidate["second_cost"]
+                regret = None if second_cost == float("inf") else max(
+                    0.0,
+                    second_cost - best_vehicle_candidate["cost"],
+                )
+                order_candidates.append({
+                    "order_index": index,
+                    "vehicle": best_vehicle_candidate["vehicle"],
+                    "route": best_vehicle_candidate["route"],
+                    "route_details": best_vehicle_candidate.get("route_details") or {},
+                    "regret": regret,
+                    "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
+                    "candidate_class": best_vehicle_candidate["candidate_class"],
+                    "pool_level": pool_level,
+                    "pool_info": pool_info,
+                })
+
+            if not order_candidates:
+                continue
+            finite_regrets = [
+                item["regret"]
+                for item in order_candidates
+                if item["regret"] is not None
+            ]
+            max_finite_regret = max(finite_regrets, default=0.0)
+            for item in order_candidates:
+                if item["regret"] is None:
+                    normalized_regret_score = 100.0
+                elif max_finite_regret > 0.0:
+                    normalized_regret_score = min(
+                        100.0,
+                        (item["regret"] / max_finite_regret) * 100.0,
+                    )
+                else:
+                    normalized_regret_score = 0.0
+                item["normalized_regret_score"] = normalized_regret_score
+                item["priority_score"] = (
+                    0.6 * item["cancel_risk_score"]
+                    + 0.4 * normalized_regret_score
+                )
+
+            return max(
+                order_candidates,
+                key=lambda item: (
+                    item["priority_score"],
+                    item["cancel_risk_score"],
+                    item["normalized_regret_score"],
+                ),
+            )
+        return None
+
+    @staticmethod
     def _process_pool_matching_area_cycle(fleet, city_map, operation_area_id=None):
         """对单个运营区执行一轮订单池匹配。"""
         area_id = CoreDispatcher._coerce_operation_area_id(operation_area_id)
-        
+
         area_fleet = [
             vehicle for vehicle in (fleet or [])
             if area_id is None or CoreDispatcher._operation_area_id_of(vehicle) == area_id
@@ -1813,105 +2094,51 @@ class CoreDispatcher:
                 index for index, order in enumerate(CoreDispatcher.order_pool)
                 if area_id is None or CoreDispatcher._order_operation_area_id(order) == area_id
             ]
-            
+
             if not area_order_indices:
                 break
 
-            best_o_idx = -1
-            global_best_v = None
-            global_best_route = None
-            best_priority_score = 0.0
-            best_cancel_risk_score = 0.0
-            order_candidates = []
             route_cost_config = CoreDispatcher.route_cost_config_snapshot(area_id)
             current_timestamp = max(
                 (getattr(v, "time", 0.0) for v in area_fleet),
                 default=time.time(),
             ) or time.time()
-
-            for i in area_order_indices:
-                order = CoreDispatcher.order_pool[i]
-                if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
-                    continue
-
-                best_vehicle_candidate = CoreDispatcher._best_vehicle_candidate_for_order(
-                    order,
-                    area_fleet,
-                    city_map,
-                    current_timestamp,
-                    route_cost_config=route_cost_config,
-                )
-                if best_vehicle_candidate is None:
-                    continue
-
-                c2 = best_vehicle_candidate["second_cost"]
-                regret = None if c2 == float("inf") else max(0.0, c2 - best_vehicle_candidate["cost"])
-                order_candidates.append({
-                    "order_index": i,
-                    "vehicle": best_vehicle_candidate["vehicle"],
-                    "route": best_vehicle_candidate["route"],
-                    "regret": regret,
-                    "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
-                    "candidate_class": best_vehicle_candidate["candidate_class"],
-                })
-
-            finite_regrets = [
-                item["regret"]
-                for item in order_candidates
-                if item["regret"] is not None
-            ]
-            max_finite_regret = max(finite_regrets, default=0.0)
-            for item in order_candidates:
-                if item["regret"] is None:
-                    normalized_regret_score = 100.0
-                elif max_finite_regret > 0.0:
-                    normalized_regret_score = min(100.0, (item["regret"] / max_finite_regret) * 100.0)
-                else:
-                    normalized_regret_score = 0.0
-                item["normalized_regret_score"] = normalized_regret_score
-                item["priority_score"] = (
-                    0.6 * item["cancel_risk_score"]
-                    + 0.4 * normalized_regret_score
-                )
-
-            if order_candidates:
-                best_candidate = max(
-                    order_candidates,
-                    key=lambda item: (
-                        item["priority_score"],
-                        item["cancel_risk_score"],
-                        item["normalized_regret_score"],
-                    ),
-                )
-                best_o_idx = best_candidate["order_index"]
-                global_best_v = best_candidate["vehicle"]
-                global_best_route = best_candidate["route"]
-                best_priority_score = best_candidate["priority_score"]
-                best_cancel_risk_score = best_candidate["cancel_risk_score"]
-
-            if best_o_idx == -1:
+            best_candidate = CoreDispatcher._best_pool_order_candidate(
+                area_order_indices,
+                area_fleet,
+                city_map,
+                current_timestamp,
+                route_cost_config=route_cost_config,
+            )
+            if best_candidate is None:
                 break
 
-            target_o = CoreDispatcher.order_pool.pop(best_o_idx)
+            target_o = CoreDispatcher.order_pool.pop(best_candidate["order_index"])
+            target_vehicle = best_candidate["vehicle"]
             assignment = CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                 target_o,
-                global_best_v,
-                global_best_route,
+                target_vehicle,
+                best_candidate["route"],
                 city_map,
                 details={
-                    "cancel_risk_score": best_cancel_risk_score,
-                    "priority_score": best_priority_score,
+                    "cancel_risk_score": best_candidate["cancel_risk_score"],
+                    "priority_score": best_candidate["priority_score"],
+                    "pool_level": best_candidate["pool_level"],
+                    "pool_wait_seconds": best_candidate["pool_info"]["pool_wait_seconds"],
                 },
+                route_details=best_candidate.get("route_details"),
                 defer_route_refresh=True,
             )
-            deferred_assignments.setdefault(id(global_best_v), {
-                "vehicle": global_best_v,
+            deferred_assignments.setdefault(id(target_vehicle), {
+                "vehicle": target_vehicle,
                 "assignments": [],
             })["assignments"].append(assignment)
             assign_count += 1
             print(
                 f"[Core.Pool] [Match] 运营区 {area_id or 'default'} 订单 {target_o.request_id} "
-                f"划拨给 {global_best_v.id}，风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
+                f"从{best_candidate['pool_level']}池划拨给 {target_vehicle.id}，"
+                f"风险分={best_candidate['cancel_risk_score']:.1f}，"
+                f"综合优先级={best_candidate['priority_score']:.1f}"
             )
 
         for group in deferred_assignments.values():
@@ -1924,7 +2151,15 @@ class CoreDispatcher:
         return assign_count
 
     @staticmethod
-    def _assign_order_to_vehicle_pending_confirmation(order, vehicle, route, city_map, details=None, defer_route_refresh=False):
+    def _assign_order_to_vehicle_pending_confirmation(
+        order,
+        vehicle,
+        route,
+        city_map,
+        details=None,
+        route_details=None,
+        defer_route_refresh=False,
+    ):
         """把订单临时派给车辆，并等待平台确认司机端收到后再转 waiting_pickup。"""
         was_idle_before_assignment = (
             len(getattr(vehicle, "on_board_orders", []) or []) == 0
@@ -1932,6 +2167,7 @@ class CoreDispatcher:
         )
         event_reason = "order_assigned" if was_idle_before_assignment else "order_inserted"
         CoreDispatcher._clear_idle_parking(vehicle)
+        CoreDispatcher._commit_order_eta_baseline(order, route_details or {})
         vehicle.planned_route = route
         order.status = "matched"
         assignment = {
@@ -2075,99 +2311,39 @@ class CoreDispatcher:
                 assign_count = 0
                 # 内部循环：在单次调度周期内尽可能排空订单池
                 while CoreDispatcher.order_pool:
-                    best_o_idx = -1
-                    global_best_v = None
-                    global_best_route = None
-                    best_priority_score = 0.0
-                    best_cancel_risk_score = 0.0
-                    order_candidates = []
                     current_timestamp = max(
                         (getattr(v, "time", 0.0) for v in fleet),
                         default=time.time(),
                     ) or time.time()
+                    best_candidate = CoreDispatcher._best_pool_order_candidate(
+                        list(range(len(CoreDispatcher.order_pool))),
+                        fleet,
+                        city_map,
+                        current_timestamp,
+                    )
 
-                    # 评估池内的每一个被积压订单对目前场上所有车辆的组合差价(机会成本)
-                    for i in range(len(CoreDispatcher.order_pool)):
-                        order = CoreDispatcher.order_pool[i]
-                        if not CoreDispatcher._order_can_enter_matching_window(order, current_timestamp):
-                            continue
-
-                        best_vehicle_candidate = CoreDispatcher._best_vehicle_candidate_for_order(
-                            order,
-                            fleet,
-                            city_map,
-                            current_timestamp,
-                            route_cost_config=CoreDispatcher.route_cost_config_snapshot(
-                                CoreDispatcher._order_operation_area_id(order)
-                            ),
-                        )
-                        if best_vehicle_candidate is None:
-                            continue
-
-                        # 计算后悔值：次优成本与最优成本的差额
-                        c2 = best_vehicle_candidate["second_cost"]
-                        regret = None if c2 == float('inf') else max(0.0, c2 - best_vehicle_candidate["cost"])
-                        order_candidates.append({
-                            "order_index": i,
-                            "vehicle": best_vehicle_candidate["vehicle"],
-                            "route": best_vehicle_candidate["route"],
-                            "regret": regret,
-                            "cancel_risk_score": CoreDispatcher._calculate_cancel_risk_score(order, current_timestamp),
-                            "candidate_class": best_vehicle_candidate["candidate_class"],
-                        })
-
-                    finite_regrets = [
-                        item["regret"]
-                        for item in order_candidates
-                        if item["regret"] is not None
-                    ]
-                    max_finite_regret = max(finite_regrets, default=0.0)
-
-                    for item in order_candidates:
-                        if item["regret"] is None:
-                            normalized_regret_score = 100.0
-                        elif max_finite_regret > 0.0:
-                            normalized_regret_score = min(100.0, (item["regret"] / max_finite_regret) * 100.0)
-                        else:
-                            normalized_regret_score = 0.0
-
-                        item["normalized_regret_score"] = normalized_regret_score
-                        item["priority_score"] = (
-                            0.6 * item["cancel_risk_score"]
-                            + 0.4 * normalized_regret_score
-                        )
-
-                    if order_candidates:
-                        best_candidate = max(
-                            order_candidates,
-                            key=lambda item: (
-                                item["priority_score"],
-                                item["cancel_risk_score"],
-                                item["normalized_regret_score"],
-                            ),
-                        )
-                        best_o_idx = best_candidate["order_index"]
-                        global_best_v = best_candidate["vehicle"]
-                        global_best_route = best_candidate["route"]
-                        best_priority_score = best_candidate["priority_score"]
-                        best_cancel_risk_score = best_candidate["cancel_risk_score"]
-
-                    if best_o_idx != -1:
-                        target_o = CoreDispatcher.order_pool.pop(best_o_idx)
+                    if best_candidate is not None:
+                        target_o = CoreDispatcher.order_pool.pop(best_candidate["order_index"])
+                        target_vehicle = best_candidate["vehicle"]
                         CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                             target_o,
-                            global_best_v,
-                            global_best_route,
+                            target_vehicle,
+                            best_candidate["route"],
                             city_map=city_map,
                             details={
-                                "cancel_risk_score": best_cancel_risk_score,
-                                "priority_score": best_priority_score,
+                                "cancel_risk_score": best_candidate["cancel_risk_score"],
+                                "priority_score": best_candidate["priority_score"],
+                                "pool_level": best_candidate["pool_level"],
+                                "pool_wait_seconds": best_candidate["pool_info"]["pool_wait_seconds"],
                             },
+                            route_details=best_candidate.get("route_details"),
                         )
                         assign_count += 1
                         print(
                             f"[Core.Pool] [Match] 订单池优先级匹配成功：单 {target_o.request_id} "
-                            f"被 {global_best_v.id} 优先划拨！风险分={best_cancel_risk_score:.1f}，综合优先级={best_priority_score:.1f}"
+                            f"从{best_candidate['pool_level']}池划拨给 {target_vehicle.id}！"
+                            f"风险分={best_candidate['cancel_risk_score']:.1f}，"
+                            f"综合优先级={best_candidate['priority_score']:.1f}"
                         )
 
                     else:
@@ -2345,6 +2521,10 @@ class CoreDispatcher:
         removed_steps = CoreDispatcher._remove_order_from_vehicle_route(vehicle, request_id)
         order.status = "pooled"
         order.driver_push_failed_reason = (exclusion or {}).get("reason") or reason
+        # 原派车承诺已撤销；保留首次入池时间，让等待较久的订单继续享有优先级。
+        order.committed_pickup_eta = None
+        order.committed_dropoff_eta = None
+        CoreDispatcher._ensure_order_pool_entered_at(order)
         CoreDispatcher._clear_driver_push_pending(order, vehicle)
         if all(str(getattr(existing, "request_id", "")) != request_id for existing in CoreDispatcher.order_pool):
             CoreDispatcher.order_pool.append(order)
@@ -4777,6 +4957,7 @@ class CoreDispatcher:
             vehicle.projected_gps = {"lon": None, "lat": None}
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
+            CoreDispatcher.update_vehicle_local_astar_eta_snapshot(vehicle, [])
             return None
 
         if vehicle.planned_route:
@@ -4815,6 +4996,7 @@ class CoreDispatcher:
         if result is None:
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
+            CoreDispatcher.update_vehicle_local_astar_eta_snapshot(vehicle, [])
             return None
 
         if has_current_position:
@@ -4846,6 +5028,11 @@ class CoreDispatcher:
                 "source": "route_start_node",
             })
             vehicle.projected_gps = projected_point
+        CoreDispatcher.update_vehicle_local_astar_eta_snapshot(
+            vehicle,
+            result.get("segments") or [],
+            generated_at=getattr(vehicle, "time", None),
+        )
         vehicle.operation_restriction_policy = copy.deepcopy(restriction_policy) if restriction_policy else None
         vehicle.operation_restriction_policy_signature = restriction_signature(restriction_policy)
         vehicle.planned_route_point = result["path"]
@@ -5588,6 +5775,13 @@ class CoreDispatcher:
             )
             if replan_result is None:
                 event["replan_error"] = "route_rebuild_failed"
+
+        if replan_result is None:
+            CoreDispatcher.update_vehicle_local_astar_eta_snapshot(
+                vehicle,
+                getattr(vehicle, "planned_route_segment_raw_point", None) or [],
+                generated_at=current_timestamp,
+            )
 
         CoreDispatcher._start_rest_if_ready(vehicle)
         if replan_result is None:

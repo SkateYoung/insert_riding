@@ -531,6 +531,12 @@ class Order:
         self.eta_updated_at = None
         self.eta_status = None
         self.eta_error = None
+
+        # 插单保护运行态：首次匹配后固定本地 A* 承诺 ETA，避免连续插单累积突破延误上限。
+        self.committed_pickup_eta = None
+        self.committed_dropoff_eta = None
+        # 订单进入内存池时再赋值，确保新订单总是先从普通匹配等级开始。
+        self.pool_entered_at = None
         
         # ------ 新增用于落库统计的模板字段 ------
         self.stats_date = datetime.today().strftime("%Y-%m-%d")
@@ -654,6 +660,13 @@ class Vehicle:
         self.planned_route_grasp_status = None
         self.planned_route_grasp_error = None
         self.planned_route_grasp_route_version = None
+        # 路线业务变化时生成的本地 A* ETA 诊断快照，仅用于展示承诺基线与累计延误。
+        self.local_astar_eta_snapshot = {
+            "status": "empty",
+            "generated_at": self.time,
+            "speed_mps": SPEED_MPS,
+            "orders": [],
+        }
         # 空车前往热点的 ETA 展示字段，和乘客订单 ETA 分开维护。
         self.idle_target_eta_seconds = None
         self.idle_target_eta_time = None

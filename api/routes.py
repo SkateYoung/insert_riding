@@ -5,6 +5,7 @@
 """
 
 import math
+import time
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
@@ -141,6 +142,46 @@ def _normalize_route_cost_config_payload(data):
     }
 
 
+def _vehicle_local_astar_eta_to_dict(vehicle):
+    """把车辆本地 A* ETA 快照转换为带可读时间的接口结构。"""
+    snapshot = getattr(vehicle, "local_astar_eta_snapshot", None) or {}
+
+    def _timestamp_fields(value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None, None
+        if not math.isfinite(value):
+            return None, None
+        return value, state.format_timestamp(value)
+
+    generated_at, generated_at_text = _timestamp_fields(snapshot.get("generated_at"))
+    orders = []
+    for item in snapshot.get("orders") or []:
+        if not isinstance(item, dict):
+            continue
+        response_item = dict(item)
+        for field_name in (
+            "committed_pickup_eta",
+            "committed_dropoff_eta",
+            "current_pickup_eta",
+            "current_dropoff_eta",
+        ):
+            timestamp_value, timestamp_text = _timestamp_fields(item.get(field_name))
+            response_item[field_name] = timestamp_value
+            response_item[f"{field_name}_text"] = timestamp_text
+        orders.append(response_item)
+    return {
+        "status": snapshot.get("status") or ("ready" if orders else "empty"),
+        "source": "local_astar_route_change_snapshot",
+        "generated_at": generated_at,
+        "generated_at_text": generated_at_text,
+        "speed_mps": snapshot.get("speed_mps", SPEED_MPS),
+        "timeline_error": snapshot.get("timeline_error"),
+        "orders": orders,
+    }
+
+
 def _vehicle_to_dict(v):
     """将 Vehicle 对象转为接口可返回的 JSON 字典。
 
@@ -206,6 +247,7 @@ def _vehicle_to_dict(v):
         "planned_route_grasp_status": getattr(v, "planned_route_grasp_status", None),
         "planned_route_grasp_error": getattr(v, "planned_route_grasp_error", None),
         "planned_route_grasp_route_version": getattr(v, "planned_route_grasp_route_version", None),
+        "local_astar_eta": _vehicle_local_astar_eta_to_dict(v),
         "operation_restriction_policy_signature": getattr(v, "operation_restriction_policy_signature", None),
         "last_node": v.last_node,
         "next_node": v.next_node,
@@ -2066,26 +2108,34 @@ def get_order_pool():
     if not state.system_initialized:
         return jsonify({"error": "系统未初始化"}), 400
     with state.state_lock:
+        pool_now = time.time()
+        orders = []
+        for order in CoreDispatcher.order_pool:
+            pool_info = CoreDispatcher.order_pool_priority_info(
+                order,
+                current_timestamp=pool_now,
+            )
+            orders.append({
+                "request_id": order.request_id,
+                "origin": order.o_node.name,
+                "destination": order.d_node.name,
+                "request_time": order.request_time.isoformat(sep=" "),
+                "expected_pickup_time": {
+                    "earliest": order.expected_pickup_earliest.isoformat(sep=" "),
+                    "latest": order.expected_pickup_latest.isoformat(sep=" "),
+                },
+                "passenger_count": order.passenger_count,
+                "operation_area_id": getattr(order, "operation_area_id", None),
+                "operation_area_code": getattr(order, "operation_area_code", None),
+                "req_time": order.req_time,
+                "pool_level": pool_info["pool_level"],
+                "pool_wait_seconds": pool_info["pool_wait_seconds"],
+                "priority_promoted_at": pool_info["priority_promoted_at"],
+            })
         return jsonify({
             "pool_size": len(CoreDispatcher.order_pool),
             "completed_orders_size": len(CoreDispatcher.completed_orders_pool),
-            "orders": [
-                {
-                    "request_id": o.request_id,
-                    "origin": o.o_node.name,
-                    "destination": o.d_node.name,
-                    "request_time": o.request_time.isoformat(sep=" "),
-                    "expected_pickup_time": {
-                        "earliest": o.expected_pickup_earliest.isoformat(sep=" "),
-                        "latest": o.expected_pickup_latest.isoformat(sep=" "),
-                    },
-                    "passenger_count": o.passenger_count,
-                    "operation_area_id": getattr(o, "operation_area_id", None),
-                    "operation_area_code": getattr(o, "operation_area_code", None),
-                    "req_time": o.req_time,
-                }
-                for o in CoreDispatcher.order_pool
-            ],
+            "orders": orders,
         })
 
 

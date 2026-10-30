@@ -193,6 +193,80 @@
             font-size: 12px;
         }
 
+        .eta-delay-table {
+            table-layout: fixed;
+            margin-bottom: 4px;
+        }
+
+        .eta-delay-table th:nth-child(1),
+        .eta-delay-table td:nth-child(1) {
+            width: 31%;
+        }
+
+        .eta-delay-table th:nth-child(2),
+        .eta-delay-table td:nth-child(2),
+        .eta-delay-table th:nth-child(3),
+        .eta-delay-table td:nth-child(3) {
+            width: 25%;
+        }
+
+        .eta-delay-table th:nth-child(4),
+        .eta-delay-table td:nth-child(4) {
+            width: 19%;
+        }
+
+        .eta-delay-table td {
+            overflow-wrap: anywhere;
+        }
+
+        .segment-analysis-table {
+            table-layout: fixed;
+            margin-bottom: 4px;
+        }
+
+        .segment-analysis-table th,
+        .segment-analysis-table td {
+            padding: 5px 3px;
+            overflow-wrap: anywhere;
+        }
+
+        .segment-analysis-table th:first-child,
+        .segment-analysis-table td:first-child {
+            width: 31%;
+        }
+
+        .segment-analysis-input {
+            min-height: 150px;
+            font-family: Consolas, "Courier New", monospace;
+            line-height: 1.4;
+        }
+
+        .eta-order-id {
+            display: block;
+            color: #e2e8f0;
+            font-weight: 600;
+        }
+
+        .eta-stage {
+            display: block;
+            margin-top: 2px;
+            color: #94a3b8;
+            font-size: 11px;
+        }
+
+        .eta-delay-positive {
+            color: #fca5a5;
+            font-weight: 700;
+        }
+
+        .eta-delay-neutral {
+            color: #86efac;
+        }
+
+        .eta-delay-early {
+            color: #7dd3fc;
+        }
+
         .form-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -378,6 +452,62 @@
                 <button id="pickRouteVehiclePositionBtn" type="button" class="secondary">鼠标 GPS 上报模式</button>
                 <button id="replanAmapRouteBtn" type="button">优先重规划高德路径</button>
                 <button id="clearBtn" type="button" class="secondary">清空地图</button>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">分段路线数据分析</div>
+                <div class="field">
+                    <label for="segmentAnalysisInput">分段路线 JSON</label>
+                    <textarea id="segmentAnalysisInput" class="segment-analysis-input" placeholder='可粘贴完整车辆对象、planned_route_segment_grasped_point 属性片段，或直接粘贴分段数组'></textarea>
+                </div>
+                <div class="field">
+                    <label for="segmentAnalysisFileInput">读取文本文件</label>
+                    <input id="segmentAnalysisFileInput" type="file" accept=".txt,.json,text/plain,application/json">
+                </div>
+                <div class="field">
+                    <label for="segmentAnalysisSelect">地图显示范围</label>
+                    <select id="segmentAnalysisSelect" disabled>
+                        <option value="all">全部分段</option>
+                    </select>
+                </div>
+                <div class="compact-actions">
+                    <button id="analyzeSegmentsBtn" type="button">分析并绘制</button>
+                    <button id="loadCurrentSegmentsBtn" type="button" class="secondary">载入当前车辆</button>
+                    <button id="clearSegmentAnalysisBtn" type="button" class="secondary">清空分析</button>
+                </div>
+                <div id="segmentAnalysisSummary" class="result-box">请粘贴分段路线数据后开始分析。</div>
+                <table class="mini-table segment-analysis-table">
+                    <thead>
+                        <tr>
+                            <th>分段</th>
+                            <th>A*距离</th>
+                            <th>高德距离</th>
+                            <th>时长</th>
+                            <th>轨迹点</th>
+                        </tr>
+                    </thead>
+                    <tbody id="segmentAnalysisBody">
+                        <tr><td colspan="5">暂无分析结果</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="tool-block">
+                <div class="section-title">订单承诺与插单累计延误</div>
+                <div id="localAstarEtaInfo" class="hint">请选择车辆并刷新路线。</div>
+                <table class="mini-table eta-delay-table">
+                    <thead>
+                        <tr>
+                            <th>订单/阶段</th>
+                            <th>派单承诺</th>
+                            <th>当前推演</th>
+                            <th>累计变化</th>
+                        </tr>
+                    </thead>
+                    <tbody id="localAstarEtaBody">
+                        <tr><td colspan="4">暂无订单 ETA 数据</td></tr>
+                    </tbody>
+                </table>
             </div>
 
             <div class="tool-block">
@@ -1192,6 +1322,14 @@
         const routeAreaSelect = document.getElementById("routeAreaSelect");
         const vehicleSelect = document.getElementById("vehicleSelect");
         const routeSegmentSelect = document.getElementById("routeSegmentSelect");
+        const segmentAnalysisInput = document.getElementById("segmentAnalysisInput");
+        const segmentAnalysisFileInput = document.getElementById("segmentAnalysisFileInput");
+        const segmentAnalysisSelect = document.getElementById("segmentAnalysisSelect");
+        const analyzeSegmentsBtn = document.getElementById("analyzeSegmentsBtn");
+        const loadCurrentSegmentsBtn = document.getElementById("loadCurrentSegmentsBtn");
+        const clearSegmentAnalysisBtn = document.getElementById("clearSegmentAnalysisBtn");
+        const segmentAnalysisSummary = document.getElementById("segmentAnalysisSummary");
+        const segmentAnalysisBody = document.getElementById("segmentAnalysisBody");
         const loadFleetBtn = document.getElementById("loadFleetBtn");
         const refreshVehicleBtn = document.getElementById("refreshVehicleBtn");
         const loadRoadNetworkBtn = document.getElementById("loadRoadNetworkBtn");
@@ -1199,6 +1337,8 @@
         const pickRouteVehiclePositionBtn = document.getElementById("pickRouteVehiclePositionBtn");
         const replanAmapRouteBtn = document.getElementById("replanAmapRouteBtn");
         const clearBtn = document.getElementById("clearBtn");
+        const localAstarEtaInfo = document.getElementById("localAstarEtaInfo");
+        const localAstarEtaBody = document.getElementById("localAstarEtaBody");
         const boardingInfo = document.getElementById("boardingInfo");
         const boardingStepSelect = document.getElementById("boardingStepSelect");
         const confirmPickupBtn = document.getElementById("confirmPickupBtn");
@@ -1454,6 +1594,7 @@
         let cachedPois = null;
         let platformPendingOrders = [];
         let recentDynamicOrderIds = [];
+        let analyzedRouteSegments = [];
 
         function setStatus(message) {
             statusEl.textContent = message;
@@ -1481,6 +1622,12 @@
             resetManualPickupTimeBtn.disabled = isBusy;
             vehicleSelect.disabled = isBusy;
             routeSegmentSelect.disabled = isBusy || routeSegmentSelect.options.length <= 1;
+            segmentAnalysisInput.disabled = isBusy;
+            segmentAnalysisFileInput.disabled = isBusy;
+            segmentAnalysisSelect.disabled = isBusy || analyzedRouteSegments.length === 0;
+            analyzeSegmentsBtn.disabled = isBusy;
+            loadCurrentSegmentsBtn.disabled = isBusy;
+            clearSegmentAnalysisBtn.disabled = isBusy;
             boardingStepSelect.disabled = isBusy || !boardingStepSelect.value;
             platformPendingOrderSelect.disabled = isBusy || platformPendingOrderSelect.options.length === 0;
             refreshPlatformPendingBtn.disabled = isBusy;
@@ -2266,6 +2413,268 @@
             return `${index + 1}. ${action}${requestId}${targetName ? ` - ${targetName}` : ""}${pointCount ? ` (${pointCount}点)` : ""}`;
         }
 
+        function extractAnalyzedSegments(value) {
+            if (typeof value === "string") {
+                return extractAnalyzedSegments(JSON.parse(value));
+            }
+            if (Array.isArray(value)) {
+                return value;
+            }
+            if (!value || typeof value !== "object") {
+                return null;
+            }
+
+            const direct = value.planned_route_segment_grasped_point;
+            if (Array.isArray(direct)) {
+                return direct;
+            }
+            for (const key of ["vehicle", "data", "result", "payload"]) {
+                const nested = value[key];
+                if (!nested || typeof nested !== "object") {
+                    continue;
+                }
+                const segments = extractAnalyzedSegments(nested);
+                if (Array.isArray(segments)) {
+                    return segments;
+                }
+            }
+            return null;
+        }
+
+        function parseSegmentAnalysisText(rawText) {
+            let text = String(rawText || "").replace(/^\uFEFF/, "").trim();
+            if (!text) {
+                throw new Error("请粘贴分段路线 JSON，或选择一个文本文件");
+            }
+            if (text.startsWith("```")) {
+                text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+            }
+
+            let lastError = null;
+            for (const candidate of [text, `{${text}}`]) {
+                try {
+                    const segments = extractAnalyzedSegments(JSON.parse(candidate));
+                    if (!Array.isArray(segments)) {
+                        throw new Error("数据中没有 planned_route_segment_grasped_point 分段数组");
+                    }
+                    if (!segments.length) {
+                        throw new Error("分段路线数组为空");
+                    }
+                    return segments;
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+            throw new Error(`无法解析分段路线数据：${lastError?.message || "JSON 格式错误"}`);
+        }
+
+        function finiteSegmentMetric(...values) {
+            for (const value of values) {
+                const number = Number(value);
+                if (Number.isFinite(number) && number >= 0) {
+                    return number;
+                }
+            }
+            return null;
+        }
+
+        function formatAnalysisDistance(value) {
+            if (!Number.isFinite(value)) {
+                return "--";
+            }
+            return value >= 1000 ? `${(value / 1000).toFixed(2)} km` : `${value.toFixed(1)} m`;
+        }
+
+        function formatAnalysisDuration(value) {
+            if (!Number.isFinite(value)) {
+                return "--";
+            }
+            const seconds = Math.max(0, Math.round(value));
+            const minutes = Math.floor(seconds / 60);
+            const remainder = seconds % 60;
+            return minutes ? `${minutes}分${remainder}秒` : `${remainder}秒`;
+        }
+
+        function segmentAnalysisMetrics(segments) {
+            const orderIds = new Set();
+            const stepCounts = new Map();
+            const warnings = [];
+            let originCount = 0;
+            let destinationCount = 0;
+            let pointCount = 0;
+            let astarDistance = 0;
+            let astarDistanceCount = 0;
+            let amapDistance = 0;
+            let amapDistanceCount = 0;
+            let duration = 0;
+            let durationCount = 0;
+
+            segments.forEach((segment, index) => {
+                const type = String(segment?.type || "").toUpperCase();
+                const requestId = String(segment?.request_id || "").trim();
+                if (type === "O") {
+                    originCount += 1;
+                } else if (type === "D") {
+                    destinationCount += 1;
+                } else {
+                    warnings.push(`第 ${index + 1} 段缺少有效的 O/D 类型`);
+                }
+                if (requestId) {
+                    orderIds.add(requestId);
+                    const stepKey = `${type}:${requestId}`;
+                    stepCounts.set(stepKey, (stepCounts.get(stepKey) || 0) + 1);
+                } else {
+                    warnings.push(`第 ${index + 1} 段缺少 request_id`);
+                }
+
+                const points = normalizePoints(segment?.points || segment?.path || []);
+                pointCount += points.length;
+                if (!points.length) {
+                    warnings.push(`第 ${index + 1} 段没有有效轨迹点`);
+                }
+
+                const astar = finiteSegmentMetric(segment?.aStarDistanceM, segment?.distance);
+                if (astar !== null) {
+                    astarDistance += astar;
+                    astarDistanceCount += 1;
+                }
+                const amap = finiteSegmentMetric(segment?.distance_m, segment?.grasp?.distance_m);
+                if (amap !== null) {
+                    amapDistance += amap;
+                    amapDistanceCount += 1;
+                }
+                const segmentDuration = finiteSegmentMetric(segment?.duration_sec, segment?.grasp?.duration_sec);
+                if (segmentDuration !== null) {
+                    duration += segmentDuration;
+                    durationCount += 1;
+                }
+                if (String(segment?.source || "").includes("trimmed_trimmed")) {
+                    warnings.push(`第 ${index + 1} 段 source 存在重复 trimmed 拼接`);
+                }
+            });
+
+            for (const [key, count] of stepCounts.entries()) {
+                if (count > 1) {
+                    warnings.push(`${key} 重复出现 ${count} 次`);
+                }
+            }
+            return {
+                orderCount: orderIds.size,
+                originCount,
+                destinationCount,
+                pointCount,
+                astarDistance,
+                astarDistanceCount,
+                amapDistance,
+                amapDistanceCount,
+                duration,
+                durationCount,
+                warnings
+            };
+        }
+
+        function renderSegmentAnalysis(segments) {
+            const metrics = segmentAnalysisMetrics(segments);
+            const distanceDifference = metrics.amapDistanceCount && metrics.astarDistanceCount
+                ? metrics.amapDistance - metrics.astarDistance
+                : null;
+            segmentAnalysisSummary.textContent = [
+                `分段数：${segments.length}，订单数：${metrics.orderCount}，O/D：${metrics.originCount}/${metrics.destinationCount}`,
+                `A* 总距离：${formatAnalysisDistance(metrics.astarDistance)}（${metrics.astarDistanceCount}/${segments.length} 段）`,
+                `高德总距离：${formatAnalysisDistance(metrics.amapDistance)}（${metrics.amapDistanceCount}/${segments.length} 段）`,
+                `高德 - A*：${distanceDifference === null ? "--" : formatAnalysisDistance(distanceDifference)}`,
+                `总时长：${formatAnalysisDuration(metrics.duration)}，有效轨迹点：${metrics.pointCount}`,
+                metrics.warnings.length ? `检查结果：\n- ${metrics.warnings.join("\n- ")}` : "检查结果：未发现明显结构异常"
+            ].join("\n");
+
+            segmentAnalysisBody.innerHTML = segments.map((segment, index) => {
+                const astar = finiteSegmentMetric(segment?.aStarDistanceM, segment?.distance);
+                const amap = finiteSegmentMetric(segment?.distance_m, segment?.grasp?.distance_m);
+                const duration = finiteSegmentMetric(segment?.duration_sec, segment?.grasp?.duration_sec);
+                const pointCount = normalizePoints(segment?.points || segment?.path || []).length;
+                const title = segmentLabel(segment, index);
+                const source = String(segment?.source || segment?.grasp?.provider || "--");
+                return `<tr>
+                    <td><span class="eta-order-id">${escapeHtml(title)}</span><span class="eta-stage">${escapeHtml(source)}</span></td>
+                    <td>${escapeHtml(formatAnalysisDistance(astar))}</td>
+                    <td>${escapeHtml(formatAnalysisDistance(amap))}</td>
+                    <td>${escapeHtml(formatAnalysisDuration(duration))}</td>
+                    <td>${pointCount}</td>
+                </tr>`;
+            }).join("");
+        }
+
+        function populateSegmentAnalysisSelect(segments) {
+            segmentAnalysisSelect.innerHTML = '<option value="all">全部分段</option>';
+            segments.forEach((segment, index) => {
+                const option = document.createElement("option");
+                option.value = `segment:${index}`;
+                option.textContent = segmentLabel(segment, index);
+                segmentAnalysisSelect.appendChild(option);
+            });
+            segmentAnalysisSelect.value = "all";
+            segmentAnalysisSelect.disabled = false;
+        }
+
+        function analyzedSegmentsForDisplay() {
+            const value = segmentAnalysisSelect.value || "all";
+            if (!value.startsWith("segment:")) {
+                return analyzedRouteSegments.map((segment, index) => ({ segment, index }));
+            }
+            const index = Number(value.slice("segment:".length));
+            if (!Number.isInteger(index) || index < 0 || index >= analyzedRouteSegments.length) {
+                return [];
+            }
+            return [{ segment: analyzedRouteSegments[index], index }];
+        }
+
+        function drawAnalyzedSegments(options = {}) {
+            clearMap();
+            const displayed = analyzedSegmentsForDisplay();
+            const fitPoints = [];
+            displayed.forEach(({ segment, index }) => {
+                const points = normalizePoints(segment?.points || segment?.path || []);
+                const type = String(segment?.type || "").toUpperCase();
+                const color = type === "O" ? "#16a34a" : (type === "D" ? "#dc2626" : "#f97316");
+                addPolyline(points, {
+                    strokeColor: color,
+                    strokeWeight: 7,
+                    strokeOpacity: 0.88,
+                    zIndex: 70 + index
+                });
+                fitPoints.push(...points);
+                const target = segmentTarget(segment);
+                if (target) {
+                    fitPoints.push(target);
+                    addRouteStopMarker(target, segment, index);
+                }
+            });
+            if (!options.preserveView) {
+                fitVisible(fitPoints);
+            }
+            setStatus(`分段路线分析已绘制：${displayed.length}/${analyzedRouteSegments.length} 段。`);
+        }
+
+        function analyzeSegmentInput() {
+            const segments = parseSegmentAnalysisText(segmentAnalysisInput.value);
+            analyzedRouteSegments = segments;
+            populateSegmentAnalysisSelect(segments);
+            renderSegmentAnalysis(segments);
+            drawAnalyzedSegments();
+        }
+
+        function clearSegmentAnalysis() {
+            analyzedRouteSegments = [];
+            segmentAnalysisInput.value = "";
+            segmentAnalysisFileInput.value = "";
+            segmentAnalysisSelect.innerHTML = '<option value="all">全部分段</option>';
+            segmentAnalysisSelect.disabled = true;
+            segmentAnalysisSummary.textContent = "请粘贴分段路线数据后开始分析。";
+            segmentAnalysisBody.innerHTML = '<tr><td colspan="5">暂无分析结果</td></tr>';
+            clearMap();
+            setStatus("分段路线分析数据已清空。");
+        }
+
         function updateRouteSegmentOptions(vehicle) {
             const segments = Array.isArray(vehicle?.planned_route_segment_grasped_point)
                 ? vehicle.planned_route_segment_grasped_point
@@ -2312,10 +2721,132 @@
             return matchedSegment ? segmentTarget(matchedSegment) : normalizePoint(step?.target_node);
         }
 
+        function boardingStepAstarDistance(vehicle, step) {
+            if (!step) {
+                return null;
+            }
+
+            const segments = Array.isArray(vehicle?.planned_route_segment_grasped_point)
+                ? vehicle.planned_route_segment_grasped_point
+                : [];
+            let totalDistance = 0;
+
+            for (const segment of segments) {
+                const distance = Number(segment?.aStarDistanceM ?? segment?.distance);
+                if (!Number.isFinite(distance) || distance < 0) {
+                    return null;
+                }
+                totalDistance += distance;
+
+                const sameType = String(segment?.type || "").toUpperCase() === String(step.type || "").toUpperCase();
+                const sameRequest = String(segment?.request_id || "") === String(step.request_id || "");
+                if (sameType && sameRequest) {
+                    return totalDistance;
+                }
+            }
+            return null;
+        }
+
         function boardingStepOptionLabel(step, index) {
             const actionText = step.action === "pickup" ? "上车" : "下车";
             const nameText = step.node_name ? ` - ${step.node_name}` : "";
             return `${index + 1}. ${actionText} ${step.request_id || "-"}${nameText}`;
+        }
+
+        function compactEtaTime(text, timestamp) {
+            const value = String(text || "").trim();
+            if (value) {
+                return value.length >= 19 ? value.slice(5) : value;
+            }
+            if (timestamp === null || timestamp === undefined || timestamp === "") {
+                return "--";
+            }
+            const numeric = Number(timestamp);
+            if (!Number.isFinite(numeric)) {
+                return "--";
+            }
+            const date = new Date(numeric * 1000);
+            const pad = number => String(number).padStart(2, "0");
+            return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+        }
+
+        function etaDeltaPresentation(value) {
+            if (value === null || value === undefined || value === "") {
+                return { text: "--", className: "" };
+            }
+            const seconds = Number(value);
+            if (!Number.isFinite(seconds)) {
+                return { text: "--", className: "" };
+            }
+            const absoluteSeconds = Math.abs(seconds);
+            const minutes = Math.floor(absoluteSeconds / 60);
+            const remainder = Math.round(absoluteSeconds % 60);
+            const duration = minutes > 0 ? `${minutes}分${remainder}秒` : `${remainder}秒`;
+            if (seconds > 0.5) {
+                return { text: `+${duration}`, className: "eta-delay-positive" };
+            }
+            if (seconds < -0.5) {
+                return { text: `提前${duration}`, className: "eta-delay-early" };
+            }
+            return { text: "0秒", className: "eta-delay-neutral" };
+        }
+
+        function appendLocalAstarEtaRow(order, stage) {
+            const isPickup = stage === "pickup";
+            const baselineField = isPickup ? "committed_pickup_eta" : "committed_dropoff_eta";
+            const currentField = isPickup ? "current_pickup_eta" : "current_dropoff_eta";
+            const deltaField = isPickup ? "pickup_eta_delta_seconds" : "dropoff_eta_delta_seconds";
+            const delta = etaDeltaPresentation(order?.[deltaField]);
+            const row = document.createElement("tr");
+
+            const orderCell = document.createElement("td");
+            const orderId = document.createElement("span");
+            orderId.className = "eta-order-id";
+            orderId.textContent = order?.request_id || "-";
+            orderId.title = order?.request_id || "";
+            const stageText = document.createElement("span");
+            stageText.className = "eta-stage";
+            stageText.textContent = isPickup ? "上车" : "下车";
+            orderCell.append(orderId, stageText);
+
+            const baselineCell = document.createElement("td");
+            baselineCell.textContent = compactEtaTime(order?.[`${baselineField}_text`], order?.[baselineField]);
+            const currentCell = document.createElement("td");
+            currentCell.textContent = compactEtaTime(order?.[`${currentField}_text`], order?.[currentField]);
+            const deltaCell = document.createElement("td");
+            deltaCell.textContent = delta.text;
+            if (delta.className) {
+                deltaCell.className = delta.className;
+            }
+            row.append(orderCell, baselineCell, currentCell, deltaCell);
+            localAstarEtaBody.appendChild(row);
+        }
+
+        function updateLocalAstarEtaPanel(vehicle) {
+            const snapshot = vehicle?.local_astar_eta || {};
+            const orders = Array.isArray(snapshot.orders) ? snapshot.orders : [];
+            localAstarEtaBody.innerHTML = "";
+
+            if (!orders.length) {
+                const row = document.createElement("tr");
+                const cell = document.createElement("td");
+                cell.colSpan = 4;
+                cell.textContent = "当前车辆没有可展示的订单 ETA。";
+                row.appendChild(cell);
+                localAstarEtaBody.appendChild(row);
+                localAstarEtaInfo.textContent = snapshot.timeline_error
+                    ? `本地 A* 时间线不可用：${snapshot.timeline_error}`
+                    : "当前车辆没有订单承诺基线。";
+                return;
+            }
+
+            orders.forEach(order => {
+                appendLocalAstarEtaRow(order, "pickup");
+                appendLocalAstarEtaRow(order, "dropoff");
+            });
+            const generatedAt = compactEtaTime(snapshot.generated_at_text, snapshot.generated_at);
+            const stateText = snapshot.status === "incomplete" ? "时间线不完整" : "时间线就绪";
+            localAstarEtaInfo.textContent = `本地 A* · ${stateText} · 快照 ${generatedAt} · ${orders.length} 单`;
         }
 
         function vehicleBoardingSteps(vehicle) {
@@ -2381,16 +2912,15 @@
                 return;
             }
 
-            const gps = normalizePoint(vehicle.gps);
-            const distance = distanceMeters(gps, step.target);
-            const distanceText = distance === null ? "未知" : `${distance.toFixed(1)} 米`;
+            const distance = boardingStepAstarDistance(vehicle, step);
+            const distanceText = distance === null ? "暂无" : `${distance.toFixed(1)} 米`;
             const actionText = step.action === "pickup" ? "上车" : "下车";
             const canConfirm = true;
             boardingInfo.textContent = [
                 `已选择：${step.index + 1}. ${actionText}`,
                 `订单：${step.request_id || "-"}`,
                 `目标：${step.node_name || "-"}`,
-                `距离：${distanceText}`,
+                `A* 路网距离：${distanceText}`,
                 step.index === 0 ? "位置：队首步骤" : "位置：非队首步骤，后端会按需重规划"
             ].join("\n");
 
@@ -2468,6 +2998,7 @@
                 addMarker(gps, "车", null, "vehicle");
             }
 
+            updateLocalAstarEtaPanel(vehicle);
             updateBoardingPanel(vehicle);
 
             const fitPoints = [
@@ -5367,6 +5898,51 @@
                 return;
             }
             drawVehicle(vehicle, { message: "路线显示范围已切换。", preserveView: true });
+        });
+        analyzeSegmentsBtn.addEventListener("click", () => {
+            try {
+                analyzeSegmentInput();
+            } catch (error) {
+                segmentAnalysisSummary.textContent = `分析失败：${error.message}`;
+                setStatus(`分段路线分析失败：${error.message}`);
+            }
+        });
+        segmentAnalysisFileInput.addEventListener("change", async () => {
+            const file = segmentAnalysisFileInput.files?.[0];
+            if (!file) {
+                return;
+            }
+            try {
+                segmentAnalysisInput.value = await file.text();
+                analyzeSegmentInput();
+            } catch (error) {
+                segmentAnalysisSummary.textContent = `读取或分析失败：${error.message}`;
+                setStatus(`读取分段路线文本失败：${error.message}`);
+            }
+        });
+        loadCurrentSegmentsBtn.addEventListener("click", () => {
+            const vehicle = fleetById.get(selectedVehicleId());
+            const segments = vehicle?.planned_route_segment_grasped_point;
+            if (!vehicle || !Array.isArray(segments) || !segments.length) {
+                setStatus("当前车辆没有可分析的分段路线数据。");
+                return;
+            }
+            segmentAnalysisInput.value = JSON.stringify({
+                planned_route_segment_grasped_point: segments
+            }, null, 2);
+            try {
+                analyzeSegmentInput();
+            } catch (error) {
+                segmentAnalysisSummary.textContent = `分析失败：${error.message}`;
+                setStatus(`当前车辆分段路线分析失败：${error.message}`);
+            }
+        });
+        clearSegmentAnalysisBtn.addEventListener("click", clearSegmentAnalysis);
+        segmentAnalysisSelect.addEventListener("change", () => {
+            if (!analyzedRouteSegments.length) {
+                return;
+            }
+            drawAnalyzedSegments();
         });
         tabButtons.forEach(button => {
             button.addEventListener("click", () => setTab(button.dataset.tab));

@@ -71,8 +71,23 @@ class RouteCostConfigApiTest(unittest.TestCase):
         self.assertEqual(area_25["operation_area_id"], 25)
         self.assertEqual(
             area_25["config"]["WAIT_COST_PER_MIN"],
-            CoreDispatcher.ROUTE_COST_CONFIG_DEFAULTS["WAIT_COST_PER_MIN"],
+            CoreDispatcher.ROUTE_COST_CONFIG_BY_AREA_DEFAULTS[25]["WAIT_COST_PER_MIN"],
         )
+
+    def test_passenger_delay_and_pool_priority_parameters_can_be_updated(self):
+        response = self.client.put(
+            "/admin/dispatch/route-cost-config",
+            json={
+                "operation_area_id": 19,
+                "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 600,
+                "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 90,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        config = response.get_json()["config"]
+        self.assertEqual(config["MAX_PASSENGER_INSERTION_DELAY_SECONDS"], 600.0)
+        self.assertEqual(config["ORDER_POOL_PRIORITY_PROMOTION_SECONDS"], 90.0)
 
     def test_code_defaults_are_merged_per_operation_area(self):
         with mock.patch.object(

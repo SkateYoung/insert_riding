@@ -1267,7 +1267,9 @@ GET 响应示例：
     "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0,
     "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
     "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 600.0,
-    "PICKUP_ETA_TOLERANCE_SECONDS": 120.0
+    "PICKUP_ETA_TOLERANCE_SECONDS": 120.0,
+    "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 900.0,
+    "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 180.0
   },
   "defaults": {},
   "descriptions": {},
@@ -1287,7 +1289,9 @@ POST/PUT 请求体示例：
   "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120,
   "PLANNED_ROUTE_INSERTION_PENALTY": 40,
   "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 900,
-  "PICKUP_ETA_TOLERANCE_SECONDS": 120
+  "PICKUP_ETA_TOLERANCE_SECONDS": 120,
+  "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 900,
+  "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 180
 }
 ```
 
@@ -1311,7 +1315,9 @@ POST/PUT 请求体示例：
 | `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
 | `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 已有任务车辆插单惩罚；调大后更倾向于把订单分给空车，调小后更容易给顺路忙车插单 |
 | `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` | number | 否 | 空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择 |
-| `PICKUP_ETA_TOLERANCE_SECONDS` | number | 否 | 高德预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆，默认 120 秒 |
+| `PICKUP_ETA_TOLERANCE_SECONDS` | number | 否 | 本地 A* 预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆，默认值以运营区配置为准 |
+| `MAX_PASSENGER_INSERTION_DELAY_SECONDS` | number | 否 | 已有乘客相对首次匹配时本地 A* 承诺 ETA 可接受的最大累计插单延误，默认 900 秒；候车乘客比较上车 ETA，已上车乘客比较下车 ETA |
+| `ORDER_POOL_PRIORITY_PROMOTION_SECONDS` | number | 否 | 普通订单在内存订单池中等待达到该秒数后晋升为优先订单，默认 180 秒 |
 
 说明：
 
@@ -1323,10 +1329,13 @@ POST/PUT 请求体示例：
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
 - 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
 - 顺路优先会先看新订单 O/D 与车辆已有订单是否同起点、同终点或同路线站点，再在同级顺路候选中比较成本。
-- 候选选择先使用本地 A* 完成全部可行性和成本评估，再对本地预计上车时间最优的 3 辆车异步查询高德 ETA。
-- 高德 ETA 未就绪时订单继续保留在订单池，下一匹配周期读取结果；请求过程不会占用全局状态锁等待网络。
+- 候选车辆的预计上车时间直接使用本地 A* 路线推演结果，包含新订单 O 点前的已有上下客步骤和早到等待时间。
+- 候选匹配不再请求高德 ETA，因此不会因为高德网络延迟、限流或结果未就绪而暂停本轮派单。
 - 精排时先应用 `PICKUP_ETA_TOLERANCE_SECONDS`，超出“最快 ETA + 容差”的候选不再参与空车、顺路和成本比较。
-- 高德不可用、超时或请求失败时自动使用本地 A* 预计时间，不会导致订单永久停留在订单池。
+- `MAX_PASSENGER_INSERTION_DELAY_SECONDS` 是硬约束：任何已有候车或在车乘客累计延误超过上限时，该插单方案直接淘汰；连续插单不会重置首次承诺 ETA。
+- 已有候车订单不能因插单跨过 `expected_pickup_latest`；已经迟到的候车订单不得被新 O 点插到前面，也不得继续延误。
+- 订单先进入普通池，达到 `ORDER_POOL_PRIORITY_PROMOTION_SECONDS` 后进入优先池；每轮先匹配存在可行车辆的优先订单，优先订单均不可行时继续处理普通订单。
+- 订单匹配成功后，导航路线和乘客预计上下车时间仍使用原有高德规划与 ETA 刷新链路。
 
 代码默认值示例：
 
@@ -1373,8 +1382,8 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
 
 ```json
 {
-  "pool_size": 1,   # 订单池中的订单数量
-  "completed_orders_size": 0,  # 当前进程内已完成/已归档订单数
+  "pool_size": 1,
+  "completed_orders_size": 0,
   "orders": [
     {
       "request_id": "order_10001",
@@ -1386,12 +1395,25 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
         "latest": "2026-06-07 12:20:00"
       },
       "passenger_count": 2,
-      "req_time": 1780800000.0
-    },
-      ...
+      "operation_area_id": 19,
+      "req_time": 1780800000.0,
+      "pool_level": "normal",
+      "pool_wait_seconds": 72.5,
+      "priority_promoted_at": 1780800252.5
+    }
   ]
 }
 ```
+
+订单池等级字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `pool_level` | string | 当前逻辑等级：`normal` 普通池或 `priority` 优先池 |
+| `pool_wait_seconds` | number | 从订单首次进入内存订单池开始累计的服务器等待秒数 |
+| `priority_promoted_at` | number | 按该运营区当前配置计算的晋升时间戳；平台修改晋升阈值后会随之变化 |
+
+说明：订单池分级不改变数据库订单状态，两种等级的订单状态仍为 `pooled`。远期预约订单即使已晋升，也必须先进入预约匹配窗口才会参与派单。
 
 ### 4.6 GET `/orders/<request_id>/eta`
 
