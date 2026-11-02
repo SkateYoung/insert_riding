@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta
 from . import persistence
 from . import fleet_push
-from .error_logger import log_exception
+from .error_logger import log_error, log_exception
 from .models import MAX_REST_DURATION_SECONDS, MIN_REST_DURATION_SECONDS, SPEED_MPS, business_timestamp
 from .auxiliary import AuxiliaryFunctions
 from .restrictions import restriction_signature
@@ -180,6 +180,140 @@ class CoreDispatcher:
     def _vehicle_identity(vehicle):
         """返回车辆业务标识，优先使用 vehicle_id。"""
         return str(getattr(vehicle, "vehicle_id", None) or getattr(vehicle, "id", ""))
+
+    @staticmethod
+    def _route_segment_diagnostic_summary(segment, index=None):
+        """提取路线分段的短摘要，避免把完整折线写入错误日志。"""
+        if not isinstance(segment, dict):
+            return {"index": index, "value_type": type(segment).__name__}
+        points = segment.get("path") or segment.get("points") or []
+        return {
+            "index": index,
+            "type": segment.get("type"),
+            "request_id": segment.get("request_id"),
+            "start_node_id": segment.get("startNodeId"),
+            "end_node_id": segment.get("endNodeId"),
+            "target_node_id": (segment.get("target_node") or {}).get("id")
+            if isinstance(segment.get("target_node"), dict)
+            else None,
+            "snapped_target_node_id": (segment.get("snapped_target_node") or {}).get("id")
+            if isinstance(segment.get("snapped_target_node"), dict)
+            else None,
+            "distance": segment.get("distance"),
+            "distance_m": segment.get("distance_m"),
+            "point_count": len(points),
+        }
+
+    @classmethod
+    def _route_push_diagnostic_context(
+        cls,
+        vehicle,
+        city_map=None,
+        request_ids=None,
+        route_result=None,
+        extra=None,
+    ):
+        """构造订单匹配后路线规划与平台推送链路的精简诊断上下文。"""
+        request_ids = [str(item) for item in (request_ids or []) if item not in (None, "")]
+        planned_route = []
+        for index, step in enumerate((getattr(vehicle, "planned_route", None) or [])[:20]):
+            if not isinstance(step, dict):
+                planned_route.append({"index": index, "value_type": type(step).__name__})
+                continue
+            order = step.get("order")
+            target = getattr(order, "o_node", None) if step.get("type") == "O" else getattr(order, "d_node", None)
+            planned_route.append({
+                "index": index,
+                "type": step.get("type"),
+                "request_id": getattr(order, "request_id", None),
+                "target_node_id": getattr(target, "id", None),
+            })
+
+        def summarize_segments(segments):
+            return [
+                cls._route_segment_diagnostic_summary(segment, index=index)
+                for index, segment in enumerate((segments or [])[:20])
+            ]
+
+        pending_events = []
+        for event in cls._vehicle_fleet_push_pending_events(vehicle):
+            if not isinstance(event, dict):
+                pending_events.append({"value_type": type(event).__name__})
+                continue
+            pending_events.append({
+                "request_id": event.get("request_id"),
+                "event_reason": event.get("event_reason"),
+                "route_version": event.get("route_version"),
+                "confirmation_required": bool(event.get("driver_push_confirmation_required")),
+            })
+
+        pending_orders = []
+        pending_map = cls._vehicle_driver_push_pending_map(vehicle)
+        for request_id, pending in list(pending_map.items())[:20]:
+            pending = pending if isinstance(pending, dict) else {}
+            pending_orders.append({
+                "request_id": str(request_id),
+                "route_version": pending.get("route_version"),
+                "event_reason": pending.get("event_reason"),
+            })
+
+        last_node = getattr(vehicle, "last_node", None)
+        next_node = getattr(vehicle, "next_node", None)
+        nodes_map = getattr(city_map, "nodes_map", {}) if city_map is not None else {}
+        try:
+            computed_route_version = cls._vehicle_grasp_route_version(vehicle)
+        except Exception:
+            computed_route_version = None
+        context = {
+            "vehicle_id": cls._vehicle_identity(vehicle),
+            "operation_area_id": getattr(vehicle, "operation_area_id", None),
+            "request_ids": request_ids,
+            "last_node": last_node,
+            "next_node": next_node,
+            "last_node_loaded": None if city_map is None else bool(last_node in nodes_map),
+            "next_node_loaded": None if city_map is None else bool(next_node in nodes_map),
+            "gps": copy.deepcopy(getattr(vehicle, "gps", None)),
+            "projected_gps": copy.deepcopy(getattr(vehicle, "projected_gps", None)),
+            "planned_route_size": len(getattr(vehicle, "planned_route", None) or []),
+            "planned_route": planned_route,
+            "local_segments": summarize_segments((route_result or {}).get("segments") if isinstance(route_result, dict) else []),
+            "raw_segments": summarize_segments(getattr(vehicle, "planned_route_segment_raw_point", None) or []),
+            "grasped_segments": summarize_segments(
+                getattr(vehicle, "planned_route_segment_grasped_point", None) or []
+            ),
+            "stored_route_version": getattr(vehicle, "planned_route_grasp_route_version", None),
+            "computed_route_version": computed_route_version,
+            "route_grasp_status": getattr(vehicle, "planned_route_grasp_status", None),
+            "route_grasp_error": getattr(vehicle, "planned_route_grasp_error", None),
+            "pending_push_events": pending_events,
+            "driver_push_pending_orders": pending_orders,
+        }
+        if isinstance(extra, dict):
+            context.update(extra)
+        return context
+
+    @classmethod
+    def _log_missing_push_events_for_requests(cls, vehicle, request_ids, route_result=None, stage=None):
+        """匹配完成后检查每个待确认订单是否已经建立对应的导航推送事件。"""
+        expected = {str(item) for item in (request_ids or []) if item not in (None, "")}
+        existing = {
+            str(event.get("request_id"))
+            for event in cls._vehicle_fleet_push_pending_events(vehicle)
+            if isinstance(event, dict) and event.get("request_id") not in (None, "")
+        }
+        missing = sorted(expected - existing)
+        if not missing:
+            return
+        log_error(
+            "api.core.matched_order_push_event_missing",
+            message="订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件",
+            context=cls._route_push_diagnostic_context(
+                vehicle,
+                request_ids=missing,
+                route_result=route_result,
+                extra={"stage": stage, "existing_event_request_ids": sorted(existing)},
+            ),
+        )
 
     @staticmethod
     def _short_route_version(prefix, parts):
@@ -466,6 +600,15 @@ class CoreDispatcher:
             return None
         route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
         if not route_version:
+            log_error(
+                "api.core.fleet_push_event_route_version_missing",
+                message="创建导航待推送事件失败：车辆缺少高德路线版本",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    request_ids=[event.get("request_id")],
+                    extra={"event_reason": event.get("event_reason")},
+                ),
+            )
             return None
         pending_event = {
             "event_type": "fleet_route_changed",
@@ -486,6 +629,19 @@ class CoreDispatcher:
         """高德路线 ready 后提交当前版本的待推送单车导航快照。"""
         events = CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
         if not events:
+            pending_request_ids = list(CoreDispatcher._vehicle_driver_push_pending_map(vehicle))
+            if (
+                getattr(vehicle, "planned_route_grasp_status", None) == "ready"
+                and pending_request_ids
+            ):
+                log_error(
+                    "api.core.route_ready_without_push_event",
+                    message="高德路线已 ready，但司机待确认订单没有导航待推送事件",
+                    context=CoreDispatcher._route_push_diagnostic_context(
+                        vehicle,
+                        request_ids=pending_request_ids,
+                    ),
+                )
             return False
         route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
         if getattr(vehicle, "planned_route_grasp_status", None) != "ready":
@@ -496,10 +652,32 @@ class CoreDispatcher:
             if not isinstance(event, dict):
                 continue
             if event.get("route_version") != route_version:
+                log_error(
+                    "api.core.fleet_push_event_version_mismatch",
+                    message="导航待推送事件版本与车辆当前路线版本不一致，事件将按现有逻辑清除",
+                    context=CoreDispatcher._route_push_diagnostic_context(
+                        vehicle,
+                        request_ids=[event.get("request_id")],
+                        extra={
+                            "event_reason": event.get("event_reason"),
+                            "event_route_version": event.get("route_version"),
+                            "current_route_version": route_version,
+                        },
+                    ),
+                )
                 continue
             submitted = fleet_push.submit_vehicle_navigation(vehicle, event)
             submitted_any = submitted_any or submitted
             if not submitted:
+                log_error(
+                    "api.core.fleet_push_submit_rejected",
+                    message="导航推送任务未能提交到 fleet_push",
+                    context=CoreDispatcher._route_push_diagnostic_context(
+                        vehicle,
+                        request_ids=[event.get("request_id")],
+                        extra={"event_reason": event.get("event_reason")},
+                    ),
+                )
                 remaining.append(event)
         CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, remaining)
         return submitted_any
@@ -2185,10 +2363,27 @@ class CoreDispatcher:
                 "request_id": order.request_id,
             },
         )
+        if route_result is None:
+            log_error(
+                "api.core.order_assignment_route_refresh_failed",
+                message="订单匹配成功后首次本地路线刷新失败",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=[order.request_id],
+                    extra={"assignment_mode": "single", "event_reason": event_reason},
+                ),
+            )
         CoreDispatcher._set_driver_push_pending(
             order,
             vehicle,
             event_reason=event_reason,
+        )
+        CoreDispatcher._log_missing_push_events_for_requests(
+            vehicle,
+            [order.request_id],
+            route_result=route_result,
+            stage="single_assignment",
         )
         persistence.record_order_matched_pending(
             order,
@@ -2220,6 +2415,21 @@ class CoreDispatcher:
             city_map,
             fleet_push_event=fleet_push_events,
         )
+        assignment_request_ids = [
+            getattr(item.get("order"), "request_id", None)
+            for item in assignments
+        ]
+        if route_result is None:
+            log_error(
+                "api.core.order_assignment_route_refresh_failed",
+                message="批量订单匹配成功后合并刷新本地路线失败",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=assignment_request_ids,
+                    extra={"assignment_mode": "deferred_batch"},
+                ),
+            )
         for item in assignments:
             order = item["order"]
             CoreDispatcher._set_driver_push_pending(
@@ -2238,6 +2448,12 @@ class CoreDispatcher:
                 },
                 record_vehicle_state=False,
             )
+        CoreDispatcher._log_missing_push_events_for_requests(
+            vehicle,
+            assignment_request_ids,
+            route_result=route_result,
+            stage="deferred_batch_assignment",
+        )
         return route_result
 
     @staticmethod
@@ -2539,7 +2755,6 @@ class CoreDispatcher:
             getattr(vehicle, "planned_route_grasp_route_version", None),
         )
         persistence.record_order_requeued_after_push_failure(order, reason=order.driver_push_failed_reason)
-        persistence.record_vehicle_route(vehicle, path_result=path_result)
         persistence.record_vehicle_runtime(vehicle)
         return {
             "status": "requeued",
@@ -2724,7 +2939,6 @@ class CoreDispatcher:
                 },
             )
             CoreDispatcher._start_rest_if_ready(vehicle)
-            persistence.record_vehicle_route(vehicle, path_result=path_result)
             persistence.record_vehicle_runtime(vehicle)
             return {
                 "status": "cancelled",
@@ -2901,7 +3115,6 @@ class CoreDispatcher:
             CoreDispatcher._start_rest_if_ready(vehicle)
             raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(path_result) if path_result else []
             if path_result is None or not raw_segments:
-                persistence.record_vehicle_route(vehicle, path_result=path_result)
                 persistence.record_vehicle_runtime(vehicle)
 
             vehicle_payload = {
@@ -3916,7 +4129,6 @@ class CoreDispatcher:
             f"({target_node.lon:.5f},{target_node.lat:.5f})，预测订单数 {vehicle.idle_forecast['pred_count']}。"
         )
         persistence.record_hotspot_forecast(vehicle)
-        persistence.record_vehicle_route(vehicle, path_result=result)
         persistence.record_vehicle_runtime(vehicle)
         return True
 
@@ -4110,6 +4322,21 @@ class CoreDispatcher:
                 restriction_policy=restriction_policy,
             )
             if dist == float("inf"):
+                log_error(
+                    "api.core.route_rebuild_segment_unreachable",
+                    message="订单匹配后的本地路线重建存在不可达分段",
+                    context=CoreDispatcher._route_push_diagnostic_context(
+                        vehicle,
+                        city_map=city_map,
+                        request_ids=[target.get("request_id")],
+                        extra={
+                            "segment_type": target.get("type"),
+                            "from_node_id": getattr(current_node, "id", None),
+                            "to_node_id": getattr(target.get("node"), "id", None),
+                            "restriction_signature": restriction_signature(restriction_policy),
+                        },
+                    ),
+                )
                 return None
 
             segment_points = [CoreDispatcher._node_to_path_point(n) for n in path]
@@ -4169,12 +4396,27 @@ class CoreDispatcher:
         return CoreDispatcher._short_route_version("grasp", parts)
 
     @staticmethod
-    def _route_result_to_grasp_raw_segments(result):
+    def _route_result_to_grasp_raw_segments(result, vehicle=None):
         """把当前 A* 路线结果转换成后台规划线程可消费的分段快照。"""
         raw_segments = []
         for index, segment in enumerate((result or {}).get("segments", [])):
             points = copy.deepcopy(segment.get("path") or [])
             if not points:
+                if vehicle is not None:
+                    log_error(
+                        "api.core.route_grasp_segment_empty",
+                        message="本地路线分段没有路径点，转换高德 raw segment 时被跳过",
+                        context=CoreDispatcher._route_push_diagnostic_context(
+                            vehicle,
+                            request_ids=[segment.get("request_id")],
+                            route_result=result,
+                            extra={
+                                "empty_segment_index": index,
+                                "empty_segment_type": segment.get("type"),
+                                "empty_segment_distance": segment.get("distance"),
+                            },
+                        ),
+                    )
                 continue
             step_type = segment.get("type")
             request_id = segment.get("request_id")
@@ -4806,6 +5048,30 @@ class CoreDispatcher:
 
         job = cls._route_grasp_job_from_vehicle(vehicle)
         if not job:
+            pending_events = cls._vehicle_fleet_push_pending_events(vehicle)
+            pending_request_ids = list(cls._vehicle_driver_push_pending_map(vehicle))
+            if pending_events or pending_request_ids:
+                log_error(
+                    "api.core.route_grasp_job_not_created",
+                    message="存在订单导航待推送状态，但无法创建高德路线规划任务",
+                    context=cls._route_push_diagnostic_context(
+                        vehicle,
+                        request_ids=pending_request_ids or [
+                            event.get("request_id")
+                            for event in pending_events
+                            if isinstance(event, dict)
+                        ],
+                        extra={
+                            "job_not_created_reason": (
+                                getattr(vehicle, "planned_route_grasp_error", None)
+                                or "invalid_pending_route_state"
+                            ),
+                            "pending_raw_segment_count": len(
+                                getattr(vehicle, "planned_route_segment_raw_point", None) or []
+                            ),
+                        },
+                    ),
+                )
             return False
 
         # 支持测试或初始化顺序下的懒创建；正常系统启动时会先 configure。
@@ -4825,7 +5091,24 @@ class CoreDispatcher:
 
         cls.route_grasp_last_refresh_timestamp = time.time()
         # 网络请求和路线规划都在线程池执行，避免阻塞派单、GPS 更新或接口返回。
-        cls.route_grasp_executor.submit(cls._execute_vehicle_route_grasp_job, vehicle, job, job_key)
+        try:
+            cls.route_grasp_executor.submit(cls._execute_vehicle_route_grasp_job, vehicle, job, job_key)
+        except Exception as exc:
+            log_exception(
+                "api.core.route_grasp_job_not_created",
+                exc,
+                message="高德路线规划任务提交到线程池失败",
+                context=cls._route_push_diagnostic_context(
+                    vehicle,
+                    request_ids=[
+                        event.get("request_id")
+                        for event in cls._vehicle_fleet_push_pending_events(vehicle)
+                        if isinstance(event, dict)
+                    ],
+                    extra={"job_route_version": job.get("route_version")},
+                ),
+            )
+            raise
         return True
 
     @staticmethod
@@ -4839,8 +5122,34 @@ class CoreDispatcher:
         Side Effects:
             写入 raw segments、规划版本和 pending 状态；如果异步规划已启用，会立即提交线程池任务。
         """
-        raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(result)
+        should_log_push_failure = bool(
+            fleet_push_event or CoreDispatcher._vehicle_driver_push_pending_map(vehicle)
+        )
+        raw_segments = CoreDispatcher._route_result_to_grasp_raw_segments(
+            result,
+            vehicle=vehicle if should_log_push_failure else None,
+        )
         if not raw_segments:
+            events = fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+            request_ids = [
+                event.get("request_id")
+                for event in events
+                if isinstance(event, dict)
+            ]
+            if should_log_push_failure:
+                log_error(
+                    "api.core.route_grasp_raw_segments_empty",
+                    message="本地路线存在但无法生成高德规划所需的 raw segments",
+                    context=CoreDispatcher._route_push_diagnostic_context(
+                        vehicle,
+                        request_ids=request_ids,
+                        route_result=result,
+                        extra={
+                            "fleet_push_requested": bool(fleet_push_event),
+                            "local_segment_count": len((result or {}).get("segments") or []),
+                        },
+                    ),
+                )
             CoreDispatcher._clear_route_grasp_state(vehicle)
             return
         # raw segments 是规划线程消费的稳定快照，避免线程读到后续被修改的路线对象。
@@ -4861,7 +5170,6 @@ class CoreDispatcher:
                     event=event,
                 )
         CoreDispatcher._submit_vehicle_route_grasp_async(vehicle)
-        persistence.record_vehicle_route(vehicle, path_result=result)
         persistence.record_vehicle_runtime(vehicle)
 
     @staticmethod
@@ -4954,6 +5262,23 @@ class CoreDispatcher:
         if start_node is None:
             start_node = city_map.nodes_map.get(vehicle.next_node) or city_map.nodes_map.get(vehicle.last_node)
         if start_node is None:
+            request_ids = [
+                event.get("request_id")
+                for event in (
+                    fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+                )
+                if isinstance(event, dict)
+            ]
+            log_error(
+                "api.core.route_refresh_start_node_missing",
+                message="刷新车辆路线失败：last_node/next_node 均无法在当前运营区路网中找到",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=request_ids,
+                    extra={"fleet_push_requested": bool(fleet_push_event)},
+                ),
+            )
             vehicle.projected_gps = {"lon": None, "lat": None}
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
@@ -4994,6 +5319,23 @@ class CoreDispatcher:
                 restriction_policy=restriction_policy,
             )
         if result is None:
+            request_ids = [
+                event.get("request_id")
+                for event in (
+                    fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+                )
+                if isinstance(event, dict)
+            ]
+            log_error(
+                "api.core.route_refresh_astar_failed",
+                message="刷新车辆路线失败：本地 A* 路线重建未返回结果",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=request_ids,
+                    extra={"fleet_push_requested": bool(fleet_push_event)},
+                ),
+            )
             vehicle.planned_route_point = []
             CoreDispatcher._clear_route_grasp_state(vehicle)
             CoreDispatcher.update_vehicle_local_astar_eta_snapshot(vehicle, [])
@@ -5784,8 +6126,6 @@ class CoreDispatcher:
             )
 
         CoreDispatcher._start_rest_if_ready(vehicle)
-        if replan_result is None:
-            persistence.record_vehicle_route(vehicle)
         persistence.record_vehicle_runtime(
             vehicle,
             report_time=current_timestamp if current_timestamp is not None else time.time(),
@@ -5907,7 +6247,6 @@ class CoreDispatcher:
         if not job:
             return {"ok": False, "status_code": 409, "error": "无法生成高德路线规划任务"}
 
-        persistence.record_vehicle_route(vehicle, path_result=result)
         persistence.record_vehicle_runtime(vehicle)
         return {
             "ok": True,
@@ -6226,6 +6565,16 @@ class CoreDispatcher:
                 target_vehicle = vehicle
                 break
         if target_vehicle is None:
+            log_error(
+                "api.core.route_grasp_result_stale",
+                message="高德路线规划结果写回时未找到对应车辆",
+                context={
+                    "vehicle_id": job.get("vehicle_id"),
+                    "job_route_version": job.get("route_version"),
+                    "result_status": result.get("status") if isinstance(result, dict) else None,
+                },
+                level="WARNING",
+            )
             return 0
         return CoreDispatcher._apply_route_grasp_result_to_vehicle(target_vehicle, job, result, fleet=fleet)
 
@@ -6247,11 +6596,62 @@ class CoreDispatcher:
         if target_vehicle is None:
             return 0
         if CoreDispatcher._vehicle_identity(target_vehicle) != job["vehicle_id"]:
+            log_error(
+                "api.core.route_grasp_result_stale",
+                message="高德路线规划结果的车辆标识与写回车辆不一致",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    target_vehicle,
+                    extra={
+                        "job_vehicle_id": job.get("vehicle_id"),
+                        "job_route_version": job.get("route_version"),
+                        "stale_reason": "vehicle_identity_mismatch",
+                    },
+                ),
+                level="WARNING",
+            )
             return 0
         # 写回前再次校验车辆当前路线版本，避免异步返回的旧结果覆盖新路线。
-        if CoreDispatcher._vehicle_grasp_route_version(target_vehicle) != job["route_version"]:
+        computed_route_version = CoreDispatcher._vehicle_grasp_route_version(target_vehicle)
+        if computed_route_version != job["route_version"]:
+            log_error(
+                "api.core.route_grasp_result_stale",
+                message="高德路线规划返回时车辆业务路线版本已经变化，结果未写回",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    target_vehicle,
+                    request_ids=[
+                        segment.get("request_id")
+                        for segment in job.get("segments", [])
+                        if isinstance(segment, dict)
+                    ],
+                    extra={
+                        "job_route_version": job.get("route_version"),
+                        "current_computed_route_version": computed_route_version,
+                        "stale_reason": "computed_route_version_changed",
+                    },
+                ),
+                level="WARNING",
+            )
             return 0
-        if getattr(target_vehicle, "planned_route_grasp_route_version", None) != job["route_version"]:
+        stored_route_version = getattr(target_vehicle, "planned_route_grasp_route_version", None)
+        if stored_route_version != job["route_version"]:
+            log_error(
+                "api.core.route_grasp_result_stale",
+                message="高德路线规划任务版本与车辆待写回版本不一致，结果未写回",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    target_vehicle,
+                    request_ids=[
+                        segment.get("request_id")
+                        for segment in job.get("segments", [])
+                        if isinstance(segment, dict)
+                    ],
+                    extra={
+                        "job_route_version": job.get("route_version"),
+                        "current_stored_route_version": stored_route_version,
+                        "stale_reason": "stored_route_version_changed",
+                    },
+                ),
+                level="WARNING",
+            )
             return 0
 
         if isinstance(result, dict) and result.get("ok"):
@@ -6282,6 +6682,28 @@ class CoreDispatcher:
         reason = result.get("reason", status) if isinstance(result, dict) else status
         target_vehicle.planned_route_grasp_status = status
         target_vehicle.planned_route_grasp_error = reason
+        pending_request_ids = list(CoreDispatcher._vehicle_driver_push_pending_map(target_vehicle))
+        pending_events = CoreDispatcher._vehicle_fleet_push_pending_events(target_vehicle)
+        if (pending_request_ids or pending_events) and not (
+            isinstance(result, dict) and result.get("diagnostic_logged")
+        ):
+            log_error(
+                "api.core.route_grasp_failed_before_push",
+                message="订单导航信息推送前，高德路线规划未成功",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    target_vehicle,
+                    request_ids=pending_request_ids or [
+                        event.get("request_id")
+                        for event in pending_events
+                        if isinstance(event, dict)
+                    ],
+                    extra={
+                        "job_route_version": job.get("route_version"),
+                        "result_status": status,
+                        "result_reason": reason,
+                    },
+                ),
+            )
         persistence.record_route_grasp(target_vehicle)
         return 1
 
@@ -6302,11 +6724,26 @@ class CoreDispatcher:
                 client = cls._get_route_planner()
                 result = cls._run_route_grasp_job(client, job)
             except Exception as exc:
+                log_exception(
+                    "api.core.route_grasp_failed_before_push",
+                    exc,
+                    message="高德路线规划任务执行异常，导航信息未推送",
+                    context={
+                        "vehicle_id": job.get("vehicle_id"),
+                        "route_version": job.get("route_version"),
+                        "request_ids": [
+                            segment.get("request_id")
+                            for segment in job.get("segments", [])
+                            if isinstance(segment, dict)
+                        ],
+                    },
+                )
                 result = {
                     "ok": False,
                     "status": "error",
                     "reason": str(exc),
                     "segments": [],
+                    "diagnostic_logged": True,
                 }
             lock_context = cls.route_grasp_apply_lock if cls.route_grasp_apply_lock is not None else nullcontext()
             with lock_context:
@@ -6761,11 +7198,7 @@ class CoreDispatcher:
                     str(order_id) in on_board_ids,
                     amap_enabled,
                 )
-            persistence.record_order_snapshot(
-                order,
-                status=CoreDispatcher._order_status_for_persistence(order),
-                vehicle=target_vehicle,
-            )
+            persistence.record_order_eta(order)
             changed += 1
         persistence.record_vehicle_runtime(target_vehicle)
         return changed

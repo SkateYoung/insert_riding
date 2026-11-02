@@ -9,12 +9,14 @@
 
 import copy
 import hashlib
+import heapq
 import json
 import math
 import os
 import queue
 import threading
 import time
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
@@ -37,6 +39,9 @@ except Exception:  # pragma: no cover - 日志模块不可用时不影响持久�
 DEFAULT_QUEUE_SIZE = 10000
 DEFAULT_TENANT_ID = "000000"
 DEFAULT_FORECAST_HISTORY_LIMIT = 5000
+GPS_RUNTIME_WRITE_INTERVAL_SECONDS = 2.0
+ORDER_PRIORITY_BURST_SIZE = 20
+ORDER_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class PersistenceConflict(ValueError):
@@ -566,6 +571,17 @@ class MySqlPersistence:
         self.ssl_verify_cert = bool(self.ssl_enabled and _env_enabled(config.get("ssl_verify_cert", "1")))
         self.ssl_verify_identity = bool(self.ssl_enabled and _env_enabled(config.get("ssl_verify_identity", "0")))
         self.queue = queue.Queue(maxsize=int(config.get("queue_size") or DEFAULT_QUEUE_SIZE))
+        # 订单状态使用独立高优先级通道，并按 request_id 只保留最新快照。
+        self.order_priority_queue = queue.Queue()
+        self._order_pending = {}
+        self._order_ready_keys = set()
+        self._order_retry_heap = []
+        self._order_generation = 0
+        self._order_lock = threading.Lock()
+        # 车辆运行态按 vehicle_code 合并；GPS 更新由 due_at 控制两秒限频。
+        self._runtime_pending = {}
+        self._runtime_last_written_at = {}
+        self._runtime_lock = threading.Lock()
         self.worker = None
         self.stop_event = threading.Event()
         self.last_error = None
@@ -612,10 +628,21 @@ class MySqlPersistence:
 
     def status(self):
         """返回当前写库线程状态，供 /health 只读展示。"""
+        with self._order_lock:
+            order_priority_queue_size = len(self._order_pending)
+            order_retry_count = sum(
+                1 for item in self._order_pending.values()
+                if int(item.get("attempt", 0) or 0) > 0
+            )
+        with self._runtime_lock:
+            runtime_pending_count = len(self._runtime_pending)
         return {
             "enabled": self.enabled,
             "available": pymysql is not None,
             "queue_size": self.queue.qsize(),
+            "order_priority_queue_size": order_priority_queue_size,
+            "order_retry_count": order_retry_count,
+            "runtime_pending_count": runtime_pending_count,
             "last_error": self.last_error,
             "last_forecast_read": copy.deepcopy(self.last_forecast_read),
             "last_success_at": self.last_success_at,
@@ -4110,6 +4137,10 @@ class MySqlPersistence:
             "payload": copy.deepcopy(payload or {}),
             "queued_at": time.time(),
         }
+        if op == "order":
+            return self._enqueue_order_task(task)
+        if op == "vehicle_runtime":
+            return self._enqueue_runtime_task(task, throttle_seconds=0.0)
         try:
             self.queue.put_nowait(task)
             return True
@@ -4118,18 +4149,166 @@ class MySqlPersistence:
             self.last_error = "persistence_queue_full"
             return False
 
+    def enqueue_vehicle_runtime(self, payload, throttle_seconds=0.0):
+        """合并车辆运行态快照；GPS 可限频，业务事件可立即写入。"""
+        if not self.enabled:
+            return False
+        self.start()
+        task = {
+            "op": "vehicle_runtime",
+            "tenant_id": self.tenant_id,
+            "payload": copy.deepcopy(payload or {}),
+            "queued_at": time.time(),
+        }
+        return self._enqueue_runtime_task(task, throttle_seconds=throttle_seconds)
+
+    def _enqueue_order_task(self, task):
+        """按订单号保存最新状态，并把订单写入放入高优先级通道。"""
+        payload = task.get("payload") or {}
+        request_id = str(payload.get("request_id") or "").strip()
+        if not request_id:
+            return False
+        key = (task.get("tenant_id") or self.tenant_id, request_id)
+        with self._order_lock:
+            self._order_generation += 1
+            task["_queue_key"] = key
+            task["_generation"] = self._order_generation
+            task["attempt"] = 0
+            self._order_pending[key] = task
+            if key not in self._order_ready_keys:
+                self._order_ready_keys.add(key)
+                self.order_priority_queue.put_nowait(key)
+        return True
+
+    def _enqueue_runtime_task(self, task, throttle_seconds=0.0):
+        """按车辆合并运行态；同一车辆只保留最后一次完整快照。"""
+        payload = task.get("payload") or {}
+        vehicle_code = str(payload.get("vehicle_code") or "").strip()
+        if not vehicle_code:
+            return False
+        key = (task.get("tenant_id") or self.tenant_id, vehicle_code)
+        now = time.time()
+        throttle_seconds = max(0.0, float(throttle_seconds or 0.0))
+        with self._runtime_lock:
+            last_written_at = self._runtime_last_written_at.get(key, 0.0)
+            due_at = now if throttle_seconds <= 0 else max(now, last_written_at + throttle_seconds)
+            existing = self._runtime_pending.get(key)
+            if existing is not None:
+                # 新快照覆盖旧快照；业务事件可以把原本延迟的 GPS 快照提升为立即写入。
+                due_at = min(float(existing.get("due_at") or due_at), due_at)
+            task["_queue_key"] = key
+            task["due_at"] = due_at
+            task["throttle_seconds"] = throttle_seconds
+            self._runtime_pending[key] = task
+        return True
+
+    def _promote_due_order_retries(self, now):
+        with self._order_lock:
+            while self._order_retry_heap and self._order_retry_heap[0][0] <= now:
+                _, generation, key = heapq.heappop(self._order_retry_heap)
+                pending = self._order_pending.get(key)
+                if pending is None or pending.get("_generation") != generation:
+                    continue
+                if key not in self._order_ready_keys:
+                    self._order_ready_keys.add(key)
+                    self.order_priority_queue.put_nowait(key)
+
+    def _take_order_task(self):
+        self._promote_due_order_retries(time.time())
+        try:
+            key = self.order_priority_queue.get_nowait()
+        except queue.Empty:
+            return None
+        with self._order_lock:
+            self._order_ready_keys.discard(key)
+            task = self._order_pending.get(key)
+        if task is None:
+            self.order_priority_queue.task_done()
+            return None
+        return task
+
+    def _complete_order_task(self, task, success):
+        key = task.get("_queue_key")
+        generation = task.get("_generation")
+        with self._order_lock:
+            current = self._order_pending.get(key)
+            if current is None or current.get("_generation") != generation:
+                return
+            if success:
+                self._order_pending.pop(key, None)
+                return
+            attempt = int(task.get("attempt", 0) or 0) + 1
+            task["attempt"] = attempt
+            self._order_pending[key] = task
+            delay_index = min(attempt - 1, len(ORDER_RETRY_DELAYS_SECONDS) - 1)
+            retry_at = time.time() + ORDER_RETRY_DELAYS_SECONDS[delay_index]
+            heapq.heappush(self._order_retry_heap, (retry_at, generation, key))
+
+    def _take_runtime_task(self):
+        now = time.time()
+        with self._runtime_lock:
+            due = [
+                (float(task.get("due_at") or 0.0), key)
+                for key, task in self._runtime_pending.items()
+                if float(task.get("due_at") or 0.0) <= now
+            ]
+            if not due:
+                return None
+            _, key = min(due)
+            return self._runtime_pending.pop(key)
+
+    def _complete_runtime_task(self, task, success):
+        key = task.get("_queue_key")
+        now = time.time()
+        with self._runtime_lock:
+            if success:
+                self._runtime_last_written_at[key] = now
+                newer = self._runtime_pending.get(key)
+                if newer is not None and float(newer.get("throttle_seconds") or 0.0) > 0:
+                    newer["due_at"] = max(float(newer.get("due_at") or 0.0), now + float(newer["throttle_seconds"]))
+                return
+            if key not in self._runtime_pending:
+                task["due_at"] = now + 1.0
+                self._runtime_pending[key] = task
+
     def _worker_loop(self):
         """后台写库主循环。
 
         数据库异常在这里被吞掉并记录 last_error，随后关闭连接等待下一次任务重连。
         """
+        priority_streak = 0
         while not self.stop_event.is_set():
-            try:
-                task = self.queue.get(timeout=0.5)
-            except queue.Empty:
+            source = None
+            task = None
+            if priority_streak < ORDER_PRIORITY_BURST_SIZE:
+                task = self._take_order_task()
+                if task is not None:
+                    source = "order"
+                    priority_streak += 1
+            if task is None:
+                task = self._take_runtime_task()
+                if task is not None:
+                    source = "runtime"
+                    priority_streak = 0
+            if task is None:
+                try:
+                    task = self.queue.get_nowait()
+                    source = "normal"
+                    priority_streak = 0
+                except queue.Empty:
+                    task = None
+            if task is None and priority_streak >= ORDER_PRIORITY_BURST_SIZE:
+                task = self._take_order_task()
+                if task is not None:
+                    source = "order"
+                    priority_streak = 1
+            if task is None:
+                self.stop_event.wait(0.05)
                 continue
+            success = False
             try:
                 self._execute_task(task)
+                success = True
                 self.processed_tasks += 1
                 self.last_success_at = time.time()
                 self.last_error = None
@@ -4148,7 +4327,13 @@ class MySqlPersistence:
                 self._rollback()
                 self._close_connection()
             finally:
-                self.queue.task_done()
+                if source == "order":
+                    self._complete_order_task(task, success)
+                    self.order_priority_queue.task_done()
+                elif source == "runtime":
+                    self._complete_runtime_task(task, success)
+                else:
+                    self.queue.task_done()
 
     def _connect(self):
         """获取可用 MySQL 连接，断线时自动重连。"""
@@ -4456,6 +4641,31 @@ class MySqlPersistence:
             payload.get("eta_error"),
             _to_datetime(payload.get("eta_updated_at")),
             tenant_id,
+        ))
+
+    def _op_order_eta(self, cursor, tenant_id, payload):
+        """只刷新 ETA 字段，避免低优先级 ETA 快照覆盖订单业务状态。"""
+        self._execute(cursor, """
+            UPDATE bus_order
+            SET estimated_arrival_time=%s,
+                estimated_dropoff_time=%s,
+                estimated_arrival_eta_seconds=%s,
+                estimated_dropoff_eta_seconds=%s,
+                eta_status=%s,
+                eta_error=%s,
+                eta_updated_at=%s,
+                updated_at=CURRENT_TIMESTAMP(3)
+            WHERE tenant_id=%s AND request_id=%s AND deleted=0
+        """, (
+            _to_datetime(payload.get("estimated_arrival_time")),
+            _to_datetime(payload.get("estimated_dropoff_time")),
+            _int_or_none(payload.get("estimated_arrival_eta_seconds")),
+            _int_or_none(payload.get("estimated_dropoff_eta_seconds")),
+            payload.get("eta_status"),
+            payload.get("eta_error"),
+            _to_datetime(payload.get("eta_updated_at")),
+            tenant_id,
+            payload.get("request_id"),
         ))
 
     def _op_dispatch_task(self, cursor, tenant_id, payload):
@@ -5203,7 +5413,7 @@ def record_vehicle(vehicle):
     })
 
 
-def record_vehicle_runtime(vehicle, report_time=None):
+def record_vehicle_runtime(vehicle, report_time=None, gps_throttled=False):
     """写入车辆实时运行快照。
 
     Args:
@@ -5214,7 +5424,7 @@ def record_vehicle_runtime(vehicle, report_time=None):
     idle_target = getattr(vehicle, "idle_target", None) or {}
     operation_status = _operation_status(vehicle)
     rest_status = _rest_status_from_operation_status(operation_status)
-    enqueue("vehicle_runtime", {
+    payload = {
         "vehicle_code": _vehicle_code(vehicle),
         "driver_code": _driver_code(vehicle),
         "operation_status": operation_status,
@@ -5239,7 +5449,14 @@ def record_vehicle_runtime(vehicle, report_time=None):
         "idle_target_eta_time": getattr(vehicle, "idle_target_eta_time", None),
         "idle_target_eta_status": getattr(vehicle, "idle_target_eta_status", None),
         "reported_at": report_time or getattr(vehicle, "time", None) or time.time(),
-    })
+    }
+    enqueue_runtime = getattr(_manager, "enqueue_vehicle_runtime", None)
+    if callable(enqueue_runtime):
+        return enqueue_runtime(
+            payload,
+            throttle_seconds=GPS_RUNTIME_WRITE_INTERVAL_SECONDS if gps_throttled else 0.0,
+        )
+    return enqueue("vehicle_runtime", payload)
 
 
 def record_location(vehicle, report_time=None, raw_payload=None):
@@ -5375,6 +5592,20 @@ def record_order_snapshot(order, city_map=None, status=None, vehicle=None, route
     ))
 
 
+def record_order_eta(order):
+    """以普通优先级仅更新订单 ETA，不参与订单状态 upsert。"""
+    return enqueue("order_eta", {
+        "request_id": str(getattr(order, "request_id", "")),
+        "estimated_arrival_time": getattr(order, "estimated_arrival_time", None),
+        "estimated_dropoff_time": getattr(order, "estimated_dropoff_time", None),
+        "estimated_arrival_eta_seconds": getattr(order, "estimated_arrival_eta_seconds", None),
+        "estimated_dropoff_eta_seconds": getattr(order, "estimated_dropoff_eta_seconds", None),
+        "eta_status": getattr(order, "eta_status", None),
+        "eta_error": getattr(order, "eta_error", None),
+        "eta_updated_at": getattr(order, "eta_updated_at", None),
+    })
+
+
 def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, details=None, record_vehicle_state=True):
     """订单派给车辆后写入调度任务、订单、路线和运行态。
 
@@ -5390,7 +5621,8 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
     route_version = _route_version(vehicle)
     record_order_snapshot(order, city_map=city_map, status=_order_status(order, "matched"), vehicle=vehicle)
     enqueue("dispatch_task", {
-        "task_no": f"dispatch:{getattr(order, 'request_id', '')}:{route_version}:{int(time.time() * 1000)}",
+        # request_id 和 route_version 已有独立字段；任务号使用固定长度 UUID，避免超过 varchar(64)。
+        "task_no": f"dispatch:{uuid.uuid4().hex}",
         "task_type": "dispatch",
         "trigger_source": "order_pool",
         "request_id": str(getattr(order, "request_id", "")),
@@ -5407,7 +5639,6 @@ def record_dispatch_assignment(order, vehicle, city_map=None, path_result=None, 
         "finished_at": _now_dt(),
     })
     if record_vehicle_state:
-        record_vehicle_route(vehicle, path_result=path_result)
         record_vehicle_runtime(vehicle)
 
 
@@ -5537,10 +5768,8 @@ def record_path_update(vehicle, path_result=None, report_time=None):
         path_result (dict, optional): /fleet/<vehicle_id>/path 的路径更新结果。
         report_time (float | datetime, optional): GPS 上报时间。
     """
-    record_vehicle(vehicle)
-    record_vehicle_runtime(vehicle, report_time=report_time)
-    record_location(vehicle, report_time=report_time, raw_payload=path_result)
-    record_vehicle_route(vehicle, path_result=path_result)
+    # GPS 高频上报只合并写入当前运行态；不再写车辆档案、位置历史或路线历史。
+    record_vehicle_runtime(vehicle, report_time=report_time, gps_throttled=True)
     if getattr(vehicle, "commute_express_active", False):
         return
     for event in (path_result or {}).get("changed_steps", []) if isinstance(path_result, dict) else []:
@@ -5594,10 +5823,6 @@ def record_route_grasp(vehicle):
         vehicle (Vehicle): 车辆运行对象。
     """
     record_vehicle(vehicle)
-    if getattr(vehicle, "commute_express_active", False):
-        record_vehicle_runtime(vehicle)
-        return
-    record_vehicle_route(vehicle)
     record_vehicle_runtime(vehicle)
 
 
@@ -5612,7 +5837,7 @@ def record_eta_result(vehicle):
         if getattr(vehicle, "commute_express_active", False):
             return
         for order in _orders_in_vehicle(vehicle).values():
-            record_order_snapshot(order, status=_order_status(order), vehicle=vehicle)
+            record_order_eta(order)
 
 
 def record_hotspot_forecast(vehicle):

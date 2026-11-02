@@ -47,3 +47,650 @@ Traceback (most recent call last):
     raise errorclass(errno, errval, sqlstate=sqlstate)
 pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
 
+========================================================================================
+time: 2026-10-30 11:04:43
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: dispatch_task
+context: {"op": "dispatch_task", "tenant_id": "000000", "queued_at": 1793329483.8202894, "request_id": "demo-1793329471742-1-52492", "vehicle_code": "72057594546116666", "route_version": "grasp:v1:30343abcd107bf577011aa860699e918", "status": "success", "task_no": "dispatch:demo-1793329471742-1-52492:grasp:v1:30343abcd107bf577011aa860699e918:1793329483820", "payload_keys": ["finished_at", "input_summary", "output_summary", "request_id", "route_version", "selected_vehicle_code", "status", "task_no", "task_type", "trigger_source", "vehicle_code"]}
+exception: DataError(1406, "Data too long for column 'task_no' at row 1")
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4224, in _execute_task
+    handler(cursor, tenant_id, payload)
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4465, in _op_dispatch_task
+    self._execute(cursor, """
+  File "d:\Bus_Project\insert_riding\api\persistence.py", line 4180, in _execute
+    cursor.execute(sql, params or ())
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 159, in execute
+    result = self._query(query)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\cursors.py", line 330, in _query
+    conn.query(q)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 582, in query
+    self._affected_rows = self._read_query_result(unbuffered=unbuffered)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 847, in _read_query_result
+    result.read()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1245, in read
+    first_packet = self.connection._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.DataError: (1406, "Data too long for column 'task_no' at row 1")
+
+========================================================================================
+time: 2026-10-30 11:20:28
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": false, "next_node_loaded": false, "gps": {"lon": 113.001, "lat": 23.001}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": true, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 11:20:28
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": [], "last_node": "A", "next_node": "A", "last_node_loaded": false, "next_node_loaded": false, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": false, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 11:20:28
+level: ERROR
+source: api.core.route_grasp_failed_before_push
+message: 订单导航信息推送前，高德路线规划未成功
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": false, "next_node_loaded": false, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "error", "route_grasp_error": "O:order-1:driving_plan_failed", "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "result_status": "error", "result_reason": "O:order-1:driving_plan_failed"}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "BUSY_V", "operation_area_id": 19, "request_ids": ["NEW"], "last_node": "BUSY", "next_node": "BUSY", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "NEW", "target_node_id": "O_NEW"}, {"index": 1, "type": "O", "request_id": "OLD", "target_node_id": "O_OLD"}, {"index": 2, "type": "D", "request_id": "NEW", "target_node_id": "D_NEW"}, {"index": 3, "type": "D", "request_id": "OLD", "target_node_id": "D_OLD"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:131f9feebdb89b943a63b12edc775e3b", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEW", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["BATCH_A", "BATCH_B"], "last_node": "V", "next_node": "V", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "BATCH_B", "target_node_id": "O2"}, {"index": 1, "type": "O", "request_id": "BATCH_A", "target_node_id": "O1"}, {"index": 2, "type": "D", "request_id": "BATCH_B", "target_node_id": "D2"}, {"index": 3, "type": "D", "request_id": "BATCH_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:1db2b27df08a0dee61d9099f28dff815", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "BATCH_A", "route_version": null, "event_reason": "order_assigned"}, {"request_id": "BATCH_B", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["SPREAD_A"], "last_node": "V1", "next_node": "V1", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_A", "target_node_id": "O1"}, {"index": 1, "type": "D", "request_id": "SPREAD_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:b67e76fafd98343ecbe96b4aeabbbc90", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_A", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V2", "operation_area_id": 19, "request_ids": ["SPREAD_B"], "last_node": "V2", "next_node": "V2", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_B", "target_node_id": "O2"}, {"index": 1, "type": "D", "request_id": "SPREAD_B", "target_node_id": "D2"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:34d9e110a0b0e06156549798c0de0a58", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_B", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["DECLINED"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "DECLINED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "DECLINED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:f1da83a7f98fcca89b78ccf95da98f86", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "DECLINED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:d4810f273aed47dec2bba1719c976c38", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "NEAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN_EXPIRED"], "last_node": "NEAR", "next_node": "NEAR", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:281ee3645b93024443cfda39ab1f094e", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN_EXPIRED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["FUTURE_READY"], "last_node": "V", "next_node": "V", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "FUTURE_READY", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "FUTURE_READY", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:ed4eb036243a7944f17071421e982bd5", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "FUTURE_READY", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["NEAR_FUTURE"], "last_node": "V", "next_node": "V", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "NEAR_FUTURE", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "NEAR_FUTURE", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:de05b0163a5ef4ebb4dc47932a5a4139", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEAR_FUTURE", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:20:38
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["WINDOW"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": false, "next_node_loaded": false, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "WINDOW", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "WINDOW", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:2006481755e1c7e82046ce21f59505bd", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "WINDOW", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.001, "lat": 23.001}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": true, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.route_grasp_job_not_created
+message: 存在订单导航待推送事件，但高德路线异步规划未启用
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "pending", "route_grasp_error": null, "pending_push_events": [{"request_id": "order-1", "event_reason": "order_assigned", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_not_created_reason": "route_grasp_auto_submit_disabled"}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.route_grasp_job_not_created
+message: 存在订单导航待推送事件，但高德路线异步规划未启用
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "pending", "route_grasp_error": null, "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_not_created_reason": "route_grasp_auto_submit_disabled"}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.route_grasp_failed_before_push
+message: 订单导航信息推送前，高德路线规划未成功
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "error", "route_grasp_error": "O:order-1:driving_plan_failed", "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "result_status": "error", "result_reason": "O:order-1:driving_plan_failed"}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: order
+context: {"op": "order", "tenant_id": "000000", "queued_at": 1793330595.5062475, "request_id": "order-2", "status": "matched", "payload_keys": ["actual_pickup_distance_m", "actual_pickup_time", "answer_time", "assigned_driver_code", "assigned_plate_no", "assigned_vehicle_code", "cancel_reason", "cancel_time", "cancel_type", "completion_time", "destination_lat", "destination_lon", "destination_name", "destination_node_code", "destination_poi_code", "estimated_arrival_eta_seconds", "estimated_arrival_time", "estimated_dropoff_eta_seconds", "estimated_dropoff_time", "eta_error", "eta_status", "eta_updated_at", "expected_pickup_earliest", "expected_pickup_latest", "loaded_distance_m", "max_arrival_time", "max_pickup_time", "operation_area_id", "order_source", "origin_lat", "origin_lon", "origin_name", "origin_node_code", "origin_poi_code", "passenger_code", "passenger_count", "passenger_phone", "passenger_ready_time", "request_id", "request_time", "status"]}
+exception: OperationalError(1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4216, in _execute_task
+    conn = self._connect()
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4161, in _connect
+    self._connection = pymysql.connect(**self._connect_kwargs(autocommit=False))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 372, in __init__
+    self.connect()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 702, in connect
+    self._request_authentication()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1000, in _request_authentication
+    auth_packet = self._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.OperationalError: (1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "BUSY_V", "operation_area_id": 19, "request_ids": ["NEW"], "last_node": "BUSY", "next_node": "BUSY", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "NEW", "target_node_id": "O_NEW"}, {"index": 1, "type": "O", "request_id": "OLD", "target_node_id": "O_OLD"}, {"index": 2, "type": "D", "request_id": "NEW", "target_node_id": "D_NEW"}, {"index": 3, "type": "D", "request_id": "OLD", "target_node_id": "D_OLD"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:131f9feebdb89b943a63b12edc775e3b", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEW", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["BATCH_A", "BATCH_B"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "BATCH_B", "target_node_id": "O2"}, {"index": 1, "type": "O", "request_id": "BATCH_A", "target_node_id": "O1"}, {"index": 2, "type": "D", "request_id": "BATCH_B", "target_node_id": "D2"}, {"index": 3, "type": "D", "request_id": "BATCH_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:1db2b27df08a0dee61d9099f28dff815", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "BATCH_A", "route_version": null, "event_reason": "order_assigned"}, {"request_id": "BATCH_B", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["SPREAD_A"], "last_node": "V1", "next_node": "V1", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_A", "target_node_id": "O1"}, {"index": 1, "type": "D", "request_id": "SPREAD_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:b67e76fafd98343ecbe96b4aeabbbc90", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_A", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V2", "operation_area_id": 19, "request_ids": ["SPREAD_B"], "last_node": "V2", "next_node": "V2", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_B", "target_node_id": "O2"}, {"index": 1, "type": "D", "request_id": "SPREAD_B", "target_node_id": "D2"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:34d9e110a0b0e06156549798c0de0a58", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_B", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["DECLINED"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "DECLINED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "DECLINED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:f1da83a7f98fcca89b78ccf95da98f86", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "DECLINED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:d4810f273aed47dec2bba1719c976c38", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "NEAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN_EXPIRED"], "last_node": "NEAR", "next_node": "NEAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:281ee3645b93024443cfda39ab1f094e", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN_EXPIRED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: vehicle_runtime
+context: {"op": "vehicle_runtime", "tenant_id": "000000", "queued_at": 1793330595.5062475, "vehicle_code": "bus-2", "driver_code": "driver:bus-2", "route_version": "grasp:v1:088c5ffa6ab7c76536a10426a12744a1", "payload_keys": ["can_accept_order", "current_lat", "current_lon", "driver_code", "edge_progress", "idle_target_eta_seconds", "idle_target_eta_status", "idle_target_eta_time", "idle_target_lat", "idle_target_lon", "idle_target_poi_code", "last_node_code", "next_node_code", "on_board_count", "on_board_order_ids", "operation_status", "planned_step_count", "reported_at", "rest_status", "route_grasp_error", "route_grasp_status", "route_version", "segment_route", "vehicle_code"]}
+exception: OperationalError(1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4216, in _execute_task
+    conn = self._connect()
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4161, in _connect
+    self._connection = pymysql.connect(**self._connect_kwargs(autocommit=False))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 372, in __init__
+    self.connect()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 702, in connect
+    self._request_authentication()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1000, in _request_authentication
+    auth_packet = self._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.OperationalError: (1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["FUTURE_READY"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "FUTURE_READY", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "FUTURE_READY", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:ed4eb036243a7944f17071421e982bd5", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "FUTURE_READY", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["NEAR_FUTURE"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "NEAR_FUTURE", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "NEAR_FUTURE", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:de05b0163a5ef4ebb4dc47932a5a4139", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEAR_FUTURE", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:23:15
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["WINDOW"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "WINDOW", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "WINDOW", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:2006481755e1c7e82046ce21f59505bd", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "WINDOW", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.001, "lat": 23.001}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": true, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.route_grasp_failed_before_push
+message: 订单导航信息推送前，高德路线规划未成功
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "error", "route_grasp_error": "O:order-1:driving_plan_failed", "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "result_status": "error", "result_reason": "O:order-1:driving_plan_failed"}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "BUSY_V", "operation_area_id": 19, "request_ids": ["NEW"], "last_node": "BUSY", "next_node": "BUSY", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "NEW", "target_node_id": "O_NEW"}, {"index": 1, "type": "O", "request_id": "OLD", "target_node_id": "O_OLD"}, {"index": 2, "type": "D", "request_id": "NEW", "target_node_id": "D_NEW"}, {"index": 3, "type": "D", "request_id": "OLD", "target_node_id": "D_OLD"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:131f9feebdb89b943a63b12edc775e3b", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEW", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["BATCH_A", "BATCH_B"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "BATCH_B", "target_node_id": "O2"}, {"index": 1, "type": "O", "request_id": "BATCH_A", "target_node_id": "O1"}, {"index": 2, "type": "D", "request_id": "BATCH_B", "target_node_id": "D2"}, {"index": 3, "type": "D", "request_id": "BATCH_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:1db2b27df08a0dee61d9099f28dff815", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "BATCH_A", "route_version": null, "event_reason": "order_assigned"}, {"request_id": "BATCH_B", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: order
+context: {"op": "order", "tenant_id": "000000", "queued_at": 1793330663.2485633, "request_id": "order-2", "status": "matched", "payload_keys": ["actual_pickup_distance_m", "actual_pickup_time", "answer_time", "assigned_driver_code", "assigned_plate_no", "assigned_vehicle_code", "cancel_reason", "cancel_time", "cancel_type", "completion_time", "destination_lat", "destination_lon", "destination_name", "destination_node_code", "destination_poi_code", "estimated_arrival_eta_seconds", "estimated_arrival_time", "estimated_dropoff_eta_seconds", "estimated_dropoff_time", "eta_error", "eta_status", "eta_updated_at", "expected_pickup_earliest", "expected_pickup_latest", "loaded_distance_m", "max_arrival_time", "max_pickup_time", "operation_area_id", "order_source", "origin_lat", "origin_lon", "origin_name", "origin_node_code", "origin_poi_code", "passenger_code", "passenger_count", "passenger_phone", "passenger_ready_time", "request_id", "request_time", "status"]}
+exception: OperationalError(1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4216, in _execute_task
+    conn = self._connect()
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4161, in _connect
+    self._connection = pymysql.connect(**self._connect_kwargs(autocommit=False))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 372, in __init__
+    self.connect()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 702, in connect
+    self._request_authentication()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1000, in _request_authentication
+    auth_packet = self._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.OperationalError: (1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["SPREAD_A"], "last_node": "V1", "next_node": "V1", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_A", "target_node_id": "O1"}, {"index": 1, "type": "D", "request_id": "SPREAD_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:b67e76fafd98343ecbe96b4aeabbbc90", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_A", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V2", "operation_area_id": 19, "request_ids": ["SPREAD_B"], "last_node": "V2", "next_node": "V2", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_B", "target_node_id": "O2"}, {"index": 1, "type": "D", "request_id": "SPREAD_B", "target_node_id": "D2"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:34d9e110a0b0e06156549798c0de0a58", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_B", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["DECLINED"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "DECLINED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "DECLINED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:f1da83a7f98fcca89b78ccf95da98f86", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "DECLINED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:d4810f273aed47dec2bba1719c976c38", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "NEAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN_EXPIRED"], "last_node": "NEAR", "next_node": "NEAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:281ee3645b93024443cfda39ab1f094e", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN_EXPIRED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["FUTURE_READY"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "FUTURE_READY", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "FUTURE_READY", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:ed4eb036243a7944f17071421e982bd5", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "FUTURE_READY", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["NEAR_FUTURE"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "NEAR_FUTURE", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "NEAR_FUTURE", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:de05b0163a5ef4ebb4dc47932a5a4139", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEAR_FUTURE", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.persistence.worker_sql_error
+message: SQL write failed: vehicle_runtime
+context: {"op": "vehicle_runtime", "tenant_id": "000000", "queued_at": 1793330663.2485633, "vehicle_code": "bus-2", "driver_code": "driver:bus-2", "route_version": "grasp:v1:088c5ffa6ab7c76536a10426a12744a1", "payload_keys": ["can_accept_order", "current_lat", "current_lon", "driver_code", "edge_progress", "idle_target_eta_seconds", "idle_target_eta_status", "idle_target_eta_time", "idle_target_lat", "idle_target_lon", "idle_target_poi_code", "last_node_code", "next_node_code", "on_board_count", "on_board_order_ids", "operation_status", "planned_step_count", "reported_at", "rest_status", "route_grasp_error", "route_grasp_status", "route_version", "segment_route", "vehicle_code"]}
+exception: OperationalError(1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4132, in _worker_loop
+    self._execute_task(task)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4216, in _execute_task
+    conn = self._connect()
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4161, in _connect
+    self._connection = pymysql.connect(**self._connect_kwargs(autocommit=False))
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 372, in __init__
+    self.connect()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 702, in connect
+    self._request_authentication()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 1000, in _request_authentication
+    auth_packet = self._read_packet()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\connections.py", line 803, in _read_packet
+    packet.raise_for_error()
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\protocol.py", line 219, in raise_for_error
+    err.raise_mysql_exception(self._data)
+  File "D:\Miniconda\envs\amap_test\lib\site-packages\pymysql\err.py", line 154, in raise_mysql_exception
+    raise errorclass(errno, errval, sqlstate=sqlstate)
+pymysql.err.OperationalError: (1045, "Access denied for user 'root'@'localhost' (using password: NO)")
+
+========================================================================================
+time: 2026-10-30 11:24:23
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["WINDOW"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "WINDOW", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "WINDOW", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:2006481755e1c7e82046ce21f59505bd", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "WINDOW", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 12:38:20
+level: ERROR
+source: api.core.idle_hotspot_v6_forecast
+context: {"operation_area_id": 666666, "clean_order_count": 124, "forecast_time": "2026-10-30 12:45:00"}
+exception: MemoryError()
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\core.py", line 3569, in _build_idle_hotspot_cache
+    if completion_time is not None:
+  File "d:\Bus_Project\insert_riding\forecast\od_forecast_module.py", line 762, in predict_od_flows_v6
+    x_all.append(_features_for(i, pair, slots, series, pair_total, label_lookup))
+MemoryError
+
+========================================================================================
+time: 2026-10-30 14:27:59
+level: WARNING
+source: flask.response
+message: HTTP 409
+context: {"method": "POST", "path": "/admin/vehicles", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36", "request_body": "{\"vehicle_code\":\"72057594546118888\",\"plate_no\":\"粤A00008\",\"vehicle_type\":\"large_bus\",\"operation_status\":\"offline\",\"operation_area_id\":222222,\"seat_count\":10,\"max_load_count\":10,\"vehicle_color\":\"#64748b\",\"vehicle_model\":\"\",\"operation_mode\":\"dynamic_bus\",\"current_driver_code\":null,\"remark\":\"\"}", "status_code": 409, "response_body": "{\"error\":\"plate_no_exists\",\"field\":\"plate_no\",\"message\":\"\\u8f66\\u724c\\u53f7\\u5df2\\u5b58\\u5728\"}\n"}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "BUSY_V", "operation_area_id": 19, "request_ids": ["NEW"], "last_node": "BUSY", "next_node": "BUSY", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "NEW", "target_node_id": "O_NEW"}, {"index": 1, "type": "O", "request_id": "OLD", "target_node_id": "O_OLD"}, {"index": 2, "type": "D", "request_id": "NEW", "target_node_id": "D_NEW"}, {"index": 3, "type": "D", "request_id": "OLD", "target_node_id": "D_OLD"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:131f9feebdb89b943a63b12edc775e3b", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEW", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["BATCH_A", "BATCH_B"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "BATCH_B", "target_node_id": "O2"}, {"index": 1, "type": "O", "request_id": "BATCH_A", "target_node_id": "O1"}, {"index": 2, "type": "D", "request_id": "BATCH_B", "target_node_id": "D2"}, {"index": 3, "type": "D", "request_id": "BATCH_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:1db2b27df08a0dee61d9099f28dff815", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "BATCH_A", "route_version": null, "event_reason": "order_assigned"}, {"request_id": "BATCH_B", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["SPREAD_A"], "last_node": "V1", "next_node": "V1", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_A", "target_node_id": "O1"}, {"index": 1, "type": "D", "request_id": "SPREAD_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:b67e76fafd98343ecbe96b4aeabbbc90", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_A", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V2", "operation_area_id": 19, "request_ids": ["SPREAD_B"], "last_node": "V2", "next_node": "V2", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_B", "target_node_id": "O2"}, {"index": 1, "type": "D", "request_id": "SPREAD_B", "target_node_id": "D2"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:34d9e110a0b0e06156549798c0de0a58", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_B", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["DECLINED"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "DECLINED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "DECLINED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:f1da83a7f98fcca89b78ccf95da98f86", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "DECLINED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:d4810f273aed47dec2bba1719c976c38", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "NEAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN_EXPIRED"], "last_node": "NEAR", "next_node": "NEAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:281ee3645b93024443cfda39ab1f094e", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN_EXPIRED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["FUTURE_READY"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "FUTURE_READY", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "FUTURE_READY", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:ed4eb036243a7944f17071421e982bd5", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "FUTURE_READY", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["NEAR_FUTURE"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "NEAR_FUTURE", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "NEAR_FUTURE", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:de05b0163a5ef4ebb4dc47932a5a4139", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEAR_FUTURE", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["WINDOW"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "WINDOW", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "WINDOW", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:2006481755e1c7e82046ce21f59505bd", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "WINDOW", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.001, "lat": 23.001}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": true, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.core.route_grasp_failed_before_push
+message: 订单导航信息推送前，高德路线规划未成功
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "error", "route_grasp_error": "O:order-1:driving_plan_failed", "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "result_status": "error", "result_reason": "O:order-1:driving_plan_failed"}
+
+========================================================================================
+time: 2026-10-30 17:19:19
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 2287, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4999, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 817, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "BUSY_V", "operation_area_id": 19, "request_ids": ["NEW"], "last_node": "BUSY", "next_node": "BUSY", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "NEW", "target_node_id": "O_NEW"}, {"index": 1, "type": "O", "request_id": "OLD", "target_node_id": "O_OLD"}, {"index": 2, "type": "D", "request_id": "NEW", "target_node_id": "D_NEW"}, {"index": 3, "type": "D", "request_id": "OLD", "target_node_id": "D_OLD"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:131f9feebdb89b943a63b12edc775e3b", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEW", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["BATCH_A", "BATCH_B"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 4, "planned_route": [{"index": 0, "type": "O", "request_id": "BATCH_B", "target_node_id": "O2"}, {"index": 1, "type": "O", "request_id": "BATCH_A", "target_node_id": "O1"}, {"index": 2, "type": "D", "request_id": "BATCH_B", "target_node_id": "D2"}, {"index": 3, "type": "D", "request_id": "BATCH_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:1db2b27df08a0dee61d9099f28dff815", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "BATCH_A", "route_version": null, "event_reason": "order_assigned"}, {"request_id": "BATCH_B", "route_version": null, "event_reason": "order_inserted"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["SPREAD_A"], "last_node": "V1", "next_node": "V1", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_A", "target_node_id": "O1"}, {"index": 1, "type": "D", "request_id": "SPREAD_A", "target_node_id": "D1"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:b67e76fafd98343ecbe96b4aeabbbc90", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_A", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V2", "operation_area_id": 19, "request_ids": ["SPREAD_B"], "last_node": "V2", "next_node": "V2", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "SPREAD_B", "target_node_id": "O2"}, {"index": 1, "type": "D", "request_id": "SPREAD_B", "target_node_id": "D2"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:34d9e110a0b0e06156549798c0de0a58", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "SPREAD_B", "route_version": null, "event_reason": "order_assigned"}], "stage": "deferred_batch_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["DECLINED"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "DECLINED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "DECLINED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:f1da83a7f98fcca89b78ccf95da98f86", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "DECLINED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:d4810f273aed47dec2bba1719c976c38", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "NEAR_V", "operation_area_id": 19, "request_ids": ["COOLDOWN_EXPIRED"], "last_node": "NEAR", "next_node": "NEAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "COOLDOWN_EXPIRED", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:281ee3645b93024443cfda39ab1f094e", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "COOLDOWN_EXPIRED", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["FUTURE_READY"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "FUTURE_READY", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "FUTURE_READY", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:ed4eb036243a7944f17071421e982bd5", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "FUTURE_READY", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "V1", "operation_area_id": 19, "request_ids": ["NEAR_FUTURE"], "last_node": "V", "next_node": "V", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "NEAR_FUTURE", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "NEAR_FUTURE", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:de05b0163a5ef4ebb4dc47932a5a4139", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "NEAR_FUTURE", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.matched_order_push_event_missing
+message: 订单已进入 matched/driver_push_pending，但未建立对应的导航待推送事件
+context: {"vehicle_id": "FAR_V", "operation_area_id": 19, "request_ids": ["WINDOW"], "last_node": "FAR", "next_node": "FAR", "last_node_loaded": null, "next_node_loaded": null, "gps": null, "projected_gps": null, "planned_route_size": 2, "planned_route": [{"index": 0, "type": "O", "request_id": "WINDOW", "target_node_id": "O"}, {"index": 1, "type": "D", "request_id": "WINDOW", "target_node_id": "D"}], "local_segments": [], "raw_segments": [], "grasped_segments": [], "stored_route_version": null, "computed_route_version": "grasp:v1:2006481755e1c7e82046ce21f59505bd", "route_grasp_status": null, "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [{"request_id": "WINDOW", "route_version": null, "event_reason": "order_assigned"}], "stage": "single_assignment", "existing_event_request_ids": []}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.route_grasp_raw_segments_empty
+message: 本地路线存在但无法生成高德规划所需的 raw segments
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.001, "lat": 23.001}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}, {"index": 1, "type": "D", "request_id": "order-1", "start_node_id": "B", "end_node_id": "C", "target_node_id": null, "snapped_target_node_id": "C", "distance": 100.0, "distance_m": null, "point_count": 2}], "stored_route_version": "grasp:v1:27449e35932b35ba7ff2daa2833a289c", "computed_route_version": "grasp:v1:44e3d484e045c1ddc130a2eecee05d85", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [], "driver_push_pending_orders": [], "fleet_push_requested": true, "local_segment_count": 0}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.core.route_grasp_failed_before_push
+message: 订单导航信息推送前，高德路线规划未成功
+context: {"vehicle_id": "测试车", "operation_area_id": null, "request_ids": ["order-1"], "last_node": "A", "next_node": "A", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.0, "lat": 23.0}, "projected_gps": {"id": "A|A@0.000000", "lon": 113.0, "lat": 23.0, "name": "车辆当前位置", "zone": 0, "edge_u": "A", "edge_v": "A", "progress": 0.0, "is_projection": true, "source": "vehicle_current_route_position"}, "planned_route_size": 1, "planned_route": [{"index": 0, "type": "O", "request_id": "order-1", "target_node_id": "B"}], "local_segments": [], "raw_segments": [{"index": 0, "type": "O", "request_id": "order-1", "start_node_id": "A|A@0.000000", "end_node_id": "B", "target_node_id": null, "snapped_target_node_id": "B", "distance": 100.0, "distance_m": null, "point_count": 2}], "grasped_segments": [], "stored_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "computed_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "route_grasp_status": "error", "route_grasp_error": "O:order-1:driving_plan_failed", "pending_push_events": [{"request_id": "order-1", "event_reason": "order_inserted", "route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "confirmation_required": false}], "driver_push_pending_orders": [], "job_route_version": "grasp:v1:c67e3fae187d5e8d54b7134ab7f1a830", "result_status": "error", "result_reason": "O:order-1:driving_plan_failed"}
+
+========================================================================================
+time: 2026-10-30 17:21:22
+level: ERROR
+source: api.routes.admin_error
+message: database_unavailable
+context: {"method": "POST", "path": "/admin/orders/query", "query_string": "", "remote_addr": "127.0.0.1", "user_agent": "Werkzeug/3.1.8", "request_body": "{}", "status": 503}
+exception: PersistenceUnavailable('database_unavailable')
+traceback:
+Traceback (most recent call last):
+  File "D:\Bus_Project\insert_riding\api\routes.py", line 2287, in admin_query_orders
+    orders = persistence.query_orders(filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 4999, in query_orders
+    return _manager.query_orders(filters=filters)
+  File "D:\Bus_Project\insert_riding\api\persistence.py", line 817, in query_orders
+    raise PersistenceUnavailable("database_unavailable")
+api.persistence.PersistenceUnavailable: database_unavailable
+

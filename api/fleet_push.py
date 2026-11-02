@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import requests
 
-from .error_logger import log_exception
+from .error_logger import log_error, log_exception
 
 
 DEFAULT_FLEET_PUSH_BASE_URL = "http://127.0.0.1:18080"
@@ -215,11 +215,18 @@ def build_payload(vehicle, event):
 
 def _post_payload(url, payload, timeout):
     """Post one payload and log failures without raising."""
+    response = None
     try:
         response = requests.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
         return True
     except Exception as exc:
+        response_text = None
+        if response is not None:
+            try:
+                response_text = (response.text or "")[:1000]
+            except Exception:
+                response_text = None
         log_exception(
             "api.fleet_push.post_payload",
             exc,
@@ -227,6 +234,10 @@ def _post_payload(url, payload, timeout):
                 "url": url,
                 "vehicle_id": (payload or {}).get("vehicle_id") if isinstance(payload, dict) else None,
                 "request_id": (payload or {}).get("request_id") if isinstance(payload, dict) else None,
+                "event_reason": (payload or {}).get("event_reason") if isinstance(payload, dict) else None,
+                "route_version": (payload or {}).get("route_version") if isinstance(payload, dict) else None,
+                "status_code": getattr(response, "status_code", None),
+                "response_body": response_text,
             },
         )
         print(f"[FleetPush] vehicle navigation push failed: {exc}")
@@ -238,14 +249,40 @@ def submit_vehicle_navigation(vehicle, event, url_base=None, timeout=None):
     vehicle_id = _vehicle_identity(vehicle)
     target_url = _push_url_for_vehicle(vehicle_id, base_url=url_base)
     if vehicle is None or not target_url:
+        log_error(
+            "api.fleet_push.submit_task",
+            message="无法提交车辆导航推送任务：车辆或推送地址无效",
+            context={
+                "vehicle_id": vehicle_id,
+                "request_id": (event or {}).get("request_id") if isinstance(event, dict) else None,
+                "event_reason": (event or {}).get("event_reason") if isinstance(event, dict) else None,
+                "route_version": (event or {}).get("route_version") if isinstance(event, dict) else None,
+                "target_url": target_url,
+            },
+        )
         return False
-    payload = build_payload(vehicle, event)
-    _executor_instance().submit(
-        _post_payload,
-        target_url,
-        payload,
-        DEFAULT_FLEET_PUSH_TIMEOUT_SECONDS if timeout is None else float(timeout),
-    )
+    try:
+        payload = build_payload(vehicle, event)
+        _executor_instance().submit(
+            _post_payload,
+            target_url,
+            payload,
+            DEFAULT_FLEET_PUSH_TIMEOUT_SECONDS if timeout is None else float(timeout),
+        )
+    except Exception as exc:
+        log_exception(
+            "api.fleet_push.submit_task",
+            exc,
+            message="车辆导航推送任务提交到线程池失败，HTTP 请求尚未发起",
+            context={
+                "vehicle_id": vehicle_id,
+                "request_id": (event or {}).get("request_id") if isinstance(event, dict) else None,
+                "event_reason": (event or {}).get("event_reason") if isinstance(event, dict) else None,
+                "route_version": (event or {}).get("route_version") if isinstance(event, dict) else None,
+                "target_url": target_url,
+            },
+        )
+        return False
     return True
 
 

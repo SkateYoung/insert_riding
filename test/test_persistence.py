@@ -9,6 +9,7 @@ import os
 import unittest
 from datetime import datetime, timedelta
 from decimal import Decimal
+from unittest import mock
 
 from api import persistence
 from api.core import CoreDispatcher
@@ -259,6 +260,140 @@ class PersistenceSerializationTest(unittest.TestCase):
         confirmed_payloads = [payload for payload in order_payloads if payload["answer_time"] is not None]
         self.assertTrue(confirmed_payloads)
         self.assertTrue(all(payload["answer_time"] == first_answer_time for payload in confirmed_payloads))
+
+    def test_dispatch_task_number_is_fixed_length(self):
+        order = make_order(self.city, request_id="order-" + "x" * 80)
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-code-1"
+
+        persistence.record_dispatch_assignment(order, vehicle, city_map=self.city, path_result={})
+
+        payload = [payload for op, payload in self.fake_manager.tasks if op == "dispatch_task"][-1]
+        self.assertTrue(payload["task_no"].startswith("dispatch:"))
+        self.assertEqual(len(payload["task_no"]), 41)
+
+    def test_gps_path_update_only_records_runtime(self):
+        vehicle = Vehicle("vehicle-1", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-code-1"
+        vehicle.gps = {"lon": 113.1, "lat": 23.1}
+
+        persistence.record_path_update(vehicle, path_result={"changed_steps": []}, report_time=100.0)
+
+        self.assertEqual([op for op, _ in self.fake_manager.tasks], ["vehicle_runtime"])
+
+    def test_eta_uses_partial_update_operation(self):
+        order = make_order(self.city)
+        order.eta_status = "ready"
+        order.estimated_arrival_eta_seconds = 120
+
+        persistence.record_order_eta(order)
+
+        self.assertEqual(self.fake_manager.tasks[0][0], "order_eta")
+        self.assertNotIn("status", self.fake_manager.tasks[0][1])
+
+    def test_order_priority_queue_keeps_latest_state(self):
+        manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        base = {"op": "order", "tenant_id": "test", "queued_at": 1.0}
+        manager._enqueue_order_task({**base, "payload": {"request_id": "o1", "status": "matched"}})
+        manager._enqueue_order_task({**base, "payload": {"request_id": "o1", "status": "waiting_pickup"}})
+
+        task = manager._take_order_task()
+
+        self.assertEqual(task["payload"]["status"], "waiting_pickup")
+        manager._complete_order_task(task, True)
+        self.assertEqual(manager.status()["order_priority_queue_size"], 0)
+
+    def test_new_order_state_supersedes_failed_retry(self):
+        manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        base = {"op": "order", "tenant_id": "test", "queued_at": 1.0}
+        manager._enqueue_order_task({**base, "payload": {"request_id": "o1", "status": "matched"}})
+        matched = manager._take_order_task()
+        manager._complete_order_task(matched, False)
+        manager.order_priority_queue.task_done()
+
+        manager._enqueue_order_task({**base, "payload": {"request_id": "o1", "status": "waiting_pickup"}})
+        waiting = manager._take_order_task()
+
+        self.assertEqual(waiting["payload"]["status"], "waiting_pickup")
+        manager._complete_order_task(waiting, True)
+        manager.order_priority_queue.task_done()
+        with manager._order_lock:
+            manager._order_retry_heap = [
+                (0.0, generation, key)
+                for _, generation, key in manager._order_retry_heap
+            ]
+            import heapq
+            heapq.heapify(manager._order_retry_heap)
+        manager._promote_due_order_retries(1.0)
+        self.assertIsNone(manager._take_order_task())
+
+    def test_worker_processes_priority_order_before_normal_backlog(self):
+        manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        manager.queue.put_nowait({
+            "op": "dispatch_task",
+            "tenant_id": "test",
+            "payload": {"task_no": "dispatch:test"},
+            "queued_at": 1.0,
+        })
+        manager._enqueue_order_task({
+            "op": "order",
+            "tenant_id": "test",
+            "payload": {"request_id": "o1", "status": "matched"},
+            "queued_at": 2.0,
+        })
+        processed_ops = []
+
+        def execute_and_stop(task):
+            processed_ops.append(task["op"])
+            if len(processed_ops) >= 2:
+                manager.stop_event.set()
+
+        manager._execute_task = execute_and_stop
+        manager._worker_loop()
+
+        self.assertEqual(processed_ops, ["order", "dispatch_task"])
+
+    def test_runtime_queue_coalesces_latest_gps_and_throttles(self):
+        manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        with mock.patch("api.persistence.time.time", return_value=100.0):
+            manager._enqueue_runtime_task({
+                "op": "vehicle_runtime", "tenant_id": "test", "queued_at": 100.0,
+                "payload": {"vehicle_code": "v1", "current_lon": 113.1},
+            }, throttle_seconds=2.0)
+            manager._enqueue_runtime_task({
+                "op": "vehicle_runtime", "tenant_id": "test", "queued_at": 100.0,
+                "payload": {"vehicle_code": "v1", "current_lon": 113.2},
+            }, throttle_seconds=2.0)
+            first = manager._take_runtime_task()
+            self.assertEqual(first["payload"]["current_lon"], 113.2)
+            manager._complete_runtime_task(first, True)
+
+        with mock.patch("api.persistence.time.time", return_value=101.0):
+            manager._enqueue_runtime_task({
+                "op": "vehicle_runtime", "tenant_id": "test", "queued_at": 101.0,
+                "payload": {"vehicle_code": "v1", "current_lon": 113.3},
+            }, throttle_seconds=2.0)
+            self.assertIsNone(manager._take_runtime_task())
+
+        with mock.patch("api.persistence.time.time", return_value=102.0):
+            latest = manager._take_runtime_task()
+            self.assertEqual(latest["payload"]["current_lon"], 113.3)
+
+    def test_business_runtime_promotes_delayed_gps_snapshot(self):
+        manager = persistence.MySqlPersistence({"enabled": False, "tenant_id": "test"})
+        manager._runtime_last_written_at[("test", "v1")] = 100.0
+        with mock.patch("api.persistence.time.time", return_value=101.0):
+            manager._enqueue_runtime_task({
+                "op": "vehicle_runtime", "tenant_id": "test", "queued_at": 101.0,
+                "payload": {"vehicle_code": "v1", "route_grasp_status": "pending"},
+            }, throttle_seconds=2.0)
+            self.assertIsNone(manager._take_runtime_task())
+            manager._enqueue_runtime_task({
+                "op": "vehicle_runtime", "tenant_id": "test", "queued_at": 101.0,
+                "payload": {"vehicle_code": "v1", "route_grasp_status": "ready"},
+            }, throttle_seconds=0.0)
+            promoted = manager._take_runtime_task()
+            self.assertEqual(promoted["payload"]["route_grasp_status"], "ready")
 
     def test_query_orders_builds_filters_and_normalizes_rows(self):
         previous_pymysql = persistence.pymysql

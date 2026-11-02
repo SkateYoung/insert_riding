@@ -1741,6 +1741,11 @@ def health():
         "db_database": db_status.get("database"),
         "db_tenant_id": db_status.get("tenant_id"),
         "db_queue_size": db_status.get("queue_size"),
+        "db_order_priority_queue_size": db_status.get("order_priority_queue_size"),
+        "db_order_retry_count": db_status.get("order_retry_count"),
+        "db_runtime_pending_count": db_status.get("runtime_pending_count"),
+        "db_dropped_tasks": db_status.get("dropped_tasks"),
+        "db_processed_tasks": db_status.get("processed_tasks"),
         "db_last_error": db_status.get("last_error"),
     })
 
@@ -3366,14 +3371,10 @@ def update_vehicle_path(vehicle_id):
             target_vehicle.gps = {"lon": lon, "lat": lat}
             target_vehicle.projected_gps = {"lon": None, "lat": None}
             target_vehicle.time = report_time
-            persistence.record_vehicle_runtime(target_vehicle, report_time=report_time)
-            persistence.record_location(
+            persistence.record_vehicle_runtime(
                 target_vehicle,
                 report_time=report_time,
-                raw_payload={
-                    "mode": "commute_express",
-                    "raw_gps": {"lon": lon, "lat": lat},
-                },
+                gps_throttled=True,
             )
             return jsonify({
                 "status": "ok",

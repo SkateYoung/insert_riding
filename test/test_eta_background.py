@@ -7,6 +7,7 @@ import asyncio
 import time
 import threading
 from datetime import datetime, timedelta
+from unittest.mock import ANY, patch
 
 from flask import Flask
 
@@ -1537,6 +1538,162 @@ class EtaBackgroundTest(unittest.TestCase):
             "order_inserted",
         )
 
+    def test_route_refresh_missing_start_node_logs_diagnostic(self):
+        order = make_order(self.city, request_id="missing-start")
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.last_node = "missing-last"
+        self.vehicle.next_node = "missing-next"
+
+        with patch("api.core.log_error") as mocked_log:
+            result = CoreDispatcher.refresh_vehicle_route_metadata(
+                self.vehicle,
+                self.city,
+                fleet_push_event={
+                    "event_reason": "order_assigned",
+                    "request_id": order.request_id,
+                },
+            )
+
+        self.assertIsNone(result)
+        sources = [call.args[0] for call in mocked_log.call_args_list]
+        self.assertIn("api.core.route_refresh_start_node_missing", sources)
+        context = next(
+            call.kwargs["context"]
+            for call in mocked_log.call_args_list
+            if call.args[0] == "api.core.route_refresh_start_node_missing"
+        )
+        self.assertEqual(context["request_ids"], [order.request_id])
+        self.assertFalse(context["last_node_loaded"])
+        self.assertFalse(context["next_node_loaded"])
+
+    def test_empty_local_segment_logs_raw_segment_failure(self):
+        order = make_order(self.city, request_id="empty-segment")
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        result = {
+            "path": [],
+            "segments": [{
+                "type": "O",
+                "request_id": order.request_id,
+                "path": [],
+                "distance": 0.0,
+            }],
+        }
+
+        with patch("api.core.log_error") as mocked_log:
+            CoreDispatcher._mark_vehicle_route_grasp_pending(
+                self.vehicle,
+                result,
+                fleet_push_event={
+                    "event_reason": "order_assigned",
+                    "request_id": order.request_id,
+                },
+            )
+
+        sources = [call.args[0] for call in mocked_log.call_args_list]
+        self.assertIn("api.core.route_grasp_segment_empty", sources)
+        self.assertIn("api.core.route_grasp_raw_segments_empty", sources)
+        self.assertEqual(CoreDispatcher._vehicle_fleet_push_pending_events(self.vehicle), [])
+
+    def test_assignment_refresh_failure_logs_missing_push_event(self):
+        order = make_order(self.city, request_id="assignment-refresh-failed")
+        route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+
+        with patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value=None), \
+                patch("api.core.persistence.record_order_matched_pending"), \
+                patch("api.core.log_error") as mocked_log:
+            result = CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
+                order,
+                self.vehicle,
+                route,
+                self.city,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(order.status, "matched")
+        sources = [call.args[0] for call in mocked_log.call_args_list]
+        self.assertIn("api.core.order_assignment_route_refresh_failed", sources)
+        self.assertIn("api.core.matched_order_push_event_missing", sources)
+
+    def test_route_ready_without_push_event_logs_diagnostic(self):
+        order = make_order(self.city, request_id="ready-without-event")
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(self.vehicle)
+        self.vehicle.planned_route_grasp_status = "ready"
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, event_reason="order_assigned")
+
+        with patch("api.core.log_error") as mocked_log:
+            submitted = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
+
+        self.assertFalse(submitted)
+        mocked_log.assert_any_call(
+            "api.core.route_ready_without_push_event",
+            message="高德路线已 ready，但司机待确认订单没有导航待推送事件",
+            context=ANY,
+        )
+
+    def test_fleet_push_event_version_mismatch_is_logged_before_event_is_cleared(self):
+        self.vehicle.planned_route_grasp_route_version = "route-current"
+        self.vehicle.planned_route_grasp_status = "ready"
+        self.vehicle.fleet_push_pending_events = [{
+            "event_reason": "order_assigned",
+            "request_id": "stale-push-event",
+            "route_version": "route-old",
+        }]
+
+        with patch("api.core.log_error") as mocked_log:
+            submitted = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
+
+        self.assertFalse(submitted)
+        self.assertEqual(self.vehicle.fleet_push_pending_events, [])
+        self.assertIn(
+            "api.core.fleet_push_event_version_mismatch",
+            [call.args[0] for call in mocked_log.call_args_list],
+        )
+
+    def test_fleet_push_submit_rejection_is_logged_and_event_is_retained(self):
+        self.vehicle.planned_route_grasp_route_version = "route-current"
+        self.vehicle.planned_route_grasp_status = "ready"
+        event = {
+            "event_reason": "order_assigned",
+            "request_id": "rejected-push-event",
+            "route_version": "route-current",
+        }
+        self.vehicle.fleet_push_pending_events = [event]
+
+        with patch("api.core.fleet_push.submit_vehicle_navigation", return_value=False), \
+                patch("api.core.log_error") as mocked_log:
+            submitted = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
+
+        self.assertFalse(submitted)
+        self.assertEqual(self.vehicle.fleet_push_pending_events, [event])
+        self.assertIn(
+            "api.core.fleet_push_submit_rejected",
+            [call.args[0] for call in mocked_log.call_args_list],
+        )
+
+    def test_fleet_push_executor_submit_failure_is_logged(self):
+        self.vehicle.vehicle_id = "vehicle-submit-failed"
+        event = {
+            "event_reason": "order_assigned",
+            "request_id": "submit-failed-order",
+            "route_version": "route-v1",
+        }
+
+        class ClosedExecutor:
+            def submit(self, *args, **kwargs):
+                raise RuntimeError("cannot schedule new futures after shutdown")
+
+        with patch("api.fleet_push._executor_instance", return_value=ClosedExecutor()), \
+                patch("api.fleet_push.log_exception") as mocked_log:
+            submitted = fleet_push.submit_vehicle_navigation(self.vehicle, event)
+
+        self.assertFalse(submitted)
+        self.assertEqual(mocked_log.call_args.args[0], "api.fleet_push.submit_task")
+        self.assertEqual(mocked_log.call_args.kwargs["context"]["request_id"], "submit-failed-order")
+
     def test_vehicle_navigation_push_url_uses_vehicle_path(self):
         url = fleet_push._push_url_for_vehicle("车/1", base_url="http://push.example/")
 
@@ -1591,11 +1748,16 @@ class EtaBackgroundTest(unittest.TestCase):
         result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), job)
         self.vehicle.planned_route = []
 
-        changed = CoreDispatcher._apply_route_grasp_result(job, result, [self.vehicle])
+        with patch("api.core.log_error") as mocked_log:
+            changed = CoreDispatcher._apply_route_grasp_result(job, result, [self.vehicle])
 
         self.assertEqual(changed, 0)
         self.assertEqual(self.vehicle.planned_route_grasp_status, "pending")
         self.assertEqual(self.vehicle.planned_route_segment_grasped_point, [])
+        self.assertIn(
+            "api.core.route_grasp_result_stale",
+            [call.args[0] for call in mocked_log.call_args_list],
+        )
 
     def test_route_grasp_failure_keeps_previous_grasped_points(self):
         order = make_order(self.city)
