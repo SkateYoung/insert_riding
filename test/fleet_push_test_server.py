@@ -49,18 +49,41 @@ def _vehicle_id_from_snapshot(snapshot):
     )
 
 
-def _confirmation_key(vehicle_id, request_id, route_version=None):
-    """Build an in-memory confirmation key."""
+def _confirmation_key(vehicle_id, request_id, push_event_id=None):
+    """Build an event-scoped confirmation key.
+
+    The same order may be requeued and later assigned to the same vehicle again.
+    Keeping the push event identity in the key prevents an old confirmation from
+    hiding that newer assignment.
+    """
     return (
         str(vehicle_id or ""),
         str(request_id or ""),
+        str(push_event_id or "legacy"),
     )
+
+
+def _push_event_identity(payload):
+    """Return the stable identity of one assignment push payload."""
+    if not isinstance(payload, dict):
+        return "legacy"
+    push_event_id = str(payload.get("push_event_id") or "").strip()
+    if push_event_id:
+        return push_event_id
+    route_version = str(
+        payload.get("driver_push_route_version")
+        or payload.get("route_version")
+        or ""
+    ).strip()
+    return f"route:{route_version}" if route_version else "legacy"
 
 
 def _pending_navigation_entries(vehicle_id):
     """Return pending driver confirmation entries for one vehicle."""
     vehicle_id = str(vehicle_id or "").strip()
-    pending_by_key = {}
+    pending_by_request = {}
+    seen_request_ids = set()
+    invalidated_request_ids = set()
     latest = None
     with _lock:
         snapshots = list(_snapshots)
@@ -71,26 +94,46 @@ def _pending_navigation_entries(vehicle_id):
         if latest is None:
             latest = snapshot
         payload = snapshot.get("payload") if isinstance(snapshot.get("payload"), dict) else {}
+        is_correction = bool(
+            payload.get("correction")
+            or payload.get("event_kind") == "correction"
+            or payload.get("event_type") == "fleet_route_corrected"
+        )
+        failed_request_id = str(payload.get("failed_request_id") or "").strip()
+        if is_correction and failed_request_id:
+            # 倒序扫描时，修正事件只淘汰它之前的旧派单快照。若订单在修正
+            # 之后又派回同一辆车，更晚的新事件已经先进入 seen 集合，不受影响。
+            if failed_request_id not in seen_request_ids:
+                invalidated_request_ids.add(failed_request_id)
+            continue
+
         request_id = str(payload.get("confirmation_request_id") or payload.get("request_id") or "")
         if not request_id or not payload.get("driver_push_confirmation_required"):
             continue
-        route_version = str(payload.get("driver_push_route_version") or payload.get("route_version") or "")
-        key = _confirmation_key(vehicle_id, request_id)
-        if key in pending_by_key:
+        if request_id in seen_request_ids:
             continue
+        seen_request_ids.add(request_id)
+        if request_id in invalidated_request_ids:
+            continue
+
+        route_version = str(payload.get("driver_push_route_version") or payload.get("route_version") or "")
+        push_event_id = _push_event_identity(payload)
+        key = _confirmation_key(vehicle_id, request_id, push_event_id)
         if confirmations.get(key, {}).get("status") in {"confirmed", "rejected"}:
             continue
-        pending_by_key[key] = {
+        pending_by_request[request_id] = {
             "vehicle_id": vehicle_id,
             "request_id": request_id,
             "route_version": route_version,
+            "push_event_id": push_event_id,
+            "push_revision": payload.get("push_revision"),
             "event_reason": payload.get("event_reason"),
             "event_type": payload.get("event_type"),
             "received_at": snapshot.get("received_at"),
-            "platform_message_id": f"{vehicle_id}:{request_id}:{route_version or 'latest'}",
+            "platform_message_id": f"{vehicle_id}:{request_id}:{push_event_id}",
             "vehicle": payload.get("vehicle") if isinstance(payload.get("vehicle"), dict) else None,
         }
-    return list(pending_by_key.values()), latest
+    return list(pending_by_request.values()), latest
 
 
 def _find_pending_navigation(vehicle_id, request_id, route_version=None):
@@ -299,7 +342,7 @@ def confirm_driver_push_from_platform(vehicle_id, request_id):
             "dispatch_url": dispatch_url,
         }), response.status_code
 
-    key = _confirmation_key(vehicle_id, request_id)
+    key = _confirmation_key(vehicle_id, request_id, pending.get("push_event_id"))
     with _lock:
         _confirmations[key] = {
             "status": "confirmed" if received else "rejected",

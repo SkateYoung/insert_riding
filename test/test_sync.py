@@ -6,6 +6,7 @@
 """
 
 import os
+import math
 import platform
 import sys
 import threading
@@ -137,6 +138,27 @@ class _StopPoolLoop(Exception):
     """用于让后台订单池循环只执行一轮。"""
 
 
+def _fake_pushable_route_refresh(vehicle, city_map, fleet_push_event=None, **kwargs):
+    """为匹配单测构造已建立 raw segment 和路线版本的最小成功结果。"""
+    route_version = CoreDispatcher._vehicle_grasp_route_version(vehicle)
+    vehicle.planned_route_grasp_route_version = route_version
+    vehicle.planned_route_grasp_status = "pending"
+    vehicle.planned_route_grasp_error = None
+    vehicle.planned_route_segment_raw_point = [{
+        "type": "O",
+        "request_id": None,
+        "points": [{"id": "start", "lon": 0.0, "lat": 0.0}],
+    }]
+    events = fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+    for event in events:
+        if isinstance(event, dict):
+            CoreDispatcher._mark_fleet_push_pending(vehicle, event)
+    return {
+        "path": [],
+        "segments": [{"type": "O", "path": [{"id": "start", "lon": 0.0, "lat": 0.0}]}],
+    }
+
+
 class PoolTimeWindowMatchingTest(unittest.TestCase):
     """验证订单池匹配会尊重期望上车时间窗。"""
 
@@ -154,7 +176,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
     def _run_one_pool_loop(self, fleet, city):
         with mock.patch("api.core.time.sleep", side_effect=_StopPoolLoop), \
                 mock.patch.object(CoreDispatcher, "refresh_scheduled_rest_requests", return_value=None), \
-                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={}), \
+                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", side_effect=_fake_pushable_route_refresh), \
                 mock.patch("api.core.persistence.record_dispatch_assignment"), \
                 mock.patch("api.core.persistence.record_order_matched_pending"):
             with self.assertRaises(_StopPoolLoop):
@@ -162,7 +184,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
 
     def _run_area_cycle(self, fleet, city, operation_area_id=19):
         with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
-                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={}), \
+                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", side_effect=_fake_pushable_route_refresh), \
                 mock.patch("api.core.persistence.record_order_matched_pending"):
             return CoreDispatcher._process_pool_matching_area_cycle(
                 fleet,
@@ -232,7 +254,7 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         CoreDispatcher.order_pool.extend([order_a, order_b])
 
         with mock.patch.object(CoreDispatcher, "assign_idle_parking_targets", return_value=None), \
-                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value={"path": [], "segments": []}) as refreshed, \
+                mock.patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", side_effect=_fake_pushable_route_refresh) as refreshed, \
                 mock.patch("api.core.persistence.record_order_matched_pending"):
             assigned = CoreDispatcher._process_pool_matching_area_cycle(
                 [vehicle],
@@ -622,7 +644,15 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         CoreDispatcher.configure_route_cost(19, PLANNED_ROUTE_INSERTION_PENALTY=25.0)
 
         with mock.patch.object(CoreDispatcher, "_evaluate_vehicle_current_route_cost", return_value=10.0), \
-                mock.patch.object(CoreDispatcher, "_try_insert_order", return_value=([{"type": "O", "order": new_order}], 40.0)):
+                mock.patch.object(
+                    CoreDispatcher,
+                    "_try_insert_order",
+                    return_value=(
+                        [{"type": "O", "order": new_order}],
+                        40.0,
+                        {"head_insertion_penalty": 25.0},
+                    ),
+                ):
             candidate = CoreDispatcher._best_vehicle_candidate_for_order(
                 new_order,
                 [vehicle],
@@ -633,6 +663,145 @@ class PoolTimeWindowMatchingTest(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["candidate_class"], "busy")
         self.assertEqual(candidate["cost"], 55.0)
+
+    def test_head_insertion_penalty_uses_negative_exponential_for_o_and_d_heads(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): 1000.0,
+            ("B", "C"): 1000.0,
+        })
+        old_order = _fake_order(city, "OLD", "B", "C", base_ts, 0, 3600)
+        new_order = _fake_order(city, "NEW", "A", "C", base_ts, 0, 3600)
+
+        for head_type in ("O", "D"):
+            with self.subTest(head_type=head_type):
+                head_step = {"type": head_type, "order": old_order}
+                before_route = [
+                    {"type": "O", "order": new_order},
+                    head_step,
+                    {"type": "D", "order": new_order},
+                ]
+                details = CoreDispatcher._head_insertion_penalty_details(
+                    before_route,
+                    CoreDispatcher._route_step_key(head_step),
+                    new_order,
+                    head_distance_m=1000.0,
+                    max_penalty=30.0,
+                    decay_distance_m=1000.0,
+                    original_head_step=head_step,
+                )
+
+                self.assertAlmostEqual(details["head_insertion_penalty"], 30.0 / math.e, places=6)
+                self.assertEqual(details["head_step_type"], head_type)
+                self.assertTrue(details["inserted_before_original_head"])
+
+                farther_details = CoreDispatcher._head_insertion_penalty_details(
+                    before_route,
+                    CoreDispatcher._route_step_key(head_step),
+                    new_order,
+                    head_distance_m=2000.0,
+                    max_penalty=30.0,
+                    decay_distance_m=1000.0,
+                    original_head_step=head_step,
+                )
+                self.assertLess(
+                    farther_details["head_insertion_penalty"],
+                    details["head_insertion_penalty"],
+                )
+
+                disabled_details = CoreDispatcher._head_insertion_penalty_details(
+                    before_route,
+                    CoreDispatcher._route_step_key(head_step),
+                    new_order,
+                    head_distance_m=1000.0,
+                    max_penalty=0.0,
+                    decay_distance_m=1000.0,
+                    original_head_step=head_step,
+                )
+                self.assertEqual(disabled_details["head_insertion_penalty"], 0.0)
+
+                after_details = CoreDispatcher._head_insertion_penalty_details(
+                    [head_step, {"type": "O", "order": new_order}, {"type": "D", "order": new_order}],
+                    CoreDispatcher._route_step_key(head_step),
+                    new_order,
+                    head_distance_m=1000.0,
+                    max_penalty=30.0,
+                    decay_distance_m=1000.0,
+                    original_head_step=head_step,
+                )
+                self.assertEqual(after_details["head_insertion_penalty"], 0.0)
+
+    def test_head_insertion_penalty_changes_selected_insertion_position(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): 1000.0,
+            ("A", "C"): 1000.0,
+            ("B", "C"): 1000.0,
+            ("C", "B"): 1000.0,
+        })
+        vehicle = _fake_vehicle("V1", "A", base_ts)
+        old_order = _fake_order(city, "OLD", "B", "C", base_ts, 0, 3600)
+        new_order = _fake_order(city, "NEW", "C", "B", base_ts, 0, 3600)
+        vehicle.planned_route = [
+            {"type": "O", "order": old_order},
+            {"type": "D", "order": old_order},
+        ]
+
+        def prefer_new_order_first(route, *args, **kwargs):
+            cost = 0.0 if route and route[0]["order"].request_id == "NEW" else 5.0
+            details = {
+                "metrics": {
+                    "pickup_times": {"OLD": base_ts + 60.0, "NEW": base_ts + 60.0},
+                    "arrival_times": {"OLD": base_ts + 120.0, "NEW": base_ts + 120.0},
+                }
+            }
+            if kwargs.get("return_details"):
+                return True, cost, details["metrics"]["arrival_times"], details
+            return True, cost, details["metrics"]["arrival_times"]
+
+        config = CoreDispatcher.route_cost_config_snapshot(19)
+        config.update({
+            "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+            "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000.0,
+        })
+        with mock.patch.object(CoreDispatcher, "evaluate_route", side_effect=prefer_new_order_first), \
+                mock.patch.object(CoreDispatcher, "route_head_protection_info", return_value={"locked": False}), \
+                mock.patch.object(CoreDispatcher, "_route_head_remaining_astar_distance", return_value=1000.0), \
+                mock.patch.object(CoreDispatcher, "_validate_existing_passenger_insertion", return_value=(True, {})):
+            route, base_cost, details = CoreDispatcher._try_insert_order(
+                vehicle,
+                new_order,
+                city,
+                return_details=True,
+                route_cost_config=config,
+            )
+
+        self.assertEqual(route[0]["order"].request_id, "OLD")
+        self.assertEqual(base_cost, 5.0)
+        self.assertEqual(details["head_insertion_penalty"], 0.0)
+        self.assertEqual(details["selection_cost"], 5.0)
+
+    def test_head_distance_uses_remaining_edge_and_astar_distance(self):
+        base_ts = 1_000_000.0
+        city = _TinyCity({
+            ("A", "B"): 400.0,
+            ("B", "C"): 800.0,
+            ("C", "D"): 100.0,
+        })
+        vehicle = _fake_vehicle("V1", "A", base_ts)
+        old_order = _fake_order(city, "OLD", "C", "D", base_ts, 0, 3600)
+        vehicle.planned_route = [{"type": "O", "order": old_order}]
+        vehicle.last_node = "A"
+        vehicle.next_node = "B"
+        vehicle.progress = 0.25
+
+        distance = CoreDispatcher._route_head_remaining_astar_distance(
+            vehicle,
+            city,
+            head_protection={"distance_m": 9999.0},
+        )
+
+        self.assertEqual(distance, 1100.0)
 
     def test_capacity_filter_allows_pickup_after_prior_dropoff(self):
         base_ts = 1_000_000.0

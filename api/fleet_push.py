@@ -112,6 +112,10 @@ def _order_snapshot(order):
         "driver_push_vehicle_id": getattr(order, "driver_push_vehicle_id", None),
         "driver_push_route_version": getattr(order, "driver_push_route_version", None),
         "driver_push_reason": getattr(order, "driver_push_reason", None),
+        "driver_push_state": getattr(order, "driver_push_state", None),
+        "driver_push_event_id": getattr(order, "driver_push_event_id", None),
+        "driver_push_revision": getattr(order, "driver_push_revision", None),
+        "driver_push_attempt": getattr(order, "driver_push_attempt", None),
     }
 
 
@@ -200,7 +204,11 @@ def build_payload(vehicle, event):
         "event_reason": clean_event.get("event_reason"),
         "vehicle_id": vehicle_id,
         "request_id": clean_event.get("request_id"),
+        "failed_request_id": clean_event.get("failed_request_id"),
         "route_version": clean_event.get("route_version"),
+        "push_event_id": clean_event.get("push_event_id"),
+        "push_revision": clean_event.get("push_revision"),
+        "push_attempt": clean_event.get("push_attempt"),
         "pushed_at": datetime.now().replace(microsecond=0).isoformat(sep=" "),
         "vehicle": vehicle_snapshot(vehicle),
     }
@@ -214,12 +222,27 @@ def build_payload(vehicle, event):
 
 
 def _post_payload(url, payload, timeout):
-    """Post one payload and log failures without raising."""
+    """Post one payload and return the real HTTP outcome to the caller."""
     response = None
     try:
         response = requests.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
-        return True
+        if not 200 <= int(response.status_code) < 300:
+            raise requests.HTTPError(
+                f"unexpected HTTP status {response.status_code}",
+                response=response,
+            )
+        response_body = None
+        try:
+            response_body = response.json()
+        except Exception:
+            response_body = (response.text or "")[:1000]
+        return {
+            "ok": True,
+            "status_code": response.status_code,
+            "response": response_body,
+            "error": None,
+        }
     except Exception as exc:
         response_text = None
         if response is not None:
@@ -236,16 +259,28 @@ def _post_payload(url, payload, timeout):
                 "request_id": (payload or {}).get("request_id") if isinstance(payload, dict) else None,
                 "event_reason": (payload or {}).get("event_reason") if isinstance(payload, dict) else None,
                 "route_version": (payload or {}).get("route_version") if isinstance(payload, dict) else None,
+                "push_event_id": (payload or {}).get("push_event_id") if isinstance(payload, dict) else None,
+                "push_revision": (payload or {}).get("push_revision") if isinstance(payload, dict) else None,
+                "push_attempt": (payload or {}).get("push_attempt") if isinstance(payload, dict) else None,
                 "status_code": getattr(response, "status_code", None),
                 "response_body": response_text,
             },
         )
         print(f"[FleetPush] vehicle navigation push failed: {exc}")
-        return False
+        return {
+            "ok": False,
+            "status_code": getattr(response, "status_code", None),
+            "response": response_text,
+            "error": str(exc),
+        }
 
 
-def submit_vehicle_navigation(vehicle, event, url_base=None, timeout=None):
-    """Submit one vehicle navigation snapshot asynchronously."""
+def submit_vehicle_navigation(vehicle, event, url_base=None, timeout=None, completion_callback=None):
+    """Submit one vehicle navigation snapshot asynchronously.
+
+    ``True`` only means that the task entered the executor.  The optional
+    callback receives the real HTTP outcome returned by ``_post_payload``.
+    """
     vehicle_id = _vehicle_identity(vehicle)
     target_url = _push_url_for_vehicle(vehicle_id, base_url=url_base)
     if vehicle is None or not target_url:
@@ -257,18 +292,48 @@ def submit_vehicle_navigation(vehicle, event, url_base=None, timeout=None):
                 "request_id": (event or {}).get("request_id") if isinstance(event, dict) else None,
                 "event_reason": (event or {}).get("event_reason") if isinstance(event, dict) else None,
                 "route_version": (event or {}).get("route_version") if isinstance(event, dict) else None,
+                "push_event_id": (event or {}).get("push_event_id") if isinstance(event, dict) else None,
+                "push_revision": (event or {}).get("push_revision") if isinstance(event, dict) else None,
                 "target_url": target_url,
             },
         )
         return False
     try:
         payload = build_payload(vehicle, event)
-        _executor_instance().submit(
+        future = _executor_instance().submit(
             _post_payload,
             target_url,
             payload,
             DEFAULT_FLEET_PUSH_TIMEOUT_SECONDS if timeout is None else float(timeout),
         )
+        if callable(completion_callback):
+            def notify_completion(done_future):
+                try:
+                    result = done_future.result()
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "status_code": None,
+                        "response": None,
+                        "error": str(exc),
+                    }
+                try:
+                    completion_callback(result)
+                except Exception as exc:
+                    log_exception(
+                        "api.fleet_push.completion_callback",
+                        exc,
+                        message="车辆导航 HTTP 完成回调执行失败",
+                        context={
+                            "vehicle_id": vehicle_id,
+                            "request_id": (event or {}).get("request_id") if isinstance(event, dict) else None,
+                            "event_reason": (event or {}).get("event_reason") if isinstance(event, dict) else None,
+                            "route_version": (event or {}).get("route_version") if isinstance(event, dict) else None,
+                            "push_event_id": (event or {}).get("push_event_id") if isinstance(event, dict) else None,
+                            "push_revision": (event or {}).get("push_revision") if isinstance(event, dict) else None,
+                        },
+                    )
+            future.add_done_callback(notify_completion)
     except Exception as exc:
         log_exception(
             "api.fleet_push.submit_task",
@@ -279,6 +344,8 @@ def submit_vehicle_navigation(vehicle, event, url_base=None, timeout=None):
                 "request_id": (event or {}).get("request_id") if isinstance(event, dict) else None,
                 "event_reason": (event or {}).get("event_reason") if isinstance(event, dict) else None,
                 "route_version": (event or {}).get("route_version") if isinstance(event, dict) else None,
+                "push_event_id": (event or {}).get("push_event_id") if isinstance(event, dict) else None,
+                "push_revision": (event or {}).get("push_revision") if isinstance(event, dict) else None,
                 "target_url": target_url,
             },
         )

@@ -927,6 +927,7 @@ class EtaBackgroundTest(unittest.TestCase):
         ]
         mark_vehicle_grasp_ready(self.vehicle, self.city)
         CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+        CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle)[str(order.request_id)]["state"] = "delivered"
 
         confirmed = []
         original_confirmed = persistence.record_order_driver_push_confirmed
@@ -962,6 +963,7 @@ class EtaBackgroundTest(unittest.TestCase):
         ]
         mark_vehicle_grasp_ready(self.vehicle, self.city)
         CoreDispatcher._set_driver_push_pending(order, self.vehicle, current_timestamp=1000.0)
+        CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle)[str(order.request_id)]["state"] = "delivered"
 
         original_confirmed = persistence.record_order_driver_push_confirmed
         original_runtime = persistence.record_vehicle_runtime
@@ -1096,7 +1098,7 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertIn(order_b.request_id, getattr(self.vehicle, "driver_push_pending_orders", {}))
         self.assertNotIn(order_a.request_id, getattr(self.vehicle, "driver_push_pending_orders", {}))
 
-    def test_driver_push_timeout_scan_is_disabled(self):
+    def test_driver_push_route_prepare_timeout_requeues_order(self):
         order = make_order(self.city)
         self.vehicle.planned_route = [
             {"type": "O", "order": order},
@@ -1122,10 +1124,10 @@ class EtaBackgroundTest(unittest.TestCase):
             persistence.record_vehicle_route = original_route
             persistence.record_vehicle_runtime = original_runtime
 
-        self.assertEqual(expired, [])
-        self.assertEqual(order.status, "matched")
-        self.assertNotIn(order, CoreDispatcher.order_pool)
-        self.assertEqual([step["order"].request_id for step in self.vehicle.planned_route], [order.request_id, order.request_id])
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(order.status, "pooled")
+        self.assertIn(order, CoreDispatcher.order_pool)
+        self.assertEqual(self.vehicle.planned_route, [])
 
     def test_prepare_and_apply_priority_amap_replan_writes_segments(self):
         order = make_order(self.city)
@@ -1462,7 +1464,12 @@ class EtaBackgroundTest(unittest.TestCase):
         result = CoreDispatcher._run_route_grasp_job(FakeRouteGraspService(), job)
         submitted = []
         original_submit = fleet_push.submit_vehicle_navigation
-        fleet_push.submit_vehicle_navigation = lambda vehicle, event: submitted.append((vehicle, event)) or True
+        def fake_submit(vehicle, event, completion_callback=None):
+            submitted.append((vehicle, event))
+            if completion_callback:
+                completion_callback({"ok": True, "status_code": 200, "response": {}, "error": None})
+            return True
+        fleet_push.submit_vehicle_navigation = fake_submit
         try:
             changed = CoreDispatcher._apply_route_grasp_result(job, result, state.fleet)
         finally:
@@ -1498,7 +1505,12 @@ class EtaBackgroundTest(unittest.TestCase):
 
         submitted = []
         original_submit = fleet_push.submit_vehicle_navigation
-        fleet_push.submit_vehicle_navigation = lambda vehicle, event: submitted.append((vehicle, event)) or True
+        def fake_submit(vehicle, event, completion_callback=None):
+            submitted.append((vehicle, event))
+            if completion_callback:
+                completion_callback({"ok": True, "status_code": 200, "response": {}, "error": None})
+            return True
+        fleet_push.submit_vehicle_navigation = fake_submit
         try:
             submitted_any = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
         finally:
@@ -1508,6 +1520,38 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual([event["request_id"] for _, event in submitted], [order_a.request_id, order_b.request_id])
         self.assertTrue(all(event.get("driver_push_confirmation_required") for _, event in submitted))
         self.assertEqual(getattr(self.vehicle, "fleet_push_pending_events", []), [])
+
+    def test_fleet_push_event_inherits_confirmation_when_pending_is_created_first(self):
+        order = make_order(self.city, request_id="pending-before-event")
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+
+        CoreDispatcher._set_driver_push_pending(
+            order,
+            self.vehicle,
+            event_reason="order_assigned",
+            city_map=self.city,
+        )
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle)[order.request_id]
+        self.vehicle.planned_route_grasp_route_version = pending["route_version"]
+        self.vehicle.planned_route_grasp_status = "pending"
+
+        event = CoreDispatcher._mark_fleet_push_pending(
+            self.vehicle,
+            {
+                "event_reason": "order_assigned",
+                "request_id": order.request_id,
+            },
+        )
+
+        self.assertIsNotNone(event)
+        self.assertTrue(event["driver_push_confirmation_required"])
+        self.assertEqual(event["confirmation_request_id"], order.request_id)
+        self.assertEqual(event["driver_push_route_version"], event["route_version"])
+        self.assertEqual(event["push_event_id"], pending["push_event_id"])
+        self.assertEqual(event["push_revision"], pending["push_revision"])
+        payload = fleet_push.build_payload(self.vehicle, event)
+        self.assertTrue(payload["driver_push_confirmation_required"])
+        self.assertEqual(payload["confirmation_request_id"], order.request_id)
 
     def test_fleet_push_waits_when_route_grasp_fails(self):
         order = make_order(self.city)
@@ -1603,6 +1647,8 @@ class EtaBackgroundTest(unittest.TestCase):
 
         with patch.object(CoreDispatcher, "refresh_vehicle_route_metadata", return_value=None), \
                 patch("api.core.persistence.record_order_matched_pending"), \
+                patch("api.core.persistence.record_order_requeued_after_push_failure"), \
+                patch("api.core.persistence.record_vehicle_runtime"), \
                 patch("api.core.log_error") as mocked_log:
             result = CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                 order,
@@ -1612,10 +1658,11 @@ class EtaBackgroundTest(unittest.TestCase):
             )
 
         self.assertIsNone(result)
-        self.assertEqual(order.status, "matched")
+        self.assertEqual(order.status, "pooled")
+        self.assertIn(order, CoreDispatcher.order_pool)
         sources = [call.args[0] for call in mocked_log.call_args_list]
         self.assertIn("api.core.order_assignment_route_refresh_failed", sources)
-        self.assertIn("api.core.matched_order_push_event_missing", sources)
+        self.assertNotIn("api.core.matched_order_push_event_missing", sources)
 
     def test_route_ready_without_push_event_logs_diagnostic(self):
         order = make_order(self.city, request_id="ready-without-event")
@@ -1634,7 +1681,7 @@ class EtaBackgroundTest(unittest.TestCase):
             context=ANY,
         )
 
-    def test_fleet_push_event_version_mismatch_is_logged_before_event_is_cleared(self):
+    def test_fleet_push_event_version_mismatch_migrates_to_latest_route(self):
         self.vehicle.planned_route_grasp_route_version = "route-current"
         self.vehicle.planned_route_grasp_status = "ready"
         self.vehicle.fleet_push_pending_events = [{
@@ -1643,15 +1690,14 @@ class EtaBackgroundTest(unittest.TestCase):
             "route_version": "route-old",
         }]
 
-        with patch("api.core.log_error") as mocked_log:
+        with patch("api.core.fleet_push.submit_vehicle_navigation", return_value=True):
             submitted = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
 
-        self.assertFalse(submitted)
-        self.assertEqual(self.vehicle.fleet_push_pending_events, [])
-        self.assertIn(
-            "api.core.fleet_push_event_version_mismatch",
-            [call.args[0] for call in mocked_log.call_args_list],
-        )
+        self.assertTrue(submitted)
+        self.assertEqual(len(self.vehicle.fleet_push_pending_events), 1)
+        self.assertEqual(self.vehicle.fleet_push_pending_events[0]["route_version"], "route-current")
+        self.assertEqual(self.vehicle.fleet_push_pending_events[0]["push_revision"], 2)
+        self.assertEqual(self.vehicle.fleet_push_pending_events[0]["push_state"], "sending")
 
     def test_fleet_push_submit_rejection_is_logged_and_event_is_retained(self):
         self.vehicle.planned_route_grasp_route_version = "route-current"
@@ -1673,6 +1719,170 @@ class EtaBackgroundTest(unittest.TestCase):
             "api.core.fleet_push_submit_rejected",
             [call.args[0] for call in mocked_log.call_args_list],
         )
+
+    def test_order_http_failure_requeues_and_keeps_correction_event(self):
+        order = make_order(self.city, request_id="http-failed-order")
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._mark_fleet_push_pending(self.vehicle, {
+            "event_reason": "order_assigned",
+            "request_id": order.request_id,
+        })
+        CoreDispatcher._set_driver_push_pending(
+            order,
+            self.vehicle,
+            event_reason="order_assigned",
+            city_map=self.city,
+        )
+
+        def fail_submit(vehicle, event, completion_callback=None):
+            if completion_callback:
+                completion_callback({
+                    "ok": False,
+                    "status_code": 503,
+                    "response": "unavailable",
+                    "error": "http_503",
+                })
+            return True
+
+        with patch("api.core.fleet_push.submit_vehicle_navigation", side_effect=fail_submit), \
+                patch("api.core.persistence.record_order_requeued_after_push_failure"), \
+                patch("api.core.persistence.record_vehicle_runtime"):
+            submitted = CoreDispatcher._submit_pending_fleet_push_if_ready(self.vehicle)
+
+        self.assertTrue(submitted)
+        self.assertEqual(order.status, "pooled")
+        self.assertIn(order, CoreDispatcher.order_pool)
+        self.assertEqual(self.vehicle.planned_route, [])
+        self.assertNotIn(order.request_id, CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle))
+        correction_events = [
+            event for event in CoreDispatcher._vehicle_fleet_push_pending_events(self.vehicle)
+            if CoreDispatcher._is_navigation_correction_event(event)
+        ]
+        self.assertEqual(len(correction_events), 1)
+        self.assertEqual(correction_events[0]["push_state"], "retrying")
+
+    def test_navigation_correction_retries_and_clears_after_success(self):
+        self.vehicle.planned_route = []
+        self.vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(self.vehicle)
+        self.vehicle.planned_route_grasp_status = "ready"
+        CoreDispatcher._mark_fleet_push_pending(self.vehicle, {
+            "event_type": "fleet_route_corrected",
+            "correction": True,
+            "event_reason": "order_requeued_after_push_failure",
+            "failed_request_id": "old-order",
+        })
+        event = CoreDispatcher._vehicle_fleet_push_pending_events(self.vehicle)[0]
+        event["push_state"] = "retrying"
+        event["push_next_retry_at"] = 0.0
+
+        def succeed_submit(vehicle, payload, completion_callback=None):
+            if completion_callback:
+                completion_callback({"ok": True, "status_code": 200, "response": {}, "error": None})
+            return True
+
+        with patch("api.core.fleet_push.submit_vehicle_navigation", side_effect=succeed_submit):
+            result = CoreDispatcher.reconcile_driver_push_deliveries(
+                [self.vehicle],
+                self.city,
+                current_timestamp=2000.0,
+            )
+
+        self.assertEqual(result["requeued"], [])
+        self.assertEqual(CoreDispatcher._vehicle_fleet_push_pending_events(self.vehicle), [])
+
+    def test_requeue_refresh_exception_keeps_correction_intent_without_stale_route(self):
+        order = make_order(self.city, request_id="correction-refresh-failed")
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, city_map=self.city)
+
+        with patch.object(
+            CoreDispatcher,
+            "refresh_vehicle_route_metadata",
+            side_effect=RuntimeError("temporary route rebuild failure"),
+        ), patch("api.core.persistence.record_order_requeued_after_push_failure"), \
+                patch("api.core.persistence.record_vehicle_runtime"), \
+                patch("api.core.log_exception"), \
+                patch("api.core.log_error"):
+            result = CoreDispatcher._requeue_driver_push_order(
+                order,
+                self.vehicle,
+                self.city,
+                reason="navigation_push_failed",
+                schedule_correction=True,
+            )
+
+        self.assertFalse(result["route_refresh_ok"])
+        self.assertEqual(order.status, "pooled")
+        self.assertEqual(self.vehicle.planned_route, [])
+        self.assertEqual(self.vehicle.planned_route_segment_raw_point, [])
+        correction_events = [
+            event for event in CoreDispatcher._vehicle_fleet_push_pending_events(self.vehicle)
+            if CoreDispatcher._is_navigation_correction_event(event)
+        ]
+        self.assertEqual(len(correction_events), 1)
+        self.assertEqual(correction_events[0]["push_state"], "waiting_route")
+
+    def test_sending_without_callback_requeues_after_ten_seconds(self):
+        order = make_order(self.city, request_id="sending-stuck")
+        self.vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        mark_vehicle_grasp_ready(self.vehicle, self.city)
+        CoreDispatcher._mark_fleet_push_pending(self.vehicle, {
+            "event_reason": "order_assigned",
+            "request_id": order.request_id,
+        })
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, city_map=self.city)
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle)[str(order.request_id)]
+        pending["state"] = "sending"
+        pending["push_last_at"] = 1000.0
+
+        with patch("api.core.fleet_push.submit_vehicle_navigation", return_value=True), \
+                patch("api.core.persistence.record_order_requeued_after_push_failure"), \
+                patch("api.core.persistence.record_vehicle_runtime"):
+            result = CoreDispatcher.reconcile_driver_push_deliveries(
+                [self.vehicle],
+                self.city,
+                current_timestamp=1010.1,
+            )
+
+        self.assertEqual(len(result["requeued"]), 1)
+        self.assertEqual(order.status, "pooled")
+        self.assertIn(order, CoreDispatcher.order_pool)
+
+    def test_stale_http_callback_cannot_requeue_new_revision(self):
+        order = make_order(self.city, request_id="stale-callback")
+        self.vehicle.planned_route = [{"type": "O", "order": order}]
+        self.vehicle.planned_route_grasp_route_version = "route-v2"
+        self.vehicle.planned_route_grasp_status = "ready"
+        event = CoreDispatcher._mark_fleet_push_pending(self.vehicle, {
+            "event_reason": "order_assigned",
+            "request_id": order.request_id,
+            "push_event_id": "stable-event",
+            "push_revision": 2,
+        })
+        CoreDispatcher._set_driver_push_pending(order, self.vehicle, city_map=self.city)
+
+        handled = CoreDispatcher._handle_fleet_push_completion(
+            self.vehicle,
+            "stable-event",
+            1,
+            {"ok": False, "status_code": 500, "error": "old_failure"},
+        )
+
+        self.assertFalse(handled)
+        self.assertEqual(order.status, "matched")
+        self.assertIn(order.request_id, CoreDispatcher._vehicle_driver_push_pending_map(self.vehicle))
+        self.assertEqual(event["push_revision"], 2)
 
     def test_fleet_push_executor_submit_failure_is_logged(self):
         self.vehicle.vehicle_id = "vehicle-submit-failed"
@@ -1711,6 +1921,9 @@ class EtaBackgroundTest(unittest.TestCase):
                 "event_reason": "order_assigned",
                 "request_id": "order-001",
                 "route_version": "route-v1",
+                "push_event_id": "push-001",
+                "push_revision": 2,
+                "push_attempt": 3,
             },
         )
 
@@ -1719,6 +1932,9 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(payload["vehicle_id"], "vehicle-001")
         self.assertEqual(payload["request_id"], "order-001")
         self.assertEqual(payload["route_version"], "route-v1")
+        self.assertEqual(payload["push_event_id"], "push-001")
+        self.assertEqual(payload["push_revision"], 2)
+        self.assertEqual(payload["push_attempt"], 3)
         self.assertIn("vehicle", payload)
         self.assertNotIn("fleet", payload)
         self.assertNotIn("driver_push_deadline", payload)

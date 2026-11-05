@@ -54,6 +54,7 @@ class RouteCostConfigApiTest(unittest.TestCase):
                 "operation_area_id": 19,
                 "WAIT_COST_PER_MIN": 12,
                 "PLANNED_ROUTE_INSERTION_PENALTY": 35,
+                "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 800,
                 "PICKUP_ETA_TOLERANCE_SECONDS": 90,
             },
         )
@@ -67,6 +68,7 @@ class RouteCostConfigApiTest(unittest.TestCase):
         self.assertEqual(area_19["operation_area_id"], 19)
         self.assertEqual(area_19["config"]["WAIT_COST_PER_MIN"], 12.0)
         self.assertEqual(area_19["config"]["PLANNED_ROUTE_INSERTION_PENALTY"], 35.0)
+        self.assertEqual(area_19["config"]["HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M"], 800.0)
         self.assertEqual(area_19["config"]["PICKUP_ETA_TOLERANCE_SECONDS"], 90.0)
         self.assertEqual(area_25["operation_area_id"], 25)
         self.assertEqual(
@@ -88,6 +90,18 @@ class RouteCostConfigApiTest(unittest.TestCase):
         config = response.get_json()["config"]
         self.assertEqual(config["MAX_PASSENGER_INSERTION_DELAY_SECONDS"], 600.0)
         self.assertEqual(config["ORDER_POOL_PRIORITY_PROMOTION_SECONDS"], 90.0)
+
+    def test_head_insertion_decay_distance_must_be_positive(self):
+        for value in (0, -1, "NaN", "Infinity"):
+            with self.subTest(value=value):
+                response = self.client.put(
+                    "/admin/dispatch/route-cost-config",
+                    json={
+                        "operation_area_id": 19,
+                        "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": value,
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
 
     def test_code_defaults_are_merged_per_operation_area(self):
         with mock.patch.object(

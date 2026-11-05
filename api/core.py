@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from datetime import datetime, timedelta
@@ -52,7 +53,8 @@ class CoreDispatcher:
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
-        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
+        "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+        "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
         "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 15 * 60.0,
@@ -72,7 +74,8 @@ class CoreDispatcher:
         "LOAD_RATE_PENALTY_BASE": "满载率惩罚基数，调大后更偏向提高座位利用率。",
         "SOCIAL_DISTANCE_COST_PER_KM": "每公里道路资源/碳排放代理成本。",
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": "非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受此阈值限制。",
-        "PLANNED_ROUTE_INSERTION_PENALTY": "已有任务车辆插单惩罚；调大后更优先使用空车，调小后更允许顺路插单。",
+        "PLANNED_ROUTE_INSERTION_PENALTY": "队首前插单最大惩罚；车辆越接近原队首 O/D 站点，实际惩罚越接近该值。",
+        "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": "队首前插单惩罚的负指数衰减距离（米）；距离达到该值时惩罚约为最大值的 36.8%。",
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": "空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择。",
         "PICKUP_ETA_TOLERANCE_SECONDS": "预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆。",
         "MAX_PASSENGER_INSERTION_DELAY_SECONDS": "已有乘客相对首次承诺 ETA 可接受的最大累计插单延误秒数。",
@@ -96,7 +99,6 @@ class CoreDispatcher:
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 150.0,
-        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 600.0,
         "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 15 * 60.0,
@@ -116,7 +118,6 @@ class CoreDispatcher:
         "LOAD_RATE_PENALTY_BASE": 1.0,
         "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
         "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 500.0,
-        "PLANNED_ROUTE_INSERTION_PENALTY": 0.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
         "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 8 * 60.0,
@@ -149,6 +150,16 @@ class CoreDispatcher:
 
     #司机端因为网络信号原因未及时接到订单的对该订单匹配的冷却时间(即该订单冷却时间内无法再匹配该车辆)
     DRIVER_PUSH_UNREACHABLE_COOLDOWN_SECONDS = 3 * 60
+
+    # 订单导航推送保障参数。HTTP 订单推送失败立即退池；只有路线准备和
+    # 退池后的车辆导航修正允许重试。
+    DRIVER_PUSH_ROUTE_PREPARE_TIMEOUT_SECONDS = 60.0
+    DRIVER_PUSH_CONFIRM_TIMEOUT_SECONDS = 120.0
+    DRIVER_PUSH_SENDING_STUCK_SECONDS = 10.0
+    DRIVER_PUSH_ROUTE_RETRY_DELAYS_SECONDS = (5.0, 15.0, 30.0)
+    NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0, 20.0)
+    navigation_push_immediate_requeue_count = 0
+    navigation_push_confirmation_timeout_count = 0
 
     # 车辆接近当前队首上下客点时锁定队首，避免插单/取消重排打断司机端正在执行的动作。
     ROUTE_HEAD_LOCK_DISTANCE_M = 500.0
@@ -242,8 +253,13 @@ class CoreDispatcher:
                 continue
             pending_events.append({
                 "request_id": event.get("request_id"),
+                "failed_request_id": event.get("failed_request_id"),
                 "event_reason": event.get("event_reason"),
                 "route_version": event.get("route_version"),
+                "push_event_id": event.get("push_event_id"),
+                "push_revision": event.get("push_revision"),
+                "push_attempt": event.get("push_attempt"),
+                "push_state": event.get("push_state"),
                 "confirmation_required": bool(event.get("driver_push_confirmation_required")),
             })
 
@@ -255,6 +271,13 @@ class CoreDispatcher:
                 "request_id": str(request_id),
                 "route_version": pending.get("route_version"),
                 "event_reason": pending.get("event_reason"),
+                "state": pending.get("state"),
+                "push_event_id": pending.get("push_event_id"),
+                "push_revision": pending.get("push_revision"),
+                "push_attempt": pending.get("push_attempt"),
+                "push_last_error": pending.get("push_last_error"),
+                "route_prepare_deadline": pending.get("route_prepare_deadline"),
+                "confirmation_deadline": pending.get("confirmation_deadline"),
             })
 
         last_node = getattr(vehicle, "last_node", None)
@@ -515,6 +538,8 @@ class CoreDispatcher:
                 raise ValueError(f"运营区 {area_id} 的 {key} 必须是数字") from exc
             if not math.isfinite(parsed) or parsed < 0:
                 raise ValueError(f"运营区 {area_id} 的 {key} 必须是大于或等于 0 的有限数字")
+            if key == "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M" and parsed <= 0:
+                raise ValueError(f"运营区 {area_id} 的 {key} 必须是大于 0 的有限数字")
             defaults[key] = parsed
         return defaults
 
@@ -570,6 +595,8 @@ class CoreDispatcher:
                 raise ValueError(f"{key} 必须是有限数字")
             if parsed < 0:
                 raise ValueError(f"{key} 必须大于或等于 0")
+            if key == "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M" and parsed <= 0:
+                raise ValueError(f"{key} 必须大于 0")
             normalized[key] = parsed
 
         with cls.route_cost_config_lock:
@@ -598,8 +625,15 @@ class CoreDispatcher:
         """记录车辆路线变更后的待推送事件，等待高德规划成功后发送。"""
         if vehicle is None or not event:
             return None
-        route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
-        if not route_version:
+        is_correction = bool(
+            event.get("correction")
+            or event.get("event_type") == "fleet_route_corrected"
+        )
+        route_version = (
+            getattr(vehicle, "planned_route_grasp_route_version", None)
+            or CoreDispatcher._vehicle_grasp_route_version(vehicle)
+        )
+        if not route_version and not is_correction:
             log_error(
                 "api.core.fleet_push_event_route_version_missing",
                 message="创建导航待推送事件失败：车辆缺少高德路线版本",
@@ -610,15 +644,80 @@ class CoreDispatcher:
                 ),
             )
             return None
+        if not route_version:
+            # 修正导航即使暂时无法建立路线版本，也必须先保留修正意图；
+            # 看门狗会持续重建剩余路线，成功后再把事件迁移到新版本。
+            log_error(
+                "api.core.navigation_correction_route_version_pending",
+                message="修正导航暂时缺少路线版本，事件已保留等待看门狗重建",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    request_ids=[event.get("failed_request_id")],
+                    extra={"event_reason": event.get("event_reason")},
+                ),
+            )
+        request_id = str(event.get("request_id") or "")
+        driver_pending = None
+        if not is_correction and request_id:
+            candidate = CoreDispatcher._vehicle_driver_push_pending_map(vehicle).get(request_id)
+            if isinstance(candidate, dict) and candidate.get("state") not in {
+                "confirmed",
+                "requeued",
+            }:
+                driver_pending = candidate
+
+        # 订单级 pending 可能先于路线事件建立。创建事件时必须从该事实来源
+        # 继承稳定事件 ID 和司机确认字段，不能依赖后续再遍历事件补写。
+        push_event_id = (
+            (driver_pending or {}).get("push_event_id")
+            or event.get("push_event_id")
+            or uuid.uuid4().hex
+        )
+        push_revision = int(
+            (driver_pending or {}).get("push_revision")
+            or event.get("push_revision", 1)
+            or 1
+        )
         pending_event = {
-            "event_type": "fleet_route_changed",
+            "event_type": event.get("event_type") or "fleet_route_changed",
+            "event_kind": "correction" if is_correction else "order",
             "event_reason": event.get("event_reason"),
             "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
-            "request_id": event.get("request_id"),
+            "request_id": request_id or None,
+            "failed_request_id": event.get("failed_request_id"),
             "route_version": route_version,
+            "push_event_id": push_event_id,
+            "push_revision": push_revision,
+            "push_attempt": int(event.get("push_attempt", 0) or 0),
+            "push_state": "queued" if getattr(vehicle, "planned_route_grasp_status", None) == "ready" else "waiting_route",
             "created_at": datetime.now().replace(microsecond=0),
+            "push_next_retry_at": event.get("push_next_retry_at"),
+            "_city_map_ref": event.get("_city_map_ref") or (driver_pending or {}).get("_city_map_ref"),
         }
+        if driver_pending is not None:
+            pending_event.update({
+                "driver_push_confirmation_required": True,
+                "confirmation_request_id": request_id,
+                "driver_push_route_version": route_version,
+            })
+            driver_pending.update({
+                "push_event_id": push_event_id,
+                "push_revision": push_revision,
+                "route_version": route_version,
+            })
         events = CoreDispatcher._vehicle_fleet_push_pending_events(vehicle, create=True)
+        if is_correction:
+            # 同一辆车只保留最新修正事件，后续路线版本会覆盖旧版本。
+            events[:] = [item for item in events if not CoreDispatcher._is_navigation_correction_event(item)]
+        elif pending_event.get("request_id"):
+            events[:] = [
+                item for item in events
+                if not (
+                    isinstance(item, dict)
+                    and not CoreDispatcher._is_navigation_correction_event(item)
+                    and str(item.get("request_id") or "") == str(pending_event["request_id"])
+                )
+            ]
         events.append(pending_event)
         vehicle.fleet_push_pending_event = pending_event
         CoreDispatcher._refresh_pending_driver_push_route_versions(vehicle, route_version)
@@ -626,10 +725,14 @@ class CoreDispatcher:
 
     @staticmethod
     def _submit_pending_fleet_push_if_ready(vehicle):
-        """高德路线 ready 后提交当前版本的待推送单车导航快照。"""
+        """高德路线 ready 后提交事件；事件仅在真实 HTTP 成功后清除。"""
         events = CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
         if not events:
-            pending_request_ids = list(CoreDispatcher._vehicle_driver_push_pending_map(vehicle))
+            pending_map = CoreDispatcher._vehicle_driver_push_pending_map(vehicle)
+            pending_request_ids = [
+                request_id for request_id, pending in pending_map.items()
+                if (pending or {}).get("state") not in {"delivered", "confirmed", "requeued"}
+            ]
             if (
                 getattr(vehicle, "planned_route_grasp_status", None) == "ready"
                 and pending_request_ids
@@ -647,26 +750,78 @@ class CoreDispatcher:
         if getattr(vehicle, "planned_route_grasp_status", None) != "ready":
             return False
         submitted_any = False
-        remaining = []
-        for event in events:
+        now_ts = time.time()
+        pending_map = CoreDispatcher._vehicle_driver_push_pending_map(vehicle)
+        for event in list(events):
             if not isinstance(event, dict):
                 continue
             if event.get("route_version") != route_version:
-                log_error(
-                    "api.core.fleet_push_event_version_mismatch",
-                    message="导航待推送事件版本与车辆当前路线版本不一致，事件将按现有逻辑清除",
+                # 路线变化时迁移事件，而不是静默丢弃。
+                event["route_version"] = route_version
+                event["push_revision"] = int(event.get("push_revision", 1) or 1) + 1
+                event["push_state"] = "queued"
+                event.pop("sending_started_at", None)
+                request_id = str(event.get("request_id") or "")
+                pending = pending_map.get(request_id)
+                if pending and pending.get("state") not in {"delivered", "confirmed", "requeued"}:
+                    pending["route_version"] = route_version
+                    pending["push_revision"] = event["push_revision"]
+                    pending["state"] = "queued"
+
+            is_correction = CoreDispatcher._is_navigation_correction_event(event)
+            request_id = str(event.get("request_id") or "")
+            pending = pending_map.get(request_id) if request_id else None
+            if not is_correction and pending is not None:
+                if pending.get("state") in {"sending", "delivered", "confirmed", "requeued"}:
+                    continue
+            elif event.get("push_state") == "sending":
+                continue
+            if event.get("push_state") == "retrying" and float(event.get("push_next_retry_at") or 0.0) > now_ts:
+                continue
+
+            event["push_attempt"] = int(event.get("push_attempt", 0) or 0) + 1
+            event["push_state"] = "sending"
+            event["sending_started_at"] = now_ts
+            event_id = event.get("push_event_id")
+            revision = int(event.get("push_revision", 1) or 1)
+            if pending is not None:
+                pending.update({
+                    "state": "sending",
+                    "push_attempt": event["push_attempt"],
+                    "push_last_at": now_ts,
+                    "push_last_error": None,
+                    "push_event_id": event_id,
+                    "push_revision": revision,
+                    "route_version": route_version,
+                })
+                CoreDispatcher._sync_order_driver_push_state(
+                    CoreDispatcher._find_vehicle_pending_order(vehicle, request_id),
+                    pending,
+                )
+
+            completion_callback = CoreDispatcher._fleet_push_completion_callback(
+                vehicle,
+                event_id,
+                revision,
+            )
+            try:
+                submitted = fleet_push.submit_vehicle_navigation(
+                    vehicle,
+                    copy.deepcopy(event),
+                    completion_callback=completion_callback,
+                )
+            except Exception as exc:
+                submitted = False
+                log_exception(
+                    "api.core.fleet_push_submit_exception",
+                    exc,
+                    message="调用 fleet_push 提交车辆导航任务时发生异常",
                     context=CoreDispatcher._route_push_diagnostic_context(
                         vehicle,
                         request_ids=[event.get("request_id")],
-                        extra={
-                            "event_reason": event.get("event_reason"),
-                            "event_route_version": event.get("route_version"),
-                            "current_route_version": route_version,
-                        },
+                        extra={"event_reason": event.get("event_reason")},
                     ),
                 )
-                continue
-            submitted = fleet_push.submit_vehicle_navigation(vehicle, event)
             submitted_any = submitted_any or submitted
             if not submitted:
                 log_error(
@@ -678,9 +833,164 @@ class CoreDispatcher:
                         extra={"event_reason": event.get("event_reason")},
                     ),
                 )
-                remaining.append(event)
-        CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, remaining)
+                CoreDispatcher._handle_fleet_push_submit_failure(
+                    vehicle,
+                    event,
+                    error="executor_submit_failed",
+                )
         return submitted_any
+
+    @staticmethod
+    def _is_navigation_correction_event(event):
+        return bool(
+            isinstance(event, dict)
+            and (
+                event.get("event_kind") == "correction"
+                or event.get("correction")
+                or event.get("event_type") == "fleet_route_corrected"
+            )
+        )
+
+    @staticmethod
+    def _sync_order_driver_push_state(order, pending):
+        """把订单级推送状态镜像到 Order，供接口和日志读取。"""
+        if order is None or not isinstance(pending, dict):
+            return
+        order.driver_push_state = pending.get("state")
+        order.driver_push_event_id = pending.get("push_event_id")
+        order.driver_push_revision = pending.get("push_revision")
+        order.driver_push_attempt = pending.get("push_attempt")
+        order.driver_push_last_error = pending.get("push_last_error")
+        order.driver_push_delivered_at = pending.get("push_delivered_at")
+        order.driver_push_confirmation_deadline = pending.get("confirmation_deadline")
+
+    @classmethod
+    def _fleet_push_completion_callback(cls, vehicle, event_id, revision):
+        """生成只绑定本次事件版本的 HTTP 完成回调。"""
+        def callback(result):
+            lock_context = cls.route_grasp_apply_lock if cls.route_grasp_apply_lock is not None else nullcontext()
+            with lock_context:
+                cls._handle_fleet_push_completion(vehicle, event_id, revision, result or {})
+        return callback
+
+    @classmethod
+    def _handle_fleet_push_completion(cls, vehicle, event_id, revision, result):
+        events = cls._vehicle_fleet_push_pending_events(vehicle)
+        event = next((
+            item for item in events
+            if isinstance(item, dict)
+            and item.get("push_event_id") == event_id
+            and int(item.get("push_revision", 1) or 1) == int(revision)
+        ), None)
+        if event is None:
+            return False
+
+        if result.get("ok"):
+            route_version = event.get("route_version")
+            request_id = str(event.get("request_id") or "")
+            pending = cls._vehicle_driver_push_pending_map(vehicle).get(request_id) if request_id else None
+            if pending is not None and pending.get("push_event_id") == event_id and int(pending.get("push_revision", 1) or 1) == int(revision):
+                delivered_at = time.time()
+                pending.update({
+                    "state": "delivered",
+                    "push_delivered_at": delivered_at,
+                    "confirmation_deadline": delivered_at + cls.DRIVER_PUSH_CONFIRM_TIMEOUT_SECONDS,
+                    "push_last_error": None,
+                    "requeue_required": False,
+                })
+                cls._sync_order_driver_push_state(
+                    cls._find_vehicle_pending_order(vehicle, request_id),
+                    pending,
+                )
+            cls._remove_fleet_push_event_by_id(vehicle, event_id, revision)
+            # 任意最新路线成功送达都可以满足同版本的车辆修正事件。
+            cls._remove_navigation_correction_events(vehicle, route_version=route_version)
+            return True
+
+        cls._handle_fleet_push_submit_failure(
+            vehicle,
+            event,
+            error=result.get("error") or f"http_{result.get('status_code')}",
+            status_code=result.get("status_code"),
+        )
+        return False
+
+    @classmethod
+    def _handle_fleet_push_submit_failure(cls, vehicle, event, error, status_code=None):
+        """订单推送失败立即标记退池；修正事件则进入独立重试。"""
+        if cls._is_navigation_correction_event(event):
+            attempt = int(event.get("push_attempt", 1) or 1)
+            delay_index = min(attempt - 1, len(cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS) - 1)
+            event.update({
+                "push_state": "retrying",
+                "push_last_error": error,
+                "push_next_retry_at": time.time() + cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS[delay_index],
+                "status_code": status_code,
+            })
+            return
+
+        request_id = str(event.get("request_id") or "")
+        pending = cls._vehicle_driver_push_pending_map(vehicle).get(request_id)
+        if pending is None:
+            # 热点、取消等车辆级事件没有可退池订单；保留事件并重试，避免
+            # HTTP 失败后永久停留在 sending。若这是异常缺失 pending 的订单
+            # 事件，看门狗会先从 matched planned_route 恢复订单级状态。
+            attempt = int(event.get("push_attempt", 1) or 1)
+            delay_index = min(attempt - 1, len(cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS) - 1)
+            event.update({
+                "push_state": "retrying",
+                "push_last_error": error,
+                "push_next_retry_at": time.time() + cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS[delay_index],
+                "status_code": status_code,
+            })
+            return
+        if (
+            pending.get("push_event_id") != event.get("push_event_id")
+            or int(pending.get("push_revision", 1) or 1) != int(event.get("push_revision", 1) or 1)
+            or pending.get("state") in {"confirmed", "requeued"}
+        ):
+            return
+        pending.update({
+            "push_last_error": error,
+            "push_last_status_code": status_code,
+            "requeue_required": True,
+        })
+        order = cls._find_vehicle_pending_order(vehicle, request_id)
+        cls._sync_order_driver_push_state(order, pending)
+        city_map = pending.get("_city_map_ref")
+        if order is not None and city_map is not None:
+            cls.navigation_push_immediate_requeue_count += 1
+            cls._requeue_driver_push_order(
+                order,
+                vehicle,
+                city_map,
+                reason="navigation_push_failed",
+                schedule_correction=True,
+            )
+
+    @staticmethod
+    def _remove_fleet_push_event_by_id(vehicle, event_id, revision=None):
+        events = []
+        for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle):
+            if not isinstance(event, dict):
+                continue
+            matches = event.get("push_event_id") == event_id
+            if revision is not None:
+                matches = matches and int(event.get("push_revision", 1) or 1) == int(revision)
+            if not matches:
+                events.append(event)
+        CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, events)
+
+    @staticmethod
+    def _remove_navigation_correction_events(vehicle, route_version=None):
+        events = [
+            event for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+            if not (
+                CoreDispatcher._is_navigation_correction_event(event)
+                and (route_version is None or event.get("route_version") == route_version)
+            )
+        ]
+        CoreDispatcher._set_vehicle_fleet_push_pending_events(vehicle, events)
 
     @staticmethod
     def _vehicle_fleet_push_pending_events(vehicle, create=False):
@@ -769,12 +1079,33 @@ class CoreDispatcher:
             if not request_id:
                 continue
             order.driver_push_route_version = route_version
-            pending.setdefault(request_id, {"request_id": request_id})["route_version"] = route_version
+            entry = pending.setdefault(request_id, {"request_id": request_id})
+            if entry.get("route_version") not in (None, route_version) and entry.get("state") not in {
+                "delivered",
+                "confirmed",
+                "requeued",
+            }:
+                entry["push_revision"] = int(entry.get("push_revision", 1) or 1) + 1
+                entry["state"] = "waiting_route"
+            entry["route_version"] = route_version
+            CoreDispatcher._sync_order_driver_push_state(order, entry)
         for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle):
             request_id = str(event.get("request_id") or "")
-            if request_id in pending:
+            is_correction = CoreDispatcher._is_navigation_correction_event(event)
+            entry = pending.get(request_id) if request_id else None
+            if is_correction or (
+                entry is not None
+                and entry.get("state") not in {"delivered", "confirmed", "requeued"}
+            ):
+                if event.get("route_version") not in (None, route_version):
+                    event["push_revision"] = int(event.get("push_revision", 1) or 1) + 1
+                    event["push_state"] = "waiting_route"
+                    event.pop("sending_started_at", None)
                 event["route_version"] = route_version
                 event["driver_push_route_version"] = route_version
+                if entry is not None:
+                    entry["push_revision"] = int(event.get("push_revision", 1) or 1)
+                    entry["route_version"] = route_version
         CoreDispatcher._sync_vehicle_driver_push_pending_flag(vehicle)
 
     # ============================================================
@@ -1132,6 +1463,102 @@ class CoreDispatcher:
             "eta_seconds": eta_seconds,
             "distance_threshold_m": CoreDispatcher.ROUTE_HEAD_LOCK_DISTANCE_M,
             "eta_threshold_seconds": CoreDispatcher.ROUTE_HEAD_LOCK_ETA_SECONDS,
+        }
+
+    @staticmethod
+    def _route_head_remaining_astar_distance(vehicle, city_map, head_protection=None):
+        """计算车辆沿当前路网状态到原队首 O/D 节点的剩余 A* 距离。"""
+        route = getattr(vehicle, "planned_route", None) or []
+        nodes_map = getattr(city_map, "nodes_map", {}) if city_map is not None else {}
+        if not route or not nodes_map:
+            return None
+
+        target_node = CoreDispatcher._route_step_target_node(route[0])
+        last_node_id = getattr(vehicle, "last_node", None)
+        next_node_id = getattr(vehicle, "next_node", None) or last_node_id
+        start_node = nodes_map.get(next_node_id)
+        if target_node is None or start_node is None:
+            fallback = (head_protection or {}).get("distance_m")
+            return float(fallback) if fallback is not None else None
+
+        remaining_edge_distance = 0.0
+        try:
+            if last_node_id != next_node_id:
+                last_node = nodes_map.get(last_node_id)
+                edge_distance = float(last_node.neighbors[next_node_id])
+                progress = min(1.0, max(0.0, float(getattr(vehicle, "progress", 0.0) or 0.0)))
+                remaining_edge_distance = edge_distance * (1.0 - progress)
+
+            restriction_policy = CoreDispatcher.current_operation_restriction_policy(
+                CoreDispatcher._coerce_operation_area_id(
+                    getattr(vehicle, "operation_area_id", None)
+                )
+            )
+            path_distance, _ = CoreDispatcher._get_path(
+                city_map,
+                start_node,
+                target_node,
+                restriction_policy=restriction_policy,
+            )
+            total_distance = remaining_edge_distance + float(path_distance)
+            if math.isfinite(total_distance) and total_distance >= 0:
+                return total_distance
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
+
+        # 路网状态短暂不完整时回退现有直线距离，避免一次诊断数据缺失阻断插单。
+        fallback = (head_protection or {}).get("distance_m")
+        try:
+            fallback = float(fallback)
+        except (TypeError, ValueError):
+            return None
+        return fallback if math.isfinite(fallback) and fallback >= 0 else None
+
+    @staticmethod
+    def _head_insertion_penalty_details(
+        candidate_route,
+        original_head_key,
+        new_order,
+        head_distance_m,
+        max_penalty,
+        decay_distance_m,
+        original_head_step=None,
+    ):
+        """计算候选路线把新订单 O 点插到原队首之前时的负指数惩罚。"""
+        new_request_id = str(getattr(new_order, "request_id", ""))
+        new_origin_index = None
+        original_head_index = None
+        for index, step in enumerate(candidate_route or []):
+            if CoreDispatcher._route_step_key(step) == original_head_key and original_head_index is None:
+                original_head_index = index
+            if (
+                str(step.get("type") or "").upper() == "O"
+                and str(getattr(step.get("order"), "request_id", "")) == new_request_id
+            ):
+                new_origin_index = index
+
+        inserted_before_head = (
+            original_head_key is not None
+            and new_origin_index is not None
+            and original_head_index is not None
+            and new_origin_index < original_head_index
+        )
+        penalty = 0.0
+        if inserted_before_head and float(max_penalty) > 0:
+            # 距离无法恢复时按 0 米保守处理，避免路网瞬态异常反而失去队首保护。
+            effective_distance = max(0.0, float(head_distance_m or 0.0))
+            penalty = float(max_penalty) * math.exp(
+                -effective_distance / float(decay_distance_m)
+            )
+
+        head_order = (original_head_step or {}).get("order") if isinstance(original_head_step, dict) else None
+        return {
+            "head_insertion_penalty": penalty,
+            "head_distance_m": head_distance_m,
+            "head_decay_distance_m": float(decay_distance_m),
+            "head_step_type": (original_head_step or {}).get("type") if isinstance(original_head_step, dict) else None,
+            "head_request_id": getattr(head_order, "request_id", None),
+            "inserted_before_original_head": inserted_before_head,
         }
 
     @staticmethod
@@ -1502,6 +1929,8 @@ class CoreDispatcher:
         ) or CoreDispatcher._order_operation_area_id(new_order)
         route_cost_config = route_cost_config or CoreDispatcher.route_cost_config_snapshot(operation_area_id)
         max_delay_seconds = route_cost_config["MAX_PASSENGER_INSERTION_DELAY_SECONDS"]
+        max_head_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
+        head_penalty_decay_distance = route_cost_config["HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M"]
 
         if not CoreDispatcher._vehicle_has_capacity_for_order(vehicle, new_order):
             if return_details:
@@ -1510,10 +1939,18 @@ class CoreDispatcher:
 
         best_route = None
         best_cost = float('inf')
+        best_selection_cost = float('inf')
         best_details = {}
         route = list(getattr(vehicle, "planned_route", []) or [])
         n = len(route)
         head_protection = CoreDispatcher.route_head_protection_info(vehicle, city_map)
+        original_head_step = route[0] if route else None
+        original_head_key = CoreDispatcher._route_step_key(original_head_step)
+        head_distance_m = CoreDispatcher._route_head_remaining_astar_distance(
+            vehicle,
+            city_map,
+            head_protection=head_protection,
+        )
         locked_head_key = head_protection.get("head_key") if head_protection.get("locked") and n > 0 else None
         min_origin_index = 1 if locked_head_key else 0
         o_step = {'type': 'O', 'order': new_order}
@@ -1588,9 +2025,24 @@ class CoreDispatcher:
                         new_order,
                         max_delay_seconds,
                     )
-                if is_feasible and constraint_ok and cost < best_cost:
+                penalty_details = CoreDispatcher._head_insertion_penalty_details(
+                    test_route,
+                    original_head_key,
+                    new_order,
+                    head_distance_m,
+                    max_head_insertion_penalty,
+                    head_penalty_decay_distance,
+                    original_head_step=original_head_step,
+                )
+                selection_cost = cost + penalty_details["head_insertion_penalty"]
+                if is_feasible and constraint_ok and selection_cost < best_selection_cost:
+                    details = dict(details)
                     details["passenger_delay_constraints"] = constraint_details
+                    details.update(penalty_details)
+                    details["base_total_cost"] = cost
+                    details["selection_cost"] = selection_cost
                     best_cost = cost
+                    best_selection_cost = selection_cost
                     best_route = test_route
                     best_details = details
                     
@@ -1660,10 +2112,26 @@ class CoreDispatcher:
                                 max_delay_seconds,
                             )
 
-                        # 2-Opt 同样必须满足已有乘客延误与最晚上车硬约束。
-                        if is_feasible and constraint_ok and cost < (best_cost - 0.001):
+                        penalty_details = CoreDispatcher._head_insertion_penalty_details(
+                            mut_route,
+                            original_head_key,
+                            new_order,
+                            head_distance_m,
+                            max_head_insertion_penalty,
+                            head_penalty_decay_distance,
+                            original_head_step=original_head_step,
+                        )
+                        selection_cost = cost + penalty_details["head_insertion_penalty"]
+
+                        # 2-Opt 同样必须满足已有乘客硬约束，并按队首软惩罚后的成本比较。
+                        if is_feasible and constraint_ok and selection_cost < (best_selection_cost - 0.001):
+                            details = dict(details)
                             details["passenger_delay_constraints"] = constraint_details
+                            details.update(penalty_details)
+                            details["base_total_cost"] = cost
+                            details["selection_cost"] = selection_cost
                             best_cost = cost
+                            best_selection_cost = selection_cost
                             best_route = mut_route
                             best_details = details
                             improved = True
@@ -1876,7 +2344,6 @@ class CoreDispatcher:
             CoreDispatcher._order_operation_area_id(order)
         )
         busy_vehicle_max_absolute_cost = route_cost_config["BUSY_VEHICLE_MAX_ABSOLUTE_COST"]
-        planned_route_insertion_penalty = route_cost_config["PLANNED_ROUTE_INSERTION_PENALTY"]
         idle_first_wait_threshold = route_cost_config["IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS"]
         pickup_eta_tolerance = route_cost_config["PICKUP_ETA_TOLERANCE_SECONDS"]
         idle_candidates = []
@@ -1932,7 +2399,12 @@ class CoreDispatcher:
 
             if absolute_cost > busy_vehicle_max_absolute_cost:
                 continue
-            cost = absolute_cost - original_cost + planned_route_insertion_penalty
+            # 队首前插单惩罚已在 _try_insert_order() 中参与各插入位置寻优；
+            # 此处只把最终方案的惩罚加入候选增量成本，避免对忙车重复固定加罚。
+            head_insertion_penalty = float(
+                (route_details or {}).get("head_insertion_penalty", 0.0) or 0.0
+            )
+            cost = absolute_cost - original_cost + head_insertion_penalty
             alignment_score = CoreDispatcher._vehicle_route_alignment_score(order, vehicle)
             busy_candidates.append({
                 "vehicle": vehicle,
@@ -2320,13 +2792,15 @@ class CoreDispatcher:
             )
 
         for group in deferred_assignments.values():
-            CoreDispatcher._finalize_deferred_vehicle_assignments(
+            route_result = CoreDispatcher._finalize_deferred_vehicle_assignments(
                 group["vehicle"],
                 group["assignments"],
                 city_map,
             )
+            if route_result is None:
+                assign_count -= len(group["assignments"])
 
-        return assign_count
+        return max(0, assign_count)
 
     @staticmethod
     def _assign_order_to_vehicle_pending_confirmation(
@@ -2355,14 +2829,37 @@ class CoreDispatcher:
         }
         if defer_route_refresh:
             return assignment
-        route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+        CoreDispatcher._set_driver_push_pending(
+            order,
             vehicle,
-            city_map,
-            fleet_push_event={
-                "event_reason": event_reason,
-                "request_id": order.request_id,
-            },
+            event_reason=event_reason,
+            city_map=city_map,
         )
+        pending_entry = CoreDispatcher._vehicle_driver_push_pending_map(vehicle).get(str(order.request_id)) or {}
+        try:
+            route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                city_map,
+                fleet_push_event={
+                    "event_reason": event_reason,
+                    "request_id": order.request_id,
+                    "push_event_id": pending_entry.get("push_event_id"),
+                    "push_revision": pending_entry.get("push_revision", 1),
+                },
+            )
+        except Exception as exc:
+            route_result = None
+            log_exception(
+                "api.core.order_assignment_route_refresh_exception",
+                exc,
+                message="订单匹配后首次路线刷新抛出异常，订单将立即退池",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=[order.request_id],
+                    extra={"assignment_mode": "single", "event_reason": event_reason},
+                ),
+            )
         if route_result is None:
             log_error(
                 "api.core.order_assignment_route_refresh_failed",
@@ -2374,11 +2871,18 @@ class CoreDispatcher:
                     extra={"assignment_mode": "single", "event_reason": event_reason},
                 ),
             )
-        CoreDispatcher._set_driver_push_pending(
-            order,
+        if not CoreDispatcher._assignment_route_is_pushable(
             vehicle,
-            event_reason=event_reason,
-        )
+            route_result,
+            [order.request_id],
+        ):
+            CoreDispatcher._rollback_assignments_before_push(
+                vehicle,
+                [assignment],
+                city_map,
+                reason="navigation_route_prepare_failed",
+            )
+            return None
         CoreDispatcher._log_missing_push_events_for_requests(
             vehicle,
             [order.request_id],
@@ -2403,18 +2907,46 @@ class CoreDispatcher:
         assignments = [item for item in assignments or [] if isinstance(item, dict)]
         if not assignments:
             return None
-        fleet_push_events = [
-            {
+        fleet_push_events = []
+        for item in assignments:
+            order = item.get("order")
+            CoreDispatcher._set_driver_push_pending(
+                order,
+                vehicle,
+                event_reason=item.get("event_reason"),
+                city_map=city_map,
+            )
+            pending_entry = CoreDispatcher._vehicle_driver_push_pending_map(vehicle).get(
+                str(getattr(order, "request_id", ""))
+            ) or {}
+            fleet_push_events.append({
                 "event_reason": item.get("event_reason"),
-                "request_id": getattr(item.get("order"), "request_id", None),
-            }
-            for item in assignments
-        ]
-        route_result = CoreDispatcher.refresh_vehicle_route_metadata(
-            vehicle,
-            city_map,
-            fleet_push_event=fleet_push_events,
-        )
+                "request_id": getattr(order, "request_id", None),
+                "push_event_id": pending_entry.get("push_event_id"),
+                "push_revision": pending_entry.get("push_revision", 1),
+            })
+        try:
+            route_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                city_map,
+                fleet_push_event=fleet_push_events,
+            )
+        except Exception as exc:
+            route_result = None
+            log_exception(
+                "api.core.order_assignment_route_refresh_exception",
+                exc,
+                message="批量订单匹配后合并路线刷新抛出异常，本批订单将立即退池",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=[
+                        getattr(item.get("order"), "request_id", None)
+                        for item in assignments
+                    ],
+                    extra={"assignment_mode": "deferred_batch"},
+                ),
+            )
         assignment_request_ids = [
             getattr(item.get("order"), "request_id", None)
             for item in assignments
@@ -2430,13 +2962,20 @@ class CoreDispatcher:
                     extra={"assignment_mode": "deferred_batch"},
                 ),
             )
+        if not CoreDispatcher._assignment_route_is_pushable(
+            vehicle,
+            route_result,
+            assignment_request_ids,
+        ):
+            CoreDispatcher._rollback_assignments_before_push(
+                vehicle,
+                assignments,
+                city_map,
+                reason="navigation_route_prepare_failed",
+            )
+            return None
         for item in assignments:
             order = item["order"]
-            CoreDispatcher._set_driver_push_pending(
-                order,
-                vehicle,
-                event_reason=item.get("event_reason"),
-            )
             persistence.record_order_matched_pending(
                 order,
                 vehicle,
@@ -2455,6 +2994,83 @@ class CoreDispatcher:
             stage="deferred_batch_assignment",
         )
         return route_result
+
+    @staticmethod
+    def _assignment_route_is_pushable(vehicle, route_result, request_ids):
+        """确认首次派车已经建立可继续准备高德导航的本地路线和推送事件。"""
+        if not isinstance(route_result, dict):
+            return False
+        route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
+        route_status = getattr(vehicle, "planned_route_grasp_status", None)
+        raw_segments = getattr(vehicle, "planned_route_segment_raw_point", None) or []
+        if not route_version or route_status not in {"pending", "ready"} or not raw_segments:
+            return False
+        expected = {str(item) for item in request_ids or [] if item not in (None, "")}
+        existing = {
+            str(event.get("request_id"))
+            for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+            if isinstance(event, dict)
+            and not CoreDispatcher._is_navigation_correction_event(event)
+            and event.get("request_id") not in (None, "")
+        }
+        return expected.issubset(existing)
+
+    @staticmethod
+    def _rollback_assignments_before_push(vehicle, assignments, city_map, reason):
+        """首次路线准备失败时撤销本轮派车，避免订单停留在无导航的 matched 状态。"""
+        assignments = [item for item in assignments or [] if isinstance(item, dict)]
+        request_ids = {
+            str(getattr(item.get("order"), "request_id", ""))
+            for item in assignments
+            if item.get("order") is not None
+        }
+        request_ids.discard("")
+        if request_ids:
+            vehicle.planned_route = [
+                step for step in (getattr(vehicle, "planned_route", None) or [])
+                if str(getattr(step.get("order"), "request_id", "")) not in request_ids
+            ]
+        for item in assignments:
+            order = item.get("order")
+            if order is None:
+                continue
+            request_id = str(getattr(order, "request_id", ""))
+            order.status = "pooled"
+            order.driver_push_failed_reason = reason
+            order.driver_push_state = "requeued"
+            order.committed_pickup_eta = None
+            order.committed_dropoff_eta = None
+            CoreDispatcher._clear_driver_push_pending(order, vehicle)
+            CoreDispatcher._ensure_order_pool_entered_at(order)
+            if all(str(getattr(existing, "request_id", "")) != request_id for existing in CoreDispatcher.order_pool):
+                CoreDispatcher.order_pool.append(order)
+            persistence.record_order_requeued_after_push_failure(order, reason=reason)
+
+        # 恢复本轮派车前的剩余路线。这里不生成修正事件，因为失败订单从未成功推给平台。
+        try:
+            restored_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                city_map,
+                fleet_push_event=None,
+            )
+        except Exception as exc:
+            restored_result = None
+            log_exception(
+                "api.core.assignment_rollback_route_refresh",
+                exc,
+                message="撤销失败派车后恢复车辆剩余路线失败",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=sorted(request_ids),
+                ),
+            )
+        CoreDispatcher._refresh_pending_driver_push_route_versions(
+            vehicle,
+            getattr(vehicle, "planned_route_grasp_route_version", None),
+        )
+        persistence.record_vehicle_runtime(vehicle)
+        return restored_result
 
     @staticmethod
     def process_pool_matching(fleet, city_map, state_lock=None):
@@ -2491,6 +3107,8 @@ class CoreDispatcher:
                                 vehicle for vehicle in (fleet or [])
                                 if CoreDispatcher._operation_area_id_of(vehicle) == operation_area_id
                             ]
+                            # 先修复上一轮导航送达状态，再允许车辆参与新订单匹配。
+                            CoreDispatcher.reconcile_driver_push_deliveries(area_fleet, area_city)
                             CoreDispatcher.refresh_scheduled_rest_requests(area_fleet, area_city)
                             assign_count += CoreDispatcher._process_pool_matching_area_cycle(
                                 area_fleet,
@@ -2514,6 +3132,7 @@ class CoreDispatcher:
 
         while True:
             with lock_context:
+                CoreDispatcher.reconcile_driver_push_deliveries(fleet, city_map)
                 CoreDispatcher.refresh_scheduled_rest_requests(fleet, city_map)
 
                 if not CoreDispatcher.order_pool:
@@ -2541,7 +3160,7 @@ class CoreDispatcher:
                     if best_candidate is not None:
                         target_o = CoreDispatcher.order_pool.pop(best_candidate["order_index"])
                         target_vehicle = best_candidate["vehicle"]
-                        CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
+                        route_result = CoreDispatcher._assign_order_to_vehicle_pending_confirmation(
                             target_o,
                             target_vehicle,
                             best_candidate["route"],
@@ -2554,6 +3173,9 @@ class CoreDispatcher:
                             },
                             route_details=best_candidate.get("route_details"),
                         )
+                        if route_result is None:
+                            # 订单已退回池中；等待下一轮再匹配，避免同一轮无限退池重派。
+                            break
                         assign_count += 1
                         print(
                             f"[Core.Pool] [Match] 订单池优先级匹配成功：单 {target_o.request_id} "
@@ -2643,39 +3265,82 @@ class CoreDispatcher:
         return str(expected) == str(actual)
 
     @staticmethod
-    def _set_driver_push_pending(order, vehicle, event_reason=None, current_timestamp=None):
+    def _set_driver_push_pending(
+        order,
+        vehicle,
+        event_reason=None,
+        current_timestamp=None,
+        city_map=None,
+    ):
         """订单匹配成功后设置司机端接收待确认标记。"""
         now_ts = CoreDispatcher._event_timestamp(current_timestamp)
-        route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
+        stored_route_version = getattr(vehicle, "planned_route_grasp_route_version", None)
+        computed_route_version = CoreDispatcher._vehicle_grasp_route_version(vehicle)
+        route_version = (
+            stored_route_version
+            if stored_route_version == computed_route_version
+            else computed_route_version
+        )
         vehicle_id = CoreDispatcher._vehicle_identity(vehicle)
         request_id = str(getattr(order, "request_id", ""))
+        push_event = next((
+            event for event in reversed(CoreDispatcher._vehicle_fleet_push_pending_events(vehicle))
+            if isinstance(event, dict)
+            and not CoreDispatcher._is_navigation_correction_event(event)
+            and str(event.get("request_id") or "") == request_id
+        ), None)
+        push_event_id = (push_event or {}).get("push_event_id") or uuid.uuid4().hex
+        push_revision = int((push_event or {}).get("push_revision", 1) or 1)
+        route_ready = (
+            getattr(vehicle, "planned_route_grasp_status", None) == "ready"
+            and stored_route_version == computed_route_version
+        )
 
         order.status = "matched"
         order.driver_push_pending = True
         order.driver_push_vehicle_id = vehicle_id
         order.driver_push_route_version = route_version
-        order.driver_push_attempt = int(getattr(order, "driver_push_attempt", 0) or 0) + 1
+        order.driver_push_attempt = 0
         order.driver_push_reason = event_reason or "order_assigned"
         order.driver_push_created_at = now_ts
         order.driver_push_confirmed_at = None
         order.driver_push_failed_reason = None
 
         pending = CoreDispatcher._vehicle_driver_push_pending_map(vehicle, create=True)
-        pending[request_id] = {
+        pending_entry = {
             "request_id": request_id,
             "route_version": route_version,
             "event_reason": event_reason or "order_assigned",
             "created_at": now_ts,
+            "state": "queued" if route_ready else "waiting_route",
+            "push_event_id": push_event_id,
+            "push_revision": push_revision,
+            "push_attempt": 0,
+            "push_first_at": now_ts,
+            "push_last_at": None,
+            "push_last_error": None,
+            "push_delivered_at": None,
+            "route_prepare_deadline": now_ts + CoreDispatcher.DRIVER_PUSH_ROUTE_PREPARE_TIMEOUT_SECONDS,
+            "confirmation_deadline": None,
+            "route_retry_attempt": 0,
+            "route_retry_next_at": now_ts + CoreDispatcher.DRIVER_PUSH_ROUTE_RETRY_DELAYS_SECONDS[0],
+            "requeue_required": False,
+            # 仅供异步完成回调退池使用，不参与序列化或日志输出。
+            "_city_map_ref": city_map,
         }
+        pending[request_id] = pending_entry
 
         for pending_event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle):
             if not isinstance(pending_event, dict) or str(pending_event.get("request_id") or "") != request_id:
                 continue
             pending_event.update({
+                "push_event_id": push_event_id,
+                "push_revision": push_revision,
                 "driver_push_confirmation_required": True,
                 "confirmation_request_id": request_id,
                 "driver_push_route_version": route_version,
             })
+        CoreDispatcher._sync_order_driver_push_state(order, pending_entry)
         CoreDispatcher._sync_vehicle_driver_push_pending_flag(vehicle)
         return route_version
 
@@ -2730,13 +3395,21 @@ class CoreDispatcher:
         return before - len(vehicle.planned_route)
 
     @staticmethod
-    def _requeue_driver_push_order(order, vehicle, city_map, reason="driver_push_failed"):
+    def _requeue_driver_push_order(
+        order,
+        vehicle,
+        city_map,
+        reason="driver_push_failed",
+        schedule_correction=True,
+    ):
         """司机端未收到或超时时撤销派车，并把订单退回池中。"""
         request_id = str(getattr(order, "request_id", ""))
         exclusion = CoreDispatcher._record_driver_push_vehicle_exclusion(order, vehicle, reason)
         removed_steps = CoreDispatcher._remove_order_from_vehicle_route(vehicle, request_id)
         order.status = "pooled"
-        order.driver_push_failed_reason = (exclusion or {}).get("reason") or reason
+        order.driver_push_state = "requeued"
+        # 退池原因保留真实链路故障；车辆排除规则单独规范化为网络冷却或主动拒单。
+        order.driver_push_failed_reason = reason
         # 原派车承诺已撤销；保留首次入池时间，让等待较久的订单继续享有优先级。
         order.committed_pickup_eta = None
         order.committed_dropoff_eta = None
@@ -2745,11 +3418,43 @@ class CoreDispatcher:
         if all(str(getattr(existing, "request_id", "")) != request_id for existing in CoreDispatcher.order_pool):
             CoreDispatcher.order_pool.append(order)
 
-        path_result = CoreDispatcher.refresh_vehicle_route_metadata(
-            vehicle,
-            city_map,
-            fleet_push_event=None,
-        )
+        correction_event = None
+        if schedule_correction:
+            correction_event = {
+                "event_type": "fleet_route_corrected",
+                "correction": True,
+                "event_reason": "order_requeued_after_push_failure",
+                "failed_request_id": request_id,
+                "_city_map_ref": city_map,
+            }
+        try:
+            path_result = CoreDispatcher.refresh_vehicle_route_metadata(
+                vehicle,
+                city_map,
+                fleet_push_event=correction_event,
+            )
+        except Exception as exc:
+            path_result = None
+            # 路线刷新在中途抛错时，旧高德路线可能仍然包含已退池订单。
+            # 先清空旧规划状态，防止修正事件误把旧导航再次推给平台。
+            CoreDispatcher._clear_route_grasp_state(vehicle)
+            log_exception(
+                "api.core.requeue_route_correction_refresh",
+                exc,
+                message="订单退池后重建车辆修正导航失败，已保留修正事件等待看门狗重试",
+                context=CoreDispatcher._route_push_diagnostic_context(
+                    vehicle,
+                    city_map=city_map,
+                    request_ids=[request_id],
+                    extra={"reason": reason},
+                ),
+            )
+        if schedule_correction and not any(
+            CoreDispatcher._is_navigation_correction_event(event)
+            for event in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+        ):
+            # 本地路线暂时无法恢复时也保留修正意图，由看门狗继续重建路线。
+            CoreDispatcher._mark_fleet_push_pending(vehicle, correction_event)
         CoreDispatcher._refresh_pending_driver_push_route_versions(
             vehicle,
             getattr(vehicle, "planned_route_grasp_route_version", None),
@@ -2764,6 +3469,8 @@ class CoreDispatcher:
             "reason": order.driver_push_failed_reason,
             "vehicle_exclusion": exclusion,
             "pool_size": len(CoreDispatcher.order_pool),
+            "correction_scheduled": bool(schedule_correction),
+            "route_refresh_ok": path_result is not None,
         }
 
     @staticmethod
@@ -2778,6 +3485,7 @@ class CoreDispatcher:
             }
         confirm_time = CoreDispatcher._event_datetime(occurred_at)
         order.status = "waiting_pickup"
+        order.driver_push_state = "confirmed"
         order.driver_push_confirmed_at = confirm_time
         if getattr(order, "answer_time", None) is None:
             order.answer_time = confirm_time
@@ -2793,8 +3501,244 @@ class CoreDispatcher:
 
     @staticmethod
     def expire_driver_push_confirmations(fleet, city_map, current_timestamp=None):
-        """平台负责超时判断，算法侧不再自动退回 matched 订单。"""
-        return []
+        """兼容旧调用：执行导航送达与司机确认看门狗。"""
+        return CoreDispatcher.reconcile_driver_push_deliveries(
+            fleet,
+            city_map,
+            current_timestamp=current_timestamp,
+        ).get("requeued", [])
+
+    @staticmethod
+    def _ensure_order_push_event(vehicle, pending):
+        """为 matched 订单补建与其稳定事件 ID 对应的导航推送事件。"""
+        request_id = str((pending or {}).get("request_id") or "")
+        if not request_id:
+            return None
+        event = next((
+            item for item in CoreDispatcher._vehicle_fleet_push_pending_events(vehicle)
+            if isinstance(item, dict)
+            and not CoreDispatcher._is_navigation_correction_event(item)
+            and str(item.get("request_id") or "") == request_id
+        ), None)
+        if event is None:
+            event = CoreDispatcher._mark_fleet_push_pending(vehicle, {
+                "event_type": "fleet_route_changed",
+                "event_reason": pending.get("event_reason") or "order_assigned",
+                "request_id": request_id,
+                "push_event_id": pending.get("push_event_id") or uuid.uuid4().hex,
+                "push_revision": int(pending.get("push_revision", 1) or 1),
+                "push_attempt": int(pending.get("push_attempt", 0) or 0),
+                "_city_map_ref": pending.get("_city_map_ref"),
+            })
+        if event is not None:
+            event.update({
+                "driver_push_confirmation_required": True,
+                "confirmation_request_id": request_id,
+                "driver_push_route_version": event.get("route_version"),
+            })
+            pending["push_event_id"] = event.get("push_event_id")
+            pending["push_revision"] = int(event.get("push_revision", 1) or 1)
+            pending["route_version"] = event.get("route_version")
+        return event
+
+    @classmethod
+    def reconcile_driver_push_deliveries(cls, fleet, city_map, current_timestamp=None):
+        """每轮调度前修复订单导航状态，并处理送达或确认超时。"""
+        now_ts = cls._event_timestamp(current_timestamp)
+        result = {
+            "requeued": [],
+            "events_rebuilt": 0,
+            "route_retries": 0,
+            "correction_retries": 0,
+        }
+        for vehicle in fleet or []:
+            pending_map = cls._vehicle_driver_push_pending_map(vehicle, create=True)
+            # 兼容旧运行态或异常链路：订单已 matched 且仍在车辆 O/D 队列中时，
+            # 若订单级状态缺失，先恢复状态事实，再执行事件补建和发送。
+            seen_request_ids = set()
+            for step in getattr(vehicle, "planned_route", None) or []:
+                order = step.get("order") if isinstance(step, dict) else None
+                request_id = str(getattr(order, "request_id", "") or "")
+                if not request_id or request_id in seen_request_ids:
+                    continue
+                seen_request_ids.add(request_id)
+                if getattr(order, "status", None) != "matched" or request_id in pending_map:
+                    continue
+                cls._set_driver_push_pending(
+                    order,
+                    vehicle,
+                    event_reason=getattr(order, "driver_push_reason", None) or "order_assigned",
+                    city_map=city_map,
+                )
+                pending_map = cls._vehicle_driver_push_pending_map(vehicle, create=True)
+            route_retry_entries = []
+            for request_id, pending in list(pending_map.items()):
+                if not isinstance(pending, dict):
+                    continue
+                pending["_city_map_ref"] = city_map
+                order = cls._find_vehicle_pending_order(vehicle, request_id)
+                if order is None:
+                    pending_map.pop(request_id, None)
+                    cls._remove_vehicle_fleet_push_events(vehicle, request_id)
+                    continue
+                state = pending.get("state") or "waiting_route"
+                cls._sync_order_driver_push_state(order, pending)
+
+                if pending.get("requeue_required"):
+                    result["requeued"].append(cls._requeue_driver_push_order(
+                        order,
+                        vehicle,
+                        city_map,
+                        reason=pending.get("push_last_error") or "navigation_push_failed",
+                        schedule_correction=True,
+                    ))
+                    continue
+
+                if state == "sending" and now_ts - float(pending.get("push_last_at") or now_ts) >= cls.DRIVER_PUSH_SENDING_STUCK_SECONDS:
+                    cls.navigation_push_immediate_requeue_count += 1
+                    result["requeued"].append(cls._requeue_driver_push_order(
+                        order,
+                        vehicle,
+                        city_map,
+                        reason="navigation_push_execution_timeout",
+                        schedule_correction=True,
+                    ))
+                    continue
+
+                confirmation_deadline = pending.get("confirmation_deadline")
+                if state == "delivered" and confirmation_deadline is not None and now_ts >= float(confirmation_deadline):
+                    cls.navigation_push_confirmation_timeout_count += 1
+                    result["requeued"].append(cls._requeue_driver_push_order(
+                        order,
+                        vehicle,
+                        city_map,
+                        reason="driver_confirmation_timeout",
+                        schedule_correction=True,
+                    ))
+                    continue
+
+                route_deadline = pending.get("route_prepare_deadline")
+                if state in {"waiting_route", "queued"} and route_deadline is not None and now_ts >= float(route_deadline):
+                    result["requeued"].append(cls._requeue_driver_push_order(
+                        order,
+                        vehicle,
+                        city_map,
+                        reason="navigation_route_prepare_failed",
+                        schedule_correction=True,
+                    ))
+                    continue
+
+                event = None
+                if state in {"waiting_route", "queued"}:
+                    event = cls._ensure_order_push_event(vehicle, pending)
+                if event is not None and state == "waiting_route" and getattr(vehicle, "planned_route_grasp_status", None) == "ready":
+                    pending["state"] = "queued"
+                    event["push_state"] = "queued"
+                    cls._sync_order_driver_push_state(order, pending)
+
+                retry_at = float(pending.get("route_retry_next_at") or 0.0)
+                if (
+                    state in {"waiting_route", "queued"}
+                    and getattr(vehicle, "planned_route_grasp_status", None) in {None, "error", "disabled", "stale"}
+                    and now_ts >= retry_at
+                ):
+                    route_retry_entries.append(pending)
+
+            if route_retry_entries:
+                retry_events = [
+                    cls._ensure_order_push_event(vehicle, pending)
+                    for pending in route_retry_entries
+                ]
+                retry_events = [event for event in retry_events if event is not None]
+                raw_segments = getattr(vehicle, "planned_route_segment_raw_point", None) or []
+                if raw_segments and getattr(vehicle, "planned_route_grasp_route_version", None):
+                    vehicle.planned_route_grasp_status = "pending"
+                    vehicle.planned_route_grasp_error = None
+                    try:
+                        cls._submit_vehicle_route_grasp_async(vehicle)
+                    except Exception:
+                        pass
+                else:
+                    cls.refresh_vehicle_route_metadata(
+                        vehicle,
+                        city_map,
+                        fleet_push_event=retry_events,
+                    )
+                for pending in route_retry_entries:
+                    attempt = int(pending.get("route_retry_attempt", 0) or 0) + 1
+                    delay_index = min(attempt, len(cls.DRIVER_PUSH_ROUTE_RETRY_DELAYS_SECONDS) - 1)
+                    pending["route_retry_attempt"] = attempt
+                    pending["route_retry_next_at"] = now_ts + cls.DRIVER_PUSH_ROUTE_RETRY_DELAYS_SECONDS[delay_index]
+                result["route_retries"] += 1
+
+            correction_events = [
+                event for event in cls._vehicle_fleet_push_pending_events(vehicle)
+                if cls._is_navigation_correction_event(event)
+            ]
+            for event in correction_events:
+                event["_city_map_ref"] = city_map
+                current_version = getattr(vehicle, "planned_route_grasp_route_version", None)
+                if current_version and event.get("route_version") != current_version:
+                    event["route_version"] = current_version
+                    event["push_revision"] = int(event.get("push_revision", 1) or 1) + 1
+                    event["push_state"] = "waiting_route"
+                if getattr(vehicle, "planned_route_grasp_status", None) == "ready":
+                    continue
+                retry_at = float(event.get("push_next_retry_at") or 0.0)
+                if now_ts < retry_at:
+                    continue
+                attempt = int(event.get("route_prepare_attempt", 0) or 0) + 1
+                event["route_prepare_attempt"] = attempt
+                delay_index = min(attempt - 1, len(cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS) - 1)
+                event["push_next_retry_at"] = now_ts + cls.NAVIGATION_CORRECTION_RETRY_DELAYS_SECONDS[delay_index]
+                cls.refresh_vehicle_route_metadata(
+                    vehicle,
+                    city_map,
+                    fleet_push_event=event,
+                )
+                result["correction_retries"] += 1
+
+            if getattr(vehicle, "planned_route_grasp_status", None) == "ready":
+                cls._submit_pending_fleet_push_if_ready(vehicle)
+            cls._sync_vehicle_driver_push_pending_flag(vehicle)
+        return result
+
+    @classmethod
+    def navigation_push_health(cls, fleet):
+        """汇总纯内存导航送达状态，供 /health 快速诊断。"""
+        counts = {
+            "navigation_push_waiting_route": 0,
+            "navigation_push_sending": 0,
+            "navigation_push_delivered_waiting_confirmation": 0,
+            "navigation_push_route_prepare_retrying": 0,
+            "navigation_correction_retrying": 0,
+            "navigation_push_oldest_pending_seconds": 0.0,
+            "navigation_push_immediate_requeue_count": cls.navigation_push_immediate_requeue_count,
+            "navigation_push_confirmation_timeout_count": cls.navigation_push_confirmation_timeout_count,
+        }
+        now_ts = time.time()
+        oldest = 0.0
+        for vehicle in fleet or []:
+            for pending in cls._vehicle_driver_push_pending_map(vehicle).values():
+                if not isinstance(pending, dict):
+                    continue
+                state = pending.get("state") or "waiting_route"
+                if state in {"waiting_route", "queued"}:
+                    counts["navigation_push_waiting_route"] += 1
+                if state == "sending":
+                    counts["navigation_push_sending"] += 1
+                if state == "delivered":
+                    counts["navigation_push_delivered_waiting_confirmation"] += 1
+                if int(pending.get("route_retry_attempt", 0) or 0) > 0 and state in {"waiting_route", "queued"}:
+                    counts["navigation_push_route_prepare_retrying"] += 1
+                oldest = max(oldest, now_ts - float(pending.get("push_first_at") or pending.get("created_at") or now_ts))
+            counts["navigation_correction_retrying"] += sum(
+                1 for event in cls._vehicle_fleet_push_pending_events(vehicle)
+                if cls._is_navigation_correction_event(event)
+                and event.get("push_state") in {"waiting_route", "retrying", "sending"}
+            )
+        counts["navigation_push_oldest_pending_seconds"] = round(max(0.0, oldest), 3)
+        return counts
 
     @staticmethod
     def confirm_driver_push_delivery(request_id, fleet, city_map, received=True, vehicle_id=None, route_version=None, reason=None, occurred_at=None):
@@ -2840,10 +3784,21 @@ class CoreDispatcher:
                 matched_vehicle,
                 city_map,
                 reason=reason or CoreDispatcher.DRIVER_PUSH_UNREACHABLE_REASON,
+                schedule_correction=True,
             )
             result["ok"] = True
             return result
 
+        pending = CoreDispatcher._vehicle_driver_push_pending_map(matched_vehicle).get(request_id) or {}
+        if pending.get("state") not in {"sending", "delivered"}:
+            return {
+                "ok": False,
+                "status_code": 409,
+                "error": "dispatch_not_delivered",
+                "request_id": request_id,
+                "dispatch_delivery_state": pending.get("state") or "waiting_route",
+                "message": "订单导航尚未进入发送或送达状态，暂不能确认司机已收到。",
+            }
         result = CoreDispatcher._confirm_driver_push_received(matched_order, matched_vehicle, occurred_at=occurred_at)
         result["ok"] = True
         return result
@@ -5131,10 +6086,10 @@ class CoreDispatcher:
         )
         if not raw_segments:
             events = fleet_push_event if isinstance(fleet_push_event, list) else [fleet_push_event]
+            events = [event for event in events if isinstance(event, dict)]
             request_ids = [
                 event.get("request_id")
                 for event in events
-                if isinstance(event, dict)
             ]
             if should_log_push_failure:
                 log_error(
@@ -5151,6 +6106,27 @@ class CoreDispatcher:
                     ),
                 )
             CoreDispatcher._clear_route_grasp_state(vehicle)
+            correction_events = [
+                event for event in events
+                if CoreDispatcher._is_navigation_correction_event(event)
+            ]
+            if correction_events and not getattr(vehicle, "planned_route", None) and not getattr(vehicle, "idle_target", None):
+                # 退池后车辆可能已经没有任何服务步骤。空路线本身就是需要平台接收的
+                # 最新导航状态，因此直接标记 ready 并推送空分段，而不是永远等待高德。
+                vehicle.planned_route_grasped_point = []
+                vehicle.planned_route_segment_grasped_point = []
+                vehicle.planned_route_segment_raw_point = []
+                vehicle.planned_route_grasp_route_version = CoreDispatcher._vehicle_grasp_route_version(vehicle)
+                vehicle.planned_route_grasp_status = "ready"
+                vehicle.planned_route_grasp_error = None
+                for event in correction_events:
+                    CoreDispatcher._mark_fleet_push_pending(vehicle, event=event)
+                CoreDispatcher._submit_pending_fleet_push_if_ready(vehicle)
+                persistence.record_vehicle_runtime(vehicle)
+                return
+            # 只有修正导航需要无限恢复；普通订单事件由派车回滚逻辑直接退池。
+            for event in correction_events:
+                CoreDispatcher._mark_fleet_push_pending(vehicle, event=event)
             return
         # raw segments 是规划线程消费的稳定快照，避免线程读到后续被修改的路线对象。
         vehicle.planned_route_segment_raw_point = raw_segments

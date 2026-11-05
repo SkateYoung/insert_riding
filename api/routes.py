@@ -1700,6 +1700,21 @@ def _order_eta_response(order, order_status, vehicle):
         ),
         "origin": _order_node_to_dict(order.o_node),
         "destination": _order_node_to_dict(order.d_node),
+        "dispatch_delivery": {
+            "state": getattr(order, "driver_push_state", None),
+            "push_event_id": getattr(order, "driver_push_event_id", None),
+            "push_revision": getattr(order, "driver_push_revision", None),
+            "push_attempt": getattr(order, "driver_push_attempt", None),
+            "last_error": getattr(order, "driver_push_last_error", None),
+            "delivered_at": getattr(order, "driver_push_delivered_at", None),
+            "delivered_at_text": _format_optional_timestamp(
+                getattr(order, "driver_push_delivered_at", None)
+            ),
+            "confirmation_deadline": getattr(order, "driver_push_confirmation_deadline", None),
+            "confirmation_deadline_text": _format_optional_timestamp(
+                getattr(order, "driver_push_confirmation_deadline", None)
+            ),
+        },
         "eta": {
             "provider": "amap",
             "status": eta_status,
@@ -1733,7 +1748,7 @@ def health():
         JSON: status 表示服务状态，initialized 表示系统是否已完成初始化。
     """
     db_status = persistence.status()
-    return jsonify({
+    payload = {
         "status": "ok",
         "initialized": state.system_initialized,
         "db_enabled": db_status.get("enabled"),
@@ -1747,7 +1762,9 @@ def health():
         "db_dropped_tasks": db_status.get("dropped_tasks"),
         "db_processed_tasks": db_status.get("processed_tasks"),
         "db_last_error": db_status.get("last_error"),
-    })
+    }
+    payload.update(CoreDispatcher.navigation_push_health(state.fleet))
+    return jsonify(payload)
 
 
 @bp.route("/time", methods=["GET"])

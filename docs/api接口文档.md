@@ -893,7 +893,15 @@ ETA 状态：
 ```json
 {
   "status": "ok",
-  "initialized": true
+  "initialized": true,
+  "navigation_push_waiting_route": 1,
+  "navigation_push_sending": 0,
+  "navigation_push_delivered_waiting_confirmation": 0,
+  "navigation_push_route_prepare_retrying": 0,
+  "navigation_correction_retrying": 0,
+  "navigation_push_oldest_pending_seconds": 8.2,
+  "navigation_push_immediate_requeue_count": 0,
+  "navigation_push_confirmation_timeout_count": 0
 }
 ```
 
@@ -903,6 +911,14 @@ ETA 状态：
 | --- | --- | --- |
 | `status` | string | 固定为 `ok` |
 | `initialized` | boolean | 系统是否已完成初始化 |
+| `navigation_push_waiting_route` | integer | 正在等待高德路线 ready 或排队发送的 matched 订单数 |
+| `navigation_push_sending` | integer | HTTP 线程任务已经提交、尚未返回真实结果的订单数 |
+| `navigation_push_delivered_waiting_confirmation` | integer | 平台已收到导航、等待司机端确认的订单数 |
+| `navigation_push_route_prepare_retrying` | integer | 正在重试高德路线准备的订单数 |
+| `navigation_correction_retrying` | integer | 订单退池后正在补推或重试的车辆修正导航数 |
+| `navigation_push_oldest_pending_seconds` | number | 最老的订单导航待处理时长，单位秒 |
+| `navigation_push_immediate_requeue_count` | integer | HTTP/线程池失败或发送卡死后立即退池的累计次数 |
+| `navigation_push_confirmation_timeout_count` | integer | 平台已收到后 120 秒未确认而退池的累计次数 |
 
 ### 4.2 GET `/time`
 
@@ -1266,6 +1282,7 @@ GET 响应示例：
     "SOCIAL_DISTANCE_COST_PER_KM": 1.0,
     "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 200.0,
     "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+    "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000.0,
     "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 600.0,
     "PICKUP_ETA_TOLERANCE_SECONDS": 120.0,
     "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 900.0,
@@ -1288,6 +1305,7 @@ POST/PUT 请求体示例：
   "IN_CAR_COST_PER_MIN": 5,
   "BUSY_VEHICLE_MAX_ABSOLUTE_COST": 120,
   "PLANNED_ROUTE_INSERTION_PENALTY": 40,
+  "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000,
   "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 900,
   "PICKUP_ETA_TOLERANCE_SECONDS": 120,
   "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 900,
@@ -1313,7 +1331,8 @@ POST/PUT 请求体示例：
 | `LOAD_RATE_PENALTY_BASE` | number | 否 | 满载率惩罚基数 |
 | `SOCIAL_DISTANCE_COST_PER_KM` | number | 否 | 每公里社会里程成本 |
 | `BUSY_VEHICLE_MAX_ABSOLUTE_COST` | number | 否 | 非空闲车辆插单后的路线总成本上限；超过该值时不再给已有任务车辆继续插单，空车不受该阈值限制 |
-| `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 已有任务车辆插单惩罚；调大后更倾向于把订单分给空车，调小后更容易给顺路忙车插单 |
+| `PLANNED_ROUTE_INSERTION_PENALTY` | number | 否 | 新订单 O 点插到原队首步骤之前时的最大惩罚，默认 30；设为 0 可关闭软惩罚 |
+| `HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M` | number | 否 | 队首前插单惩罚的负指数衰减距离，必须大于 0，默认 1000 米；达到该距离时惩罚约为最大值的 36.8% |
 | `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` | number | 否 | 空车优先等车阈值；最优空车预计等车不超过该秒数时优先空车，超过后允许顺路忙车参与优先选择 |
 | `PICKUP_ETA_TOLERANCE_SECONDS` | number | 否 | 本地 A* 预计上车时间容差；只保留与最快候选预计上车时间相差不超过该秒数的车辆，默认值以运营区配置为准 |
 | `MAX_PASSENGER_INSERTION_DELAY_SECONDS` | number | 否 | 已有乘客相对首次匹配时本地 A* 承诺 ETA 可接受的最大累计插单延误，默认 900 秒；候车乘客比较上车 ETA，已上车乘客比较下车 ETA |
@@ -1324,10 +1343,12 @@ POST/PUT 请求体示例：
 - POST/PUT 可只传其中一个或多个字段，未传字段保持当前值。
 - 未配置过的运营区会从 `ROUTE_COST_CONFIG_DEFAULTS` 初始化独立配置副本。
 - 如需在代码中设置区域初始值，可编辑 `CoreDispatcher.ROUTE_COST_CONFIG_BY_AREA_DEFAULTS`；每个区域只需填写与公共默认值不同的参数。
-- 所有字段必须是有限数字且大于或等于 0；允许传 `0` 关闭对应成本。
+- 除 `HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M` 必须是大于 0 的有限数字外，其他成本字段必须是大于或等于 0 的有限数字；允许传 `0` 关闭对应成本。
 - 四个权重不强制相加等于 1，接口仅返回 `weight_total` 供平台观察。
 - 调低 `BUSY_VEHICLE_MAX_ABSOLUTE_COST` 会更严格限制忙车继续插单，使订单更容易分给空车；调高后忙车更容易继续接顺路订单。
-- 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择，并追加 `PLANNED_ROUTE_INSERTION_PENALTY`。
+- 当最优空车预计等车时间不超过 `IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS` 时，订单只在空车候选中择优；超过阈值时允许已有任务车辆参与顺路优先选择。
+- 新订单 O 点插到车辆原队首 O/D 步骤之前时，追加 `PLANNED_ROUTE_INSERTION_PENALTY * exp(-head_distance_m / HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M)`；`head_distance_m` 使用车辆到原队首目标节点的本地 A* 剩余距离。越接近队首站点惩罚越大，插在原队首之后不加罚。
+- 现有队首 `500m/60s` 硬保护保持不变；进入保护范围后直接禁止在队首前插单，负指数惩罚主要控制保护范围之外的方案排序。
 - 顺路优先会先看新订单 O/D 与车辆已有订单是否同起点、同终点或同路线站点，再在同级顺路候选中比较成本。
 - 候选车辆的预计上车时间直接使用本地 A* 路线推演结果，包含新订单 O 点前的已有上下客步骤和早到等待时间。
 - 候选匹配不再请求高德 ETA，因此不会因为高德网络延迟、限流或结果未就绪而暂停本轮派单。
@@ -1347,6 +1368,7 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
     },
     25: {
         "PLANNED_ROUTE_INSERTION_PENALTY": 30.0,
+        "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 120.0,
     },
 }
@@ -1439,6 +1461,7 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
 
 - 如果 `status=matching` 或 `eta.status=not_assigned`，展示“正在匹配车辆”。
 - 如果 `status=matched`，展示“已匹配车辆，等待司机端接收”。
+- `dispatch_delivery` 返回本次派单导航的内存状态、稳定事件 ID、版本、发送次数、最近错误、送达时间和确认截止时间；服务重启后该调试状态不会恢复。
 - 如果 `eta.status=loading/pending`，展示“ETA 计算中”。
 - 如果 `eta.status=ready/partial`，展示预计到达和预计送达时间。
 - `eta.distance` 表示按车辆当前剩余路线分段累计得到的实时距离；优先使用高德驾车规划分段 `planned_route_segment_grasped_point`，没有高德分段时退回 A* 原始分段。
@@ -1551,7 +1574,9 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
 
 ### 4.7.1 POST `/orders/<request_id>/driver-push-confirmation`
 
-平台回调司机端是否真正收到派单信息。算法端匹配成功后，订单先保持 `matched`；只有该接口确认 `received=true` 后，订单才进入 `waiting_pickup`。`matched` 待确认期间车辆仍可继续接新单；算法端不做 60 秒计时，平台推送超时或司机端未收到时由平台调用本接口并传 `received=false`。
+平台回调司机端是否真正收到派单信息。算法端匹配成功后，订单先保持 `matched`；只有该接口确认 `received=true` 后，订单才进入 `waiting_pickup`。`matched` 待确认期间车辆仍可继续接新单。
+
+保障规则：高德路线准备最多等待 60 秒；订单导航线程池提交失败或真实 HTTP 请求失败时立即撤销该订单并退池。HTTP `2xx` 后进入 `delivered`，平台应在 120 秒内回调；超时未确认时算法会自动退池。每次退池只移除该订单 O/D，并持续补推不含失败订单的最新车辆修正导航。
 
 请求体：
 
@@ -1607,7 +1632,7 @@ ROUTE_COST_CONFIG_BY_AREA_DEFAULTS = {
 | --- | --- |
 | 200 | 确认成功，或已退回订单池 |
 | 400 | 请求体缺少 `received`、类型非法或时间格式非法 |
-| 409 | 订单已退回、已改派或车辆不匹配 |
+| 409 | 订单已退回、已改派、车辆不匹配，或导航尚未进入 `sending/delivered` 状态 |
 
 ### 4.7.2 通勤快线 `/commute/*`
 

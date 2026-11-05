@@ -550,6 +550,15 @@ class Order:
         self.plate_no = ""
         self.answer_time = None
         self.completion_time = None
+        # 导航推送状态仅在进程内维护；数据库订单状态仍使用 pooled/matched/waiting_pickup 等业务状态。
+        self.driver_push_pending = False
+        self.driver_push_state = None
+        self.driver_push_event_id = None
+        self.driver_push_revision = None
+        self.driver_push_attempt = 0
+        self.driver_push_last_error = None
+        self.driver_push_delivered_at = None
+        self.driver_push_confirmation_deadline = None
         self.cancel_type = ""
         self.cancel_time = None
         self.actual_pickup_dist = 0.0
