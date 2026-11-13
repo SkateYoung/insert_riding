@@ -13,7 +13,7 @@ import requests
 from .error_logger import log_error, log_exception
 
 
-DEFAULT_FLEET_PUSH_BASE_URL = "http://127.0.0.1:18080"
+DEFAULT_FLEET_PUSH_BASE_URL = "https://zhgj.gzticc.cn:9999"
 DEFAULT_VEHICLE_NAVIGATION_PATH = "/bus/python-dispatch/internal/fleet/{vehicleId}/push-navigation"
 DEFAULT_FLEET_PUSH_TIMEOUT_SECONDS = 2.0
 

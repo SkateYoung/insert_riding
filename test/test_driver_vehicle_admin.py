@@ -154,6 +154,21 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
             "initial_position": {"lon": lon, "lat": lat},
         })
 
+    def order_payload(self, request_id="order-1"):
+        now = datetime.now().replace(microsecond=0)
+        return {
+            "request_id": request_id,
+            "origin": {"lon": self.city.b.lon, "lat": self.city.b.lat},
+            "destination": {"lon": self.city.c.lon, "lat": self.city.c.lat},
+            "expected_pickup_time": {
+                "earliest": now.isoformat(sep=" "),
+                "latest": (now + timedelta(minutes=20)).isoformat(sep=" "),
+            },
+            "operation_area_id": 10001,
+            "passenger_count": 1,
+            "passenger_phone": "13900000001",
+        }
+
     def test_operation_area_admin_path_uses_area_id(self):
         response = self.client.get("/admin/operation-areas/10001")
         self.assertEqual(response.status_code, 200)
@@ -333,6 +348,96 @@ class DriverVehicleAdminApiTest(unittest.TestCase):
         data = response.get_json()
         self.assertEqual(data["passenger_phone"], "13900000001")
         self.assertEqual(data["passenger_id"], "passenger-business-1")
+
+    def test_create_order_rejects_duplicate_in_order_pool(self):
+        payload = self.order_payload("order-pool-duplicate")
+        self.assertEqual(self.client.post("/order", json=payload).status_code, 200)
+        payload["request_id"] = "  order-pool-duplicate  "
+
+        response = self.client.post("/order", json=payload)
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["error"], "duplicate_order")
+        self.assertEqual(data["active_location"], "order_pool")
+        self.assertNotIn("vehicle_id", data)
+        self.assertEqual(len(CoreDispatcher.order_pool), 1)
+
+    def test_create_order_duplicate_comparison_is_case_sensitive(self):
+        lower = self.order_payload("case-sensitive-order")
+        upper = self.order_payload("CASE-SENSITIVE-ORDER")
+
+        self.assertEqual(self.client.post("/order", json=lower).status_code, 200)
+        self.assertEqual(self.client.post("/order", json=upper).status_code, 200)
+        self.assertEqual(len(CoreDispatcher.order_pool), 2)
+
+    def test_create_order_rejects_duplicate_in_vehicle_planned_route(self):
+        payload = self.order_payload("planned-route-duplicate")
+        self.assertEqual(self.client.post("/order", json=payload).status_code, 200)
+        order = CoreDispatcher.order_pool.pop()
+        vehicle = Vehicle("vehicle-duplicate", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-duplicate"
+        vehicle.planned_route = [
+            {"type": "O", "order": order},
+            {"type": "D", "order": order},
+        ]
+        state.fleet.append(vehicle)
+
+        response = self.client.post("/order", json=payload)
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["active_location"], "planned_route")
+        self.assertEqual(data["vehicle_id"], "vehicle-duplicate")
+        self.assertEqual(len(vehicle.planned_route), 2)
+
+    def test_create_order_rejects_duplicate_in_on_board_orders(self):
+        payload = self.order_payload("on-board-duplicate")
+        order = make_order(self.city, request_id="on-board-duplicate")
+        vehicle = Vehicle("vehicle-on-board", self.city.a.id, "#10b981", zone=1)
+        vehicle.vehicle_id = "vehicle-on-board"
+        vehicle.on_board_orders = [order]
+        state.fleet.append(vehicle)
+
+        response = self.client.post("/order", json=payload)
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["active_location"], "on_board_orders")
+        self.assertEqual(data["vehicle_id"], "vehicle-on-board")
+        self.assertEqual(CoreDispatcher.order_pool, [])
+
+    def test_batch_create_order_rejects_later_duplicate_item(self):
+        first = self.order_payload("batch-duplicate")
+        duplicate = self.order_payload(" batch-duplicate ")
+
+        response = self.client.post("/order", json={"orders": [first, duplicate]})
+
+        self.assertEqual(response.status_code, 207)
+        data = response.get_json()
+        self.assertEqual(data["success_count"], 1)
+        self.assertEqual(data["failure_count"], 1)
+        self.assertEqual(data["results"][1]["status"], 409)
+        self.assertEqual(data["results"][1]["error"], "duplicate_order")
+        self.assertEqual(len(CoreDispatcher.order_pool), 1)
+
+    def test_batch_create_order_returns_409_when_all_items_are_duplicates(self):
+        existing = self.order_payload("batch-all-duplicate")
+        self.assertEqual(self.client.post("/order", json=existing).status_code, 200)
+
+        response = self.client.post("/order", json={
+            "orders": [
+                self.order_payload("batch-all-duplicate"),
+                self.order_payload(" batch-all-duplicate "),
+            ],
+        })
+
+        self.assertEqual(response.status_code, 409)
+        data = response.get_json()
+        self.assertEqual(data["success_count"], 0)
+        self.assertEqual(data["failure_count"], 2)
+        self.assertTrue(all(item["error"] == "duplicate_order" for item in data["results"]))
+        self.assertEqual(len(CoreDispatcher.order_pool), 1)
 
     def test_create_order_rejects_coordinate_not_in_station_table(self):
         now = datetime.now().replace(microsecond=0)

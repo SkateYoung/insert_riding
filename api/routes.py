@@ -1822,6 +1822,57 @@ def _response_error_payload(response_or_tuple, default_status=400):
     return payload, status_code
 
 
+def _find_active_order_by_request_id(request_id):
+    """从订单池和车辆当前任务中查找同号活动订单；调用方必须持有 state_lock。"""
+    normalized_request_id = str(request_id or "").strip()
+    if not normalized_request_id:
+        return None
+
+    for order in CoreDispatcher.order_pool:
+        if str(getattr(order, "request_id", "") or "").strip() == normalized_request_id:
+            return {
+                "order": order,
+                "active_location": "order_pool",
+                "vehicle": None,
+            }
+
+    for vehicle in state.fleet or []:
+        for step in getattr(vehicle, "planned_route", None) or []:
+            order = step.get("order") if isinstance(step, dict) else None
+            if str(getattr(order, "request_id", "") or "").strip() == normalized_request_id:
+                return {
+                    "order": order,
+                    "active_location": "planned_route",
+                    "vehicle": vehicle,
+                }
+
+        for order in getattr(vehicle, "on_board_orders", None) or []:
+            if str(getattr(order, "request_id", "") or "").strip() == normalized_request_id:
+                return {
+                    "order": order,
+                    "active_location": "on_board_orders",
+                    "vehicle": vehicle,
+                }
+    return None
+
+
+def _duplicate_order_error(request_id, active_order):
+    """生成普通动态订单重复时的稳定错误响应。"""
+    payload = {
+        "error": "duplicate_order",
+        "message": "request_id 已存在于当前活动订单中",
+        "request_id": str(request_id or "").strip(),
+        "active_location": active_order["active_location"],
+    }
+    vehicle = active_order.get("vehicle")
+    if vehicle is not None:
+        payload["vehicle_id"] = (
+            getattr(vehicle, "vehicle_id", None)
+            or getattr(vehicle, "id", None)
+        )
+    return payload, 409
+
+
 def _create_single_order_for_batch(data):
     """按单体 /order 规则创建一个订单，供批量发起复用。"""
     origin = data.get("origin") or {}
@@ -1836,7 +1887,7 @@ def _create_single_order_for_batch(data):
         return payload, status_code
 
     try:
-        request_id = str(data["request_id"])
+        request_id = str(data["request_id"]).strip()
         o_lon = float(origin["lon"])
         o_lat = float(origin["lat"])
         d_lon = float(destination["lon"])
@@ -1853,6 +1904,8 @@ def _create_single_order_for_batch(data):
 
     if not operation_area_id:
         return {"error": "operation_area_id 必须填写"}, 400
+    if not request_id:
+        return {"error": "request_id 必须填写"}, 400
     if not passenger_phone:
         return {"error": "passenger_phone 必须填写"}, 400
     if passenger_count <= 0:
@@ -1890,6 +1943,9 @@ def _create_single_order_for_batch(data):
         return payload, status_code
 
     with state.state_lock:
+        active_order = _find_active_order_by_request_id(request_id)
+        if active_order is not None:
+            return _duplicate_order_error(request_id, active_order)
         time_snapshot = state.current_time()
         request_time = state.parse_business_datetime(time_snapshot["time_text"])
         order = Order(
@@ -1983,7 +2039,12 @@ def create_order():
             results.append(result)
         success_count = sum(1 for item in results if item.get("success"))
         failure_count = len(results) - success_count
-        status_code = 200 if failure_count == 0 else 207 if success_count > 0 else 400
+        if failure_count == 0:
+            status_code = 200
+        elif success_count > 0:
+            status_code = 207
+        else:
+            status_code = 409 if any(item.get("status") == 409 for item in results) else 400
         return jsonify({
             "total": len(results),
             "success_count": success_count,
@@ -2002,7 +2063,7 @@ def create_order():
         return area_error
 
     try:
-        request_id = str(data["request_id"])
+        request_id = str(data["request_id"]).strip()
         o_lon = float(origin["lon"])
         o_lat = float(origin["lat"])
         d_lon = float(destination["lon"])
@@ -2019,6 +2080,8 @@ def create_order():
 
     if not operation_area_id: 
         return jsonify({"error": "operation_area_id 必须填写"}), 400
+    if not request_id:
+        return jsonify({"error": "request_id 必须填写"}), 400
     if not passenger_phone:
         return jsonify({"error": "passenger_phone 必须填写"}), 400
     if passenger_count <= 0:
@@ -2070,6 +2133,10 @@ def create_order():
         return station_error
 
     with state.state_lock:
+        active_order = _find_active_order_by_request_id(request_id)
+        if active_order is not None:
+            payload, status_code = _duplicate_order_error(request_id, active_order)
+            return jsonify(payload), status_code
         time_snapshot = state.current_time()
         request_time = state.parse_business_datetime(time_snapshot["time_text"])
         order = Order(

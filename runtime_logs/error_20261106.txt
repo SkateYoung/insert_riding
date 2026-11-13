@@ -1,0 +1,22 @@
+========================================================================================
+time: 2026-11-06 14:51:27
+level: ERROR
+source: api.fleet_push.submit_task
+message: 车辆导航推送任务提交到线程池失败，HTTP 请求尚未发起
+context: {"vehicle_id": "72057594546143661", "request_id": null, "event_reason": "idle_hotspot_assigned", "route_version": "grasp:v1:d74219185324e4e3704ed834d865c2e2", "push_event_id": "f2805dd80d8144338e393b7c02b60322", "push_revision": 1, "target_url": "https://zhgj.gzticc.cn:9999/bus/python-dispatch/internal/fleet/72057594546143661/push-navigation"}
+exception: RuntimeError('cannot schedule new futures after interpreter shutdown')
+traceback:
+Traceback (most recent call last):
+  File "d:\Bus_Project\insert_riding\api\fleet_push.py", line 303, in submit_vehicle_navigation
+    future = _executor_instance().submit(
+  File "D:\Miniconda\envs\amap_test\lib\concurrent\futures\thread.py", line 169, in submit
+    raise RuntimeError('cannot schedule new futures after '
+RuntimeError: cannot schedule new futures after interpreter shutdown
+
+========================================================================================
+time: 2026-11-06 14:51:27
+level: ERROR
+source: api.core.fleet_push_submit_rejected
+message: 导航推送任务未能提交到 fleet_push
+context: {"vehicle_id": "72057594546143661", "operation_area_id": 222222, "request_ids": [], "last_node": "113.263784_23.182477", "next_node": "113.263784_23.182477", "last_node_loaded": null, "next_node_loaded": null, "gps": {"lon": 113.263843, "lat": 23.182092}, "projected_gps": {"id": "113.263784_23.182477|113.263784_23.182477@0.000000", "lon": 113.26378376343419, "lat": 23.18247722082499, "name": "车辆路网投影位置", "zone": 2, "edge_u": "113.263784_23.182477", "edge_v": "113.263784_23.182477", "progress": 0.0, "is_projection": true, "source": "runtime_restore"}, "planned_route_size": 0, "planned_route": [], "local_segments": [], "raw_segments": [{"index": 0, "type": "IDLE", "request_id": null, "start_node_id": "113.263784_23.182477|113.263784_23.182477@0.000000", "end_node_id": "113.265069_23.178292", "target_node_id": "113.265069_23.178292", "snapped_target_node_id": null, "distance": 1241.4478705096485, "distance_m": null, "point_count": 99}], "grasped_segments": [{"index": 0, "type": "IDLE", "request_id": null, "start_node_id": "113.263784_23.182477|113.263784_23.182477@0.000000", "end_node_id": "113.265069_23.178292", "target_node_id": "113.265069_23.178292", "snapped_target_node_id": null, "distance": 1241.4478705096485, "distance_m": 783.962185054513, "point_count": 37}], "stored_route_version": "grasp:v1:d74219185324e4e3704ed834d865c2e2", "computed_route_version": "grasp:v1:d74219185324e4e3704ed834d865c2e2", "route_grasp_status": "ready", "route_grasp_error": null, "pending_push_events": [{"request_id": null, "failed_request_id": null, "event_reason": "idle_hotspot_assigned", "route_version": "grasp:v1:d74219185324e4e3704ed834d865c2e2", "push_event_id": "f2805dd80d8144338e393b7c02b60322", "push_revision": 1, "push_attempt": 1, "push_state": "sending", "confirmation_required": false}], "driver_push_pending_orders": [], "event_reason": "idle_hotspot_assigned"}
+
