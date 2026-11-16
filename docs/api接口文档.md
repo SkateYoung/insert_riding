@@ -261,6 +261,10 @@ runtime_logs/error_YYYYMMDD.txt
             "lon": 113.40036388888888
         } ...
 ],
+    "gps_heading_history": [     # 最近两条原始 GPS，仅用于高德分段方向引导
+        {"lon": 113.4005, "lat": 23.0582, "timestamp": 1794555000.0},
+        {"lon": 113.4006, "lat": 23.0583, "timestamp": 1794555005.0}
+    ],
     "planned_route_point": [ ],  # 这个是算法端原始的路径点，可以不用管
     "planned_route_segment_grasped_point": [     # 根据车辆OD队列分割的高德导航路径点（只需要看points、request_id、target_node三个参数）
        {
@@ -368,6 +372,8 @@ runtime_logs/error_YYYYMMDD.txt
     "zone": 3					# 车辆所在区域
 }
 ```
+
+> 高德分段规划可能使用原始 GPS 或上一站点提供行驶方向。`points` 只保留当前 GPS/上一业务站点之后的导航轨迹，不包含方向参考前缀；`distance_m` 和 `duration_sec` 仍是本次带途经点请求的完整高德返回值。方向诊断字段包括 `guidance_used`、`guidance_prefix_trimmed`、`guidance_waypoint`、`guidance_waypoint_distance_m` 和 `metric_scope`。
 
 ### 3.3 路径更新
 

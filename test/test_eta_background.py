@@ -8,13 +8,14 @@ import time
 import threading
 from datetime import datetime, timedelta
 from unittest.mock import ANY, patch
+from urllib.parse import parse_qs, urlparse
 
 from flask import Flask
 
 from api import state, persistence, fleet_push
 from api.core import CoreDispatcher
 from api.models import Node, Order, Vehicle
-from api.routes import bp as api_routes
+from api.routes import _vehicle_to_dict, bp as api_routes
 from forecast.amap_driving_route_planner import AmapDrivingRoutePlanner
 from forecast.amap_eta_correct import DEFAULT_AMAP_KEY, AmapEtaCorrectClient, build_eta_pipeline_from_astar, run_blocking_io
 
@@ -167,6 +168,57 @@ class FakeRouteGraspService:
 
     def driving_eta_sync(self, points):
         return {"ok": False, "reason": "not_used"}
+
+
+class GuidedRouteGraspService:
+    """记录带 waypoint 的分段请求，并返回包含方向前缀的完整轨迹。"""
+
+    enabled = True
+    supports_guided_waypoint = True
+
+    def __init__(self):
+        self.calls = []
+
+    def plan_segment_sync(self, points, restriction_policy=None, *, waypoint=None):
+        self.calls.append({
+            "points": [dict(point) for point in points],
+            "waypoint": dict(waypoint) if isinstance(waypoint, dict) else None,
+        })
+        polyline = [dict(points[0])]
+        if waypoint is not None:
+            polyline.append(dict(waypoint))
+        route_destination = dict(points[-1])
+        # 模拟高德抓路终点与业务原始站点存在轻微偏差。
+        route_destination["lon"] = float(route_destination["lon"]) + 0.00004
+        polyline.append(route_destination)
+        return {
+            "ok": True,
+            "polyline": polyline,
+            "distance_m": 900.0 + len(self.calls),
+            "duration_sec": 180.0 + len(self.calls),
+            "traffic_status": "畅通",
+            "strategy": "2",
+            "waypoint_count": 1 if waypoint is not None else 0,
+        }
+
+
+class MissingWaypointGuidedService(GuidedRouteGraspService):
+    """模拟高德结果未经过 waypoint，用于验证普通规划回退。"""
+
+    def plan_segment_sync(self, points, restriction_policy=None, *, waypoint=None):
+        self.calls.append({
+            "points": [dict(point) for point in points],
+            "waypoint": dict(waypoint) if isinstance(waypoint, dict) else None,
+        })
+        return {
+            "ok": True,
+            "polyline": [dict(points[0]), dict(points[-1])],
+            "distance_m": 700.0,
+            "duration_sec": 140.0,
+            "traffic_status": "畅通",
+            "strategy": "2",
+            "waypoint_count": 1 if waypoint is not None else 0,
+        }
 
 
 class RecordingGraspClient(AmapEtaCorrectClient):
@@ -630,6 +682,33 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(result["strategy"], planner.strategy)
         self.assertEqual(len(result["polyline"]), 2)
 
+    def test_driving_route_planner_sends_single_waypoint(self):
+        planner = RecordingDrivingRoutePlanner([{
+            "status": "1",
+            "route": {
+                "paths": [{
+                    "distance": "500",
+                    "cost": {"duration": "80"},
+                    "steps": [{
+                        "polyline": "113.000000,23.000000;113.000500,23.000500;113.001000,23.001000"
+                    }],
+                }]
+            },
+        }])
+
+        result = planner.plan_segment_sync(
+            [
+                {"lon": 113.0, "lat": 23.0},
+                {"lon": 113.001, "lat": 23.001},
+            ],
+            waypoint={"lon": 113.0005, "lat": 23.0005},
+        )
+
+        query = parse_qs(urlparse(planner.requests[0]).query)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["waypoint_count"], 1)
+        self.assertEqual(query["waypoints"], ["113.000500,23.000500"])
+
     def test_driving_route_planner_plans_segments_and_combines_path(self):
         planner = RecordingDrivingRoutePlanner([
             {
@@ -778,6 +857,149 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(fake_service.calls[0][-1]["lat"], order.o_lat)
         self.assertEqual(fake_service.calls[1][0]["lon"], order.o_lon)
         self.assertEqual(fake_service.calls[1][-1]["lon"], order.d_lon)
+
+    def test_gps_heading_history_keeps_latest_two_valid_samples(self):
+        CoreDispatcher.record_vehicle_gps_sample(
+            self.vehicle,
+            113.0,
+            23.0,
+            timestamp=1000.0,
+        )
+        CoreDispatcher.record_vehicle_gps_sample(
+            self.vehicle,
+            113.0001,
+            23.0,
+            timestamp=1005.0,
+        )
+        pair = CoreDispatcher._valid_gps_heading_pair(
+            self.vehicle.gps_heading_history,
+            current_gps=self.vehicle.gps,
+        )
+
+        self.assertIsNotNone(pair)
+        self.assertEqual(pair[0]["lon"], 113.0)
+        self.assertEqual(pair[1]["lon"], 113.0001)
+
+        CoreDispatcher.record_vehicle_gps_sample(
+            self.vehicle,
+            113.0002,
+            23.0,
+            timestamp=1010.0,
+        )
+        self.assertEqual(len(self.vehicle.gps_heading_history), 2)
+        self.assertEqual(self.vehicle.gps_heading_history[0]["lon"], 113.0001)
+
+    def test_fleet_vehicle_payload_exposes_gps_heading_history(self):
+        self.vehicle.gps_heading_history = [
+            {"lon": 113.0, "lat": 23.0, "timestamp": 1000.0},
+            {"lon": 113.0001, "lat": 23.0, "timestamp": 1005.0},
+        ]
+
+        payload = _vehicle_to_dict(self.vehicle)
+
+        self.assertEqual(payload["gps_heading_history"], self.vehicle.gps_heading_history)
+        self.assertIsNot(payload["gps_heading_history"], self.vehicle.gps_heading_history)
+
+    def test_guided_segments_trim_prefix_and_reuse_original_station_waypoint(self):
+        previous_gps = {"lon": 113.0, "lat": 23.0, "timestamp": 1000.0}
+        current_gps = {"lon": 113.0001, "lat": 23.0, "timestamp": 1005.0}
+        first_station = {"lon": 113.001, "lat": 23.001, "name": "first"}
+        second_station = {"lon": 113.002, "lat": 23.002, "name": "second"}
+        job = {
+            "vehicle_id": "guided-vehicle",
+            "route_version": "guided-v1",
+            "current_gps": {"lon": current_gps["lon"], "lat": current_gps["lat"]},
+            "gps_heading_history": [previous_gps, current_gps],
+            "segments": [
+                {
+                    "type": "O",
+                    "request_id": "guided-order",
+                    "points": [current_gps, first_station],
+                    "amap_request_points": [current_gps, first_station],
+                },
+                {
+                    "type": "D",
+                    "request_id": "guided-order",
+                    "points": [first_station, second_station],
+                    "amap_request_points": [first_station, second_station],
+                },
+            ],
+        }
+        client = GuidedRouteGraspService()
+
+        result = CoreDispatcher._run_route_grasp_job(client, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0]["points"][0]["lon"], previous_gps["lon"])
+        self.assertEqual(client.calls[0]["waypoint"]["lon"], current_gps["lon"])
+        self.assertEqual(result["segments"][0]["points"][0]["lon"], current_gps["lon"])
+        self.assertEqual(result["segments"][0]["distance_m"], 901.0)
+        self.assertEqual(result["segments"][0]["duration_sec"], 181.0)
+        self.assertEqual(result["segments"][0]["metric_scope"], "guided_full_request")
+
+        # 第二段 waypoint 必须是上一业务站点原始坐标，而不是高德抓路后的末点。
+        self.assertEqual(client.calls[1]["waypoint"]["lon"], first_station["lon"])
+        self.assertNotEqual(
+            client.calls[1]["waypoint"]["lon"],
+            result["segments"][0]["points"][-1]["lon"],
+        )
+        self.assertEqual(
+            client.calls[1]["points"][0]["source"],
+            "route_guidance_approach_point",
+        )
+        self.assertEqual(result["segments"][1]["points"][0]["lon"], first_station["lon"])
+        self.assertEqual(
+            result["segments"][1]["guidance_waypoint"]["source"],
+            "previous_original_station",
+        )
+
+        written_segments = CoreDispatcher._trim_grasped_segments_to_position(
+            result["segments"],
+            job["segments"],
+            start_point=current_gps,
+        )
+        self.assertTrue(written_segments[0]["guidance_used"])
+        self.assertTrue(written_segments[0]["guidance_prefix_trimmed"])
+        self.assertEqual(written_segments[0]["metric_scope"], "guided_full_request")
+        self.assertEqual(written_segments[0]["distance_m"], 901.0)
+        self.assertEqual(written_segments[0]["duration_sec"], 181.0)
+        self.assertEqual(
+            written_segments[1]["guidance_waypoint"]["source"],
+            "previous_original_station",
+        )
+
+    def test_guidance_trim_failure_falls_back_to_direct_segment(self):
+        previous_gps = {"lon": 113.0, "lat": 23.0, "timestamp": 1000.0}
+        current_gps = {"lon": 113.0001, "lat": 23.0, "timestamp": 1005.0}
+        station = {"lon": 113.001, "lat": 23.001}
+        job = {
+            "vehicle_id": "fallback-vehicle",
+            "route_version": "fallback-v1",
+            "current_gps": {"lon": current_gps["lon"], "lat": current_gps["lat"]},
+            "gps_heading_history": [previous_gps, current_gps],
+            "segments": [{
+                "type": "O",
+                "request_id": "fallback-order",
+                "points": [current_gps, station],
+                "amap_request_points": [current_gps, station],
+            }],
+        }
+        client = MissingWaypointGuidedService()
+
+        with patch("api.core.log_error") as logged:
+            result = CoreDispatcher._run_route_grasp_job(client, job)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertIsNotNone(client.calls[0]["waypoint"])
+        self.assertIsNone(client.calls[1]["waypoint"])
+        self.assertFalse(result["segments"][0]["guidance_used"])
+        self.assertEqual(
+            result["segments"][0]["guidance_fallback_reason"],
+            "waypoint_not_found_on_polyline",
+        )
+        logged.assert_called_once()
 
     def test_position_update_does_not_auto_pickup_or_mark_pending(self):
         order = make_order(self.city)

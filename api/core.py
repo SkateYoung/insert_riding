@@ -171,6 +171,14 @@ class CoreDispatcher:
     ETA_REFRESH_INTERVAL_SECONDS = 5.0
     ETA_REFRESH_MAX_WORKERS = 4
     ROUTE_GRASP_REFRESH_INTERVAL_SECONDS = 5.0
+    # 高德分段方向连续性参数。GPS 历史只保存在车辆内存中，不参与运行态持久化。
+    GPS_HEADING_HISTORY_MAX_SAMPLES = 2
+    GPS_HEADING_MAX_AGE_SECONDS = 30.0
+    GPS_HEADING_MIN_DISTANCE_M = 5.0
+    GPS_HEADING_MAX_DISTANCE_M = 500.0
+    ROUTE_GUIDANCE_APPROACH_DISTANCE_M = 30.0
+    ROUTE_GUIDANCE_MIN_APPROACH_DISTANCE_M = 5.0
+    ROUTE_GUIDANCE_MAX_WAYPOINT_DISTANCE_M = 50.0
     eta_last_refresh_timestamp = None
     route_grasp_last_refresh_timestamp = None
     eta_service = None
@@ -5448,6 +5456,158 @@ class CoreDispatcher:
         return distance
 
     @staticmethod
+    def record_vehicle_gps_sample(vehicle, lon, lat, timestamp=None):
+        """保存车辆原始 GPS，并维护最近两条方向样本。"""
+        lon = float(lon)
+        lat = float(lat)
+        if not (math.isfinite(lon) and math.isfinite(lat)):
+            return None
+        if isinstance(timestamp, datetime):
+            timestamp = timestamp.timestamp()
+        try:
+            sample_timestamp = float(timestamp if timestamp is not None else time.time())
+        except (TypeError, ValueError):
+            sample_timestamp = time.time()
+        if not math.isfinite(sample_timestamp):
+            sample_timestamp = time.time()
+
+        sample = {"lon": lon, "lat": lat, "timestamp": sample_timestamp}
+        vehicle.gps = {"lon": lon, "lat": lat}
+        history = [
+            copy.deepcopy(item)
+            for item in (getattr(vehicle, "gps_heading_history", None) or [])
+            if isinstance(item, dict)
+            and item.get("lon") is not None
+            and item.get("lat") is not None
+            and item.get("timestamp") is not None
+        ]
+        if history:
+            try:
+                last_timestamp = float(history[-1]["timestamp"])
+                same_position = CoreDispatcher._point_distance_m(history[-1], sample) <= 0.5
+            except (TypeError, ValueError, KeyError):
+                last_timestamp = float("-inf")
+                same_position = False
+            # 乱序样本不进入方向历史；同坐标的新样本替换末项，避免复用旧朝向。
+            if sample_timestamp > last_timestamp:
+                if same_position:
+                    history[-1] = copy.deepcopy(sample)
+                else:
+                    history.append(copy.deepcopy(sample))
+        else:
+            history.append(copy.deepcopy(sample))
+        vehicle.gps_heading_history = history[-CoreDispatcher.GPS_HEADING_HISTORY_MAX_SAMPLES:]
+        return sample
+
+    @staticmethod
+    def _valid_gps_heading_pair(history, current_gps=None):
+        """返回可用于第一分段方向引导的上一条和当前原始 GPS。"""
+        samples = list(history or [])
+        if len(samples) < 2:
+            return None
+        previous = samples[-2]
+        current = samples[-1]
+        try:
+            previous_timestamp = float(previous["timestamp"])
+            current_timestamp = float(current["timestamp"])
+            age_seconds = current_timestamp - previous_timestamp
+            movement_m = CoreDispatcher._point_distance_m(previous, current)
+        except (TypeError, ValueError, KeyError):
+            return None
+        if not (
+            0.0 < age_seconds <= CoreDispatcher.GPS_HEADING_MAX_AGE_SECONDS
+            and CoreDispatcher.GPS_HEADING_MIN_DISTANCE_M
+            <= movement_m
+            <= CoreDispatcher.GPS_HEADING_MAX_DISTANCE_M
+        ):
+            return None
+        if isinstance(current_gps, dict):
+            try:
+                if CoreDispatcher._point_distance_m(current, current_gps) > 2.0:
+                    return None
+            except (TypeError, ValueError, KeyError):
+                return None
+        return copy.deepcopy(previous), copy.deepcopy(current)
+
+    @staticmethod
+    def _nearest_polyline_point(points, target):
+        """查找折线上距离目标坐标最近的已有轨迹点。"""
+        best = None
+        for index, point in enumerate(points or []):
+            if not isinstance(point, dict):
+                continue
+            try:
+                distance_m = CoreDispatcher._point_distance_m(point, target)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if best is None or distance_m < best["distance_m"]:
+                best = {"index": index, "point": copy.deepcopy(point), "distance_m": distance_m}
+        return best
+
+    @staticmethod
+    def _trim_guidance_prefix(points, waypoint):
+        """从 waypoint 最近的高德轨迹点开始保留路线，移除方向参考前缀。"""
+        normalized = [
+            copy.deepcopy(point)
+            for point in (points or [])
+            if isinstance(point, dict)
+            and point.get("lon") is not None
+            and point.get("lat") is not None
+        ]
+        nearest = CoreDispatcher._nearest_polyline_point(normalized, waypoint)
+        if (
+            nearest is None
+            # 引导 origin 本身不能被当成 waypoint，否则方向前缀实际上没有被剔除。
+            or nearest["index"] <= 0
+            or nearest["distance_m"] > CoreDispatcher.ROUTE_GUIDANCE_MAX_WAYPOINT_DISTANCE_M
+        ):
+            return None, nearest
+        trimmed = normalized[nearest["index"]:]
+        if len(trimmed) < 2:
+            return None, nearest
+        return trimmed, nearest
+
+    @staticmethod
+    def _approach_point_before_route_end(points):
+        """沿高德轨迹从终点反向约 30 米提取下一分段的方向参考起点。"""
+        normalized = [
+            copy.deepcopy(point)
+            for point in (points or [])
+            if isinstance(point, dict)
+            and point.get("lon") is not None
+            and point.get("lat") is not None
+        ]
+        if len(normalized) < 2:
+            return None
+
+        target_distance = CoreDispatcher.ROUTE_GUIDANCE_APPROACH_DISTANCE_M
+        accumulated = 0.0
+        for index in range(len(normalized) - 1, 0, -1):
+            end = normalized[index]
+            start = normalized[index - 1]
+            try:
+                edge_distance = CoreDispatcher._point_distance_m(start, end)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if edge_distance <= 0:
+                continue
+            if accumulated + edge_distance >= target_distance:
+                remaining = target_distance - accumulated
+                ratio_from_end = max(0.0, min(1.0, remaining / edge_distance))
+                return {
+                    "lon": float(end["lon"]) + (float(start["lon"]) - float(end["lon"])) * ratio_from_end,
+                    "lat": float(end["lat"]) + (float(start["lat"]) - float(end["lat"])) * ratio_from_end,
+                    "source": "route_guidance_approach_point",
+                }
+            accumulated += edge_distance
+
+        if accumulated >= CoreDispatcher.ROUTE_GUIDANCE_MIN_APPROACH_DISTANCE_M:
+            point = copy.deepcopy(normalized[0])
+            point["source"] = "route_guidance_short_segment_approach"
+            return point
+        return None
+
+    @staticmethod
     def _vehicle_current_route_start_point(vehicle, city_map, start_node):
         """读取车辆当前路网位置，缺失时退回本次 A* 起点节点。"""
         projected_gps = getattr(vehicle, "projected_gps", None) or {}
@@ -5822,6 +5982,19 @@ class CoreDispatcher:
             segment["points"] = points
             segment["source"] = source
             segment["grasp"] = grasp_meta
+            if previous is not None:
+                # 高德结果写回前会按车辆最新 GPS 裁剪轨迹；方向引导诊断字段必须
+                # 从原规划分段透传，否则 /fleet 和平台推送无法判断实际请求方式。
+                for field_name in (
+                    "guidance_used",
+                    "guidance_prefix_trimmed",
+                    "guidance_waypoint",
+                    "guidance_waypoint_distance_m",
+                    "guidance_fallback_reason",
+                    "metric_scope",
+                ):
+                    if field_name in previous:
+                        segment[field_name] = copy.deepcopy(previous.get(field_name))
             if previous is not None and len(points) >= 2:
                 previous_points = previous.get("points") or previous.get("path") or []
                 raw_previous_distance = previous.get("distance_m") or previous.get("distance")
@@ -5847,10 +6020,20 @@ class CoreDispatcher:
                         pass
                 if previous.get("traffic_status") is not None:
                     segment["traffic_status"] = previous.get("traffic_status")
-                segment["distance_m"] = trimmed_distance
-                grasp_meta["distance_m"] = trimmed_distance
-                if trimmed_duration is not None:
-                    grasp_meta["duration_sec"] = trimmed_duration
+                if previous.get("metric_scope") == "guided_full_request":
+                    # 方向参考前缀只从展示轨迹中移除；业务约定距离和耗时仍使用
+                    # 带 waypoint 的完整高德请求指标，不按裁剪后折线重新估算。
+                    segment["distance_m"] = previous_distance
+                    if previous_duration is not None:
+                        segment["duration_sec"] = previous_duration
+                    grasp_meta["distance_m"] = previous_distance
+                    if previous_duration is not None:
+                        grasp_meta["duration_sec"] = previous_duration
+                else:
+                    segment["distance_m"] = trimmed_distance
+                    grasp_meta["distance_m"] = trimmed_distance
+                    if trimmed_duration is not None:
+                        grasp_meta["duration_sec"] = trimmed_duration
                 if segment.get("traffic_status") is not None:
                     grasp_meta["traffic_status"] = segment.get("traffic_status")
             trimmed_segments.append(segment)
@@ -5981,6 +6164,10 @@ class CoreDispatcher:
             "vehicle_id": CoreDispatcher._vehicle_identity(vehicle),
             "route_version": route_version,
             "segments": copy.deepcopy(raw_segments),
+            "current_gps": copy.deepcopy(getattr(vehicle, "gps", None) or {}),
+            "gps_heading_history": copy.deepcopy(
+                getattr(vehicle, "gps_heading_history", None) or []
+            ),
             "restriction_policy": CoreDispatcher._vehicle_restriction_policy(vehicle),
             "restriction_signature": getattr(vehicle, "operation_restriction_policy_signature", None) or "none",
         }
@@ -6753,10 +6940,16 @@ class CoreDispatcher:
             更新 vehicle.gps、projected_gps、last_node、next_node、progress，并写入运行态和轨迹。
         """
         report_timestamp = current_timestamp if current_timestamp is not None else time.time()
-        vehicle.gps = {"lon": float(lon), "lat": float(lat)}
         projection = CoreDispatcher._nearest_road_projection(city_map, lon, lat, None)
         if projection is None:
             return None
+
+        CoreDispatcher.record_vehicle_gps_sample(
+            vehicle,
+            lon,
+            lat,
+            timestamp=report_timestamp,
+        )
 
         vehicle.projected_gps = CoreDispatcher._projection_to_projected_gps(projection)
         if projection.get("edge_u") is not None:
@@ -7256,7 +7449,12 @@ class CoreDispatcher:
             return None
 
         next_node = projection["next_node"]
-        vehicle.gps = {"lon": float(lon), "lat": float(lat)}
+        CoreDispatcher.record_vehicle_gps_sample(
+            vehicle,
+            lon,
+            lat,
+            timestamp=current_timestamp if current_timestamp is not None else time.time(),
+        )
         vehicle.projected_gps = CoreDispatcher._projection_to_projected_gps(projection)
         # 只在真实 GPS 靠近当前下一步接送点时触发一次上下客，避免 GPS 跳跃导致批量完成订单。
         changed_steps = CoreDispatcher._sync_nearby_route_target(
@@ -7386,7 +7584,16 @@ class CoreDispatcher:
         return jobs
 
     @staticmethod
-    def _grasp_route_segment(client, segment, previous_grasped_segment=None, restriction_policy=None):
+    def _grasp_route_segment(
+        client,
+        segment,
+        previous_grasped_segment=None,
+        restriction_policy=None,
+        guidance_origin=None,
+        guidance_waypoint=None,
+        guidance_waypoint_source=None,
+        guidance_context=None,
+    ):
         """对单个路线分段做高德驾车规划。
 
         Args:
@@ -7419,20 +7626,91 @@ class CoreDispatcher:
                 "segment": segment,
             }
 
-        # 只用分段起终点规划
-        if hasattr(client, "plan_segment_sync"):
-            try:
-                driving = client.plan_segment_sync(request_points, restriction_policy=restriction_policy)
-            except TypeError as exc:
-                text = str(exc)
-                if "restriction_policy" in text or "unexpected keyword" in text:
-                    driving = client.plan_segment_sync(request_points)
-                else:
+        def _plan(points_to_plan, waypoint=None):
+            if hasattr(client, "plan_segment_sync"):
+                if waypoint is not None:
+                    return client.plan_segment_sync(
+                        points_to_plan,
+                        restriction_policy=restriction_policy,
+                        waypoint=waypoint,
+                    )
+                try:
+                    return client.plan_segment_sync(
+                        points_to_plan,
+                        restriction_policy=restriction_policy,
+                    )
+                except TypeError as exc:
+                    text = str(exc)
+                    if "restriction_policy" in text or "unexpected keyword" in text:
+                        return client.plan_segment_sync(points_to_plan)
                     raise
-        elif hasattr(client, "driving_eta_sync"):
-            driving = client.driving_eta_sync([request_points[0], request_points[-1]])
+            if hasattr(client, "driving_eta_sync"):
+                return client.driving_eta_sync([points_to_plan[0], points_to_plan[-1]])
+            return {"ok": False, "reason": "missing_plan_segment_sync"}
+
+        guidance_supported = bool(getattr(client, "supports_guided_waypoint", False))
+        guidance_requested = (
+            guidance_supported
+            and isinstance(guidance_origin, dict)
+            and isinstance(guidance_waypoint, dict)
+        )
+        guidance_used = False
+        guidance_trimmed = False
+        guidance_distance_m = None
+        guidance_fallback_reason = None
+        planned_request_points = request_points
+
+        if guidance_requested:
+            planned_request_points = [
+                copy.deepcopy(guidance_origin),
+                copy.deepcopy(request_points[-1]),
+            ]
+            try:
+                driving = _plan(planned_request_points, waypoint=guidance_waypoint)
+            except TypeError:
+                # 自定义测试客户端或旧实现不支持 waypoint 时，保持原分段规划行为。
+                driving = {"ok": False, "reason": "guided_waypoint_not_supported"}
+
+            if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
+                trimmed_points, nearest = CoreDispatcher._trim_guidance_prefix(
+                    driving.get("polyline"),
+                    guidance_waypoint,
+                )
+                guidance_distance_m = nearest.get("distance_m") if nearest else None
+                if trimmed_points:
+                    driving = copy.deepcopy(driving)
+                    driving["polyline"] = trimmed_points
+                    guidance_used = True
+                    guidance_trimmed = True
+                else:
+                    guidance_fallback_reason = "waypoint_not_found_on_polyline"
+                    log_error(
+                        "api.core.route_grasp_guidance_trim_failed",
+                        message="方向引导路线无法从 waypoint 附近可靠裁剪，回退普通分段规划",
+                        context={
+                            **(guidance_context or {}),
+                            "segment_type": segment.get("type"),
+                            "request_id": segment.get("request_id"),
+                            "waypoint_source": guidance_waypoint_source,
+                            "waypoint_distance_m": guidance_distance_m,
+                            "max_waypoint_distance_m": CoreDispatcher.ROUTE_GUIDANCE_MAX_WAYPOINT_DISTANCE_M,
+                        },
+                        level="WARNING",
+                    )
+                    driving = _plan(request_points)
+                    planned_request_points = request_points
+            else:
+                guidance_fallback_reason = (
+                    driving.get("error")
+                    or driving.get("reason")
+                    or driving.get("info")
+                    or "guided_request_failed"
+                ) if isinstance(driving, dict) else "guided_request_failed"
+                driving = _plan(request_points)
+                planned_request_points = request_points
         else:
-            driving = {"ok": False, "reason": "missing_plan_segment_sync"}
+            driving = _plan(request_points)
+
         if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
             grasped = copy.deepcopy(segment)
             grasped["points"] = copy.deepcopy(driving["polyline"])
@@ -7447,12 +7725,27 @@ class CoreDispatcher:
                 "distance_m": grasped["distance_m"],
                 "duration_sec": driving.get("duration_sec"),
                 "traffic_status": driving.get("traffic_status"),
-                "request_points": len(request_points),
+                "request_points": len(planned_request_points) + (1 if guidance_used else 0),
                 "request_point_source": "order_original_coord" if segment.get("amap_request_points") else "astar_path",
                 "waypoint_count": driving.get("waypoint_count", 0),
                 "cached": driving.get("cached"),
                 "error": None,
             }
+            grasped["guidance_used"] = guidance_used
+            grasped["guidance_prefix_trimmed"] = guidance_trimmed
+            grasped["guidance_waypoint"] = (
+                {
+                    "lon": guidance_waypoint.get("lon"),
+                    "lat": guidance_waypoint.get("lat"),
+                    "source": guidance_waypoint_source,
+                }
+                if guidance_used
+                else None
+            )
+            grasped["guidance_waypoint_distance_m"] = guidance_distance_m
+            grasped["metric_scope"] = "guided_full_request" if guidance_used else "direct_request"
+            if guidance_fallback_reason:
+                grasped["guidance_fallback_reason"] = guidance_fallback_reason
             return {"ok": True, "segment": grasped}
 
         reason = "driving_plan_failed"
@@ -7482,7 +7775,42 @@ class CoreDispatcher:
         grasped_segments = []
         errors = []
         restriction_policy = copy.deepcopy(job.get("restriction_policy"))
+        heading_pair = CoreDispatcher._valid_gps_heading_pair(
+            job.get("gps_heading_history"),
+            current_gps=job.get("current_gps"),
+        )
+        first_nonzero_segment = True
+        approach_point = None
+        previous_station_point = None
         for segment in job["segments"]:
+            segment_request_points = copy.deepcopy(
+                segment.get("amap_request_points") or segment.get("points") or []
+            )
+            is_nonzero_segment = False
+            if len(segment_request_points) >= 2:
+                try:
+                    is_nonzero_segment = (
+                        CoreDispatcher._point_distance_m(
+                            segment_request_points[0],
+                            segment_request_points[-1],
+                        ) > 2.0
+                    )
+                except (TypeError, ValueError, KeyError):
+                    is_nonzero_segment = False
+
+            guidance_origin = None
+            guidance_waypoint = None
+            guidance_waypoint_source = None
+            if is_nonzero_segment:
+                if first_nonzero_segment and heading_pair is not None:
+                    guidance_origin, guidance_waypoint = heading_pair
+                    guidance_waypoint_source = "current_original_gps"
+                elif approach_point is not None and previous_station_point is not None:
+                    guidance_origin = approach_point
+                    # 必须使用上一业务终点站原始坐标，不得使用上一段高德 polyline 末点。
+                    guidance_waypoint = previous_station_point
+                    guidance_waypoint_source = "previous_original_station"
+                first_nonzero_segment = False
             try:
                 # 单个分段失败不立即抛出，统一收集错误并返回给车辆状态。
                 previous_grasped_segment = grasped_segments[-1] if grasped_segments else None
@@ -7491,6 +7819,13 @@ class CoreDispatcher:
                     segment,
                     previous_grasped_segment,
                     restriction_policy=restriction_policy,
+                    guidance_origin=guidance_origin,
+                    guidance_waypoint=guidance_waypoint,
+                    guidance_waypoint_source=guidance_waypoint_source,
+                    guidance_context={
+                        "vehicle_id": job.get("vehicle_id"),
+                        "route_version": job.get("route_version"),
+                    },
                 )
             except Exception as exc:
                 log_exception(
@@ -7505,7 +7840,18 @@ class CoreDispatcher:
                 )
                 result = {"ok": False, "reason": str(exc), "segment": segment}
             if result.get("ok"):
-                grasped_segments.append(result["segment"])
+                grasped_segment = result["segment"]
+                grasped_segments.append(grasped_segment)
+                original_station_points = copy.deepcopy(
+                    segment.get("amap_request_points") or segment.get("points") or []
+                )
+                if original_station_points:
+                    previous_station_point = original_station_points[-1]
+                # 同站零距离步骤不改变上一条真实行驶分段提取出的到站方向。
+                if is_nonzero_segment:
+                    approach_point = CoreDispatcher._approach_point_before_route_end(
+                        grasped_segment.get("points") or []
+                    )
             else:
                 errors.append(f"{segment.get('type')}:{segment.get('request_id')}:{result.get('reason')}")
 

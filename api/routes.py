@@ -212,6 +212,11 @@ def _vehicle_to_dict(v):
         "on_board_count": sum(o.passenger_count for o in v.on_board_orders),
         "on_board_orders": [o.request_id for o in v.on_board_orders],
         "gps": v.gps,
+        "gps_heading_history": [
+            dict(sample)
+            for sample in (getattr(v, "gps_heading_history", None) or [])
+            if isinstance(sample, dict)
+        ],
         "projected_gps": getattr(v, "projected_gps", None),
         "idle_target": v.idle_target,
         "idle_forecast": v.idle_forecast,
@@ -3452,7 +3457,12 @@ def update_vehicle_path(vehicle_id):
 
         if CoreDispatcher._is_commute_vehicle(target_vehicle):
             report_time = state.now_timestamp()
-            target_vehicle.gps = {"lon": lon, "lat": lat}
+            CoreDispatcher.record_vehicle_gps_sample(
+                target_vehicle,
+                lon,
+                lat,
+                timestamp=report_time,
+            )
             target_vehicle.projected_gps = {"lon": None, "lat": None}
             target_vehicle.time = report_time
             persistence.record_vehicle_runtime(

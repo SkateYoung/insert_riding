@@ -87,7 +87,10 @@ def _combine_segment_points(segments: list[dict[str, Any]]) -> list[dict[str, An
 
 
 class AmapDrivingRoutePlanner:
+    # CoreDispatcher 通过该能力标记判断客户端是否支持方向引导 waypoint。
     """封装高德 v5 驾车规划接口，用于生成车辆展示路线。"""
+
+    supports_guided_waypoint = True
 
     def __init__(
         self,
@@ -140,8 +143,10 @@ class AmapDrivingRoutePlanner:
         self,
         points: list[dict[str, Any]],
         restriction_policy: dict[str, Any] | None = None,
+        *,
+        waypoint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """同步规划一个分段，只使用分段起终点，不传 A* 中间点。"""
+        """同步规划一个分段，可选传入一个仅用于方向连续性的途经点。"""
         if not self.enabled:
             return {"ok": False, "reason": "missing_api_key"}
         normalized = normalize_points(points)
@@ -170,6 +175,9 @@ class AmapDrivingRoutePlanner:
             "show_fields": "cost,polyline,tmcs",
             "output": "json",
         }
+        normalized_waypoints = normalize_points([waypoint]) if waypoint is not None else []
+        if normalized_waypoints:
+            params["waypoints"] = coord_text(normalized_waypoints[0])
         avoidpolygons = _restriction_avoidpolygons(restriction_policy)
         if avoidpolygons:
             params["avoidpolygons"] = avoidpolygons
@@ -181,7 +189,7 @@ class AmapDrivingRoutePlanner:
             return result
 
         result = self._request_driving_with_qps_retry(params)
-        result["waypoint_count"] = 0
+        result["waypoint_count"] = len(normalized_waypoints)
         result["strategy"] = self.strategy
         result["restriction_policy_signature"] = (
             restriction_policy.get("policy_signature")
