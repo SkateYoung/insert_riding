@@ -190,6 +190,11 @@ class GuidedRouteGraspService:
         route_destination = dict(points[-1])
         # 模拟高德抓路终点与业务原始站点存在轻微偏差。
         route_destination["lon"] = float(route_destination["lon"]) + 0.00004
+        if waypoint is not None:
+            polyline.append({
+                "lon": float(waypoint["lon"]) + (float(route_destination["lon"]) - float(waypoint["lon"])) * 0.2,
+                "lat": float(waypoint["lat"]) + (float(route_destination["lat"]) - float(waypoint["lat"])) * 0.2,
+            })
         polyline.append(route_destination)
         return {
             "ok": True,
@@ -933,7 +938,10 @@ class EtaBackgroundTest(unittest.TestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.calls[0]["points"][0]["lon"], previous_gps["lon"])
         self.assertEqual(client.calls[0]["waypoint"]["lon"], current_gps["lon"])
-        self.assertEqual(result["segments"][0]["points"][0]["lon"], current_gps["lon"])
+        self.assertGreater(
+            CoreDispatcher._point_distance_m(result["segments"][0]["points"][0], current_gps),
+            CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M,
+        )
         self.assertEqual(result["segments"][0]["distance_m"], 901.0)
         self.assertEqual(result["segments"][0]["duration_sec"], 181.0)
         self.assertEqual(result["segments"][0]["metric_scope"], "guided_full_request")
@@ -948,7 +956,24 @@ class EtaBackgroundTest(unittest.TestCase):
             client.calls[1]["points"][0]["source"],
             "route_guidance_approach_point",
         )
-        self.assertEqual(result["segments"][1]["points"][0]["lon"], first_station["lon"])
+        second_segment_start_distance = CoreDispatcher._point_distance_m(
+            result["segments"][1]["points"][0],
+            first_station,
+        )
+        self.assertGreater(
+            second_segment_start_distance,
+            CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M,
+        )
+        self.assertEqual(
+            result["segments"][0]["guidance_start_exclusion_m"],
+            CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M,
+        )
+        self.assertGreaterEqual(result["segments"][0]["guidance_start_points_removed"], 1)
+        self.assertEqual(
+            result["segments"][1]["guidance_start_exclusion_m"],
+            CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M,
+        )
+        self.assertGreaterEqual(result["segments"][1]["guidance_start_points_removed"], 1)
         self.assertEqual(
             result["segments"][1]["guidance_waypoint"]["source"],
             "previous_original_station",
@@ -968,6 +993,35 @@ class EtaBackgroundTest(unittest.TestCase):
             written_segments[1]["guidance_waypoint"]["source"],
             "previous_original_station",
         )
+        self.assertEqual(
+            written_segments[1]["guidance_start_exclusion_m"],
+            CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M,
+        )
+
+    def test_guidance_trim_removes_only_leading_points_inside_station_radius(self):
+        waypoint = {"lon": 113.0, "lat": 23.0}
+        points = [
+            {"lon": 112.9998, "lat": 23.0},
+            {"lon": 113.0, "lat": 23.0},
+            {"lon": 113.00004, "lat": 23.0},
+            {"lon": 113.00012, "lat": 23.0},
+            {"lon": 113.00025, "lat": 23.0},
+        ]
+
+        trimmed, nearest = CoreDispatcher._trim_guidance_prefix(
+            points,
+            waypoint,
+            start_exclusion_distance_m=10.0,
+        )
+
+        self.assertIsNotNone(trimmed)
+        self.assertEqual(nearest["start_points_removed"], 2)
+        self.assertEqual(trimmed[0]["lon"], points[3]["lon"])
+        self.assertGreater(CoreDispatcher._point_distance_m(trimmed[0], waypoint), 10.0)
+        self.assertTrue(all(
+            CoreDispatcher._point_distance_m(point, waypoint) >= 9.8
+            for point in trimmed
+        ))
 
     def test_guidance_trim_failure_falls_back_to_direct_segment(self):
         previous_gps = {"lon": 113.0, "lat": 23.0, "timestamp": 1000.0}

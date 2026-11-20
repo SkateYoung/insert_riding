@@ -57,7 +57,7 @@ class CoreDispatcher:
         "HEAD_INSERTION_PENALTY_DECAY_DISTANCE_M": 1000.0,
         "IDLE_FIRST_PICKUP_WAIT_THRESHOLD_SECONDS": 120.0,
         "PICKUP_ETA_TOLERANCE_SECONDS": 1200.0,
-        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 15 * 60.0,
+        "MAX_PASSENGER_INSERTION_DELAY_SECONDS": 8 * 60.0,
         "ORDER_POOL_PRIORITY_PROMOTION_SECONDS": 3 * 60.0,
     }
     ROUTE_COST_CONFIG_DESCRIPTIONS = {
@@ -179,6 +179,9 @@ class CoreDispatcher:
     ROUTE_GUIDANCE_APPROACH_DISTANCE_M = 30.0
     ROUTE_GUIDANCE_MIN_APPROACH_DISTANCE_M = 5.0
     ROUTE_GUIDANCE_MAX_WAYPOINT_DISTANCE_M = 50.0
+    # 后续分段裁掉上一业务站点附近的抓路点，避免分段轨迹开头仍堆在站点周围。
+    # 第一段 waypoint 是车辆当前 GPS，不应用该净空距离。
+    ROUTE_GUIDANCE_STATION_START_EXCLUSION_M = 10.0
     eta_last_refresh_timestamp = None
     route_grasp_last_refresh_timestamp = None
     eta_service = None
@@ -5545,8 +5548,8 @@ class CoreDispatcher:
         return best
 
     @staticmethod
-    def _trim_guidance_prefix(points, waypoint):
-        """从 waypoint 最近的高德轨迹点开始保留路线，移除方向参考前缀。"""
+    def _trim_guidance_prefix(points, waypoint, start_exclusion_distance_m=0.0):
+        """移除 waypoint 前缀，并可继续裁掉 waypoint 周围的分段起始点。"""
         normalized = [
             copy.deepcopy(point)
             for point in (points or [])
@@ -5563,6 +5566,30 @@ class CoreDispatcher:
         ):
             return None, nearest
         trimmed = normalized[nearest["index"]:]
+        exclusion_distance = max(0.0, float(start_exclusion_distance_m or 0.0))
+        removed_count = 0
+        if exclusion_distance > 0:
+            first_outside_index = None
+            for index, point in enumerate(trimmed):
+                try:
+                    distance_m = CoreDispatcher._point_distance_m(point, waypoint)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if distance_m > exclusion_distance:
+                    first_outside_index = index
+                    break
+                removed_count = index + 1
+
+            if first_outside_index is None:
+                nearest["start_exclusion_distance_m"] = exclusion_distance
+                nearest["start_points_removed"] = removed_count
+                return None, nearest
+
+            # 只保留高德原始返回点，不在 10 米边界上额外插入虚拟坐标。
+            trimmed = trimmed[first_outside_index:]
+
+        nearest["start_exclusion_distance_m"] = exclusion_distance
+        nearest["start_points_removed"] = removed_count
         if len(trimmed) < 2:
             return None, nearest
         return trimmed, nearest
@@ -5990,6 +6017,8 @@ class CoreDispatcher:
                     "guidance_prefix_trimmed",
                     "guidance_waypoint",
                     "guidance_waypoint_distance_m",
+                    "guidance_start_exclusion_m",
+                    "guidance_start_points_removed",
                     "guidance_fallback_reason",
                     "metric_scope",
                 ):
@@ -7657,6 +7686,8 @@ class CoreDispatcher:
         guidance_used = False
         guidance_trimmed = False
         guidance_distance_m = None
+        guidance_start_exclusion_m = 0.0
+        guidance_start_points_removed = 0
         guidance_fallback_reason = None
         planned_request_points = request_points
 
@@ -7672,11 +7703,18 @@ class CoreDispatcher:
                 driving = {"ok": False, "reason": "guided_waypoint_not_supported"}
 
             if isinstance(driving, dict) and driving.get("ok") and len(driving.get("polyline") or []) >= 2:
+                # 第一段当前 GPS 与后续分段上一业务站点使用相同裁剪口径：
+                # 最终 points 均移除 waypoint 直线距离 10 米内的连续抓路点。
+                guidance_start_exclusion_m = CoreDispatcher.ROUTE_GUIDANCE_STATION_START_EXCLUSION_M
                 trimmed_points, nearest = CoreDispatcher._trim_guidance_prefix(
                     driving.get("polyline"),
                     guidance_waypoint,
+                    start_exclusion_distance_m=guidance_start_exclusion_m,
                 )
                 guidance_distance_m = nearest.get("distance_m") if nearest else None
+                guidance_start_points_removed = (
+                    int(nearest.get("start_points_removed") or 0) if nearest else 0
+                )
                 if trimmed_points:
                     driving = copy.deepcopy(driving)
                     driving["polyline"] = trimmed_points
@@ -7743,6 +7781,8 @@ class CoreDispatcher:
                 else None
             )
             grasped["guidance_waypoint_distance_m"] = guidance_distance_m
+            grasped["guidance_start_exclusion_m"] = guidance_start_exclusion_m
+            grasped["guidance_start_points_removed"] = guidance_start_points_removed
             grasped["metric_scope"] = "guided_full_request" if guidance_used else "direct_request"
             if guidance_fallback_reason:
                 grasped["guidance_fallback_reason"] = guidance_fallback_reason

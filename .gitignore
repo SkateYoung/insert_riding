@@ -1,2 +1,6 @@
 database/mysql_ssl_test/
 runtime_logs/fleet_push_snapshots.jsonl
+__pycache__/
+*.pyc
+runtime_logs
+test/

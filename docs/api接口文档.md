@@ -373,7 +373,7 @@ runtime_logs/error_YYYYMMDD.txt
 }
 ```
 
-> 高德分段规划可能使用原始 GPS 或上一站点提供行驶方向。`points` 只保留当前 GPS/上一业务站点之后的导航轨迹，不包含方向参考前缀；`distance_m` 和 `duration_sec` 仍是本次带途经点请求的完整高德返回值。方向诊断字段包括 `guidance_used`、`guidance_prefix_trimmed`、`guidance_waypoint`、`guidance_waypoint_distance_m` 和 `metric_scope`。
+> 高德分段规划可能使用原始 GPS 或上一站点提供行驶方向。`points` 只保留当前 GPS/上一业务站点之后的导航轨迹，不包含方向参考前缀；第一分段和后续站点间分段都会剔除各自起点 10 米内的连续抓路点，并从第一个位于 10 米范围外的高德原始轨迹点开始返回，不插入虚拟边界点。`distance_m` 和 `duration_sec` 仍是本次带途经点请求的完整高德返回值。方向诊断字段包括 `guidance_used`、`guidance_prefix_trimmed`、`guidance_waypoint`、`guidance_waypoint_distance_m`、`guidance_start_exclusion_m`、`guidance_start_points_removed` 和 `metric_scope`。
 
 ### 3.3 路径更新
 
